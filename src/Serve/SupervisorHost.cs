@@ -154,12 +154,22 @@ public static class SupervisorHost
         {
             var self = Environment.ProcessPath;
             if (self is null) return;
-            var psi = new ProcessStartInfo
+            var psi = new ProcessStartInfo { FileName = self };
+            if (OperatingSystem.IsWindows())
             {
-                FileName = self,
-                UseShellExecute = true,
-                WindowStyle = ProcessWindowStyle.Hidden,
-            };
+                // Detached with no console window — survives this supervisor's Ctrl+C.
+                psi.UseShellExecute = true;
+                psi.WindowStyle = ProcessWindowStyle.Hidden;
+            }
+            else
+            {
+                // On POSIX, exec our own binary directly (UseShellExecute=true would route
+                // through the desktop file handler instead). The hub outlives our normal exit
+                // and self-exits when idle, so the worst case is a stray Ctrl+C taking it down
+                // and the next `serve` re-launching it.
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+            }
             psi.ArgumentList.Add("hub");
             psi.ArgumentList.Add("--port");
             psi.ArgumentList.Add(port.ToString());

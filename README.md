@@ -29,19 +29,32 @@ backends, so a full-stack agent can drive both at once.
 
 ## Getting Started
 
-Install the tools from NuGet as **.NET global tools**:
+Pick whichever install matches your stack — both work on **Windows, macOS and Linux**.
 
-```powershell
+**.NET global tools** — for devs who have the .NET SDK (e.g. full-stack); installs both tools:
+
+```bash
 dotnet tool install --global KY.AI.Ng
 dotnet tool install --global KY.AI.Net
 ```
 
-That puts `ky-ai-ng` and `ky-ai-dotnet` on your `PATH` (via `%USERPROFILE%\.dotnet\tools`); update
-later with `dotnet tool update --global KY.AI.Ng`. They're framework-dependent, so you need the
-**.NET 10 runtime** installed. (To run a build straight from this repo instead, see
-[Building from source](#building-from-source).)
+This puts `ky-ai-ng` and `ky-ai-dotnet` on your `PATH` (via the .NET tools dir —
+`%USERPROFILE%\.dotnet\tools` on Windows, `~/.dotnet/tools` on macOS/Linux); update later with
+`dotnet tool update --global KY.AI.Ng`. These are framework-dependent, so the **.NET 10 runtime**
+must be installed.
 
-With both tools on your `PATH`:
+**npm** — for Angular devs with **no .NET installed**; `ky-ai-ng` ships a self-contained binary
+(the runtime is bundled in) for each platform:
+
+```bash
+npm install --global @ky-ai/ng     # or add it as a devDependency in your Angular project
+```
+
+This puts `ky-ai-ng` on your `PATH` with nothing else to install. (`ky-ai-dotnet` stays
+.NET-tool-only — its users already have .NET.) To run a build straight from this repo instead, see
+[Building from source](#building-from-source).
+
+With the tool(s) on your `PATH`:
 
 1. **Run a supervisor** per app, from the app's own folder — the hub auto-starts on first use:
 
@@ -96,6 +109,14 @@ ky-ai-ng serve
 dotnet new tool-manifest                     # once per repo (creates .config\dotnet-tools.json)
 dotnet tool install KY.AI.Ng --version 21.*  # pinned for this repo only
 dotnet ky-ai-ng serve                        # runs the pinned version
+```
+
+On the **npm** side it's even simpler: pin `@ky-ai/ng` to the matching major as a project
+devDependency and run it through `npx`, so it's versioned with the rest of the Angular workspace:
+
+```bash
+npm install --save-dev @ky-ai/ng@21   # pinned in this project's package.json
+npx ky-ai-ng serve                     # runs the pinned version
 ```
 
 A `dotnet tool install --tool-path <dir>` install (or the copy in the NuGet global-packages cache,

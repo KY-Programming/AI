@@ -178,10 +178,13 @@ internal sealed class DevServer : IDisposable
 
     private bool IsSource(string path)
     {
+        // Normalize to forward slashes so the exclude segments (e.g. "/node_modules/") match
+        // regardless of the OS path separator — FileSystemWatcher hands back "\" paths on Windows.
+        var norm = path.Replace('\\', '/');
         foreach (var seg in _excludeSegments)
-            if (path.Contains(seg, StringComparison.OrdinalIgnoreCase)) return false;
+            if (norm.Contains(seg, StringComparison.OrdinalIgnoreCase)) return false;
         foreach (var ext in _sourceExt)
-            if (path.EndsWith(ext, StringComparison.OrdinalIgnoreCase)) return true;
+            if (norm.EndsWith(ext, StringComparison.OrdinalIgnoreCase)) return true;
         return false;
     }
 

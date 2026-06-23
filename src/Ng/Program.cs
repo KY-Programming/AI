@@ -20,7 +20,7 @@ internal static class Program
         DefaultHubPort = DefaultHubPort,
         Matcher = new NgBuildMatcher(),
         SourceExtensions = new[] { ".ts", ".html", ".scss", ".css", ".sass", ".less" },
-        WatchExcludeSegments = new[] { "\\node_modules\\", "\\.angular\\", "\\dist\\" },
+        WatchExcludeSegments = new[] { "/node_modules/", "/.angular/", "/dist/" },
         // Prefer the `src` subtree (avoids node_modules churn); fall back to the working dir.
         WatchRoot = wd => { var src = Path.Combine(wd, "src"); return Directory.Exists(src) ? src : wd; },
         DefaultTimeoutMs = 60000,

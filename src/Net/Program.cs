@@ -20,7 +20,7 @@ internal static class Program
         DefaultHubPort = DefaultHubPort,
         Matcher = new DotnetBuildMatcher(),
         SourceExtensions = new[] { ".cs", ".razor", ".cshtml", ".csproj" },
-        WatchExcludeSegments = new[] { "\\bin\\", "\\obj\\", "\\.git\\", "\\node_modules\\" },
+        WatchExcludeSegments = new[] { "/bin/", "/obj/", "/.git/", "/node_modules/" },
         WatchRoot = wd => wd,
         DefaultTimeoutMs = 90000,  // backend builds can be slow; raise for a cold first build
         DefaultQuietMs = 500,

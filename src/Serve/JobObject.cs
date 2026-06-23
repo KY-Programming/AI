@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 
 namespace KY.AI.Serve;
 
@@ -7,12 +8,20 @@ namespace KY.AI.Serve;
 // THIS process dies, including a hard TerminateProcess (Rider's Stop button) that runs
 // none of our graceful handlers. This guarantees the dev-server child tree can never
 // orphan and hold the port, regardless of how the supervisor is stopped.
+//
+// Windows only. Linux/macOS have no equivalent "die when the owner dies even on a hard
+// kill" primitive, so this is a no-op there — graceful teardown (Ctrl+C / SIGTERM / the
+// /shutdown endpoint) still reaps the whole tree via Process.Kill(entireProcessTree: true)
+// in DevServer/OneShot. Only a SIGKILL of the supervisor itself could orphan the tree on
+// POSIX, where the hub noticing a missing registration is the backstop.
 internal sealed class JobObject : IDisposable
 {
     private readonly nint _handle;
 
     public JobObject()
     {
+        if (!OperatingSystem.IsWindows()) return;
+
         _handle = CreateJobObject(nint.Zero, null);
         if (_handle == nint.Zero) return;
 
@@ -38,7 +47,7 @@ internal sealed class JobObject : IDisposable
     // if it fails we still have the graceful Ctrl+C / shutdown tree-kill as a fallback.
     public void Assign(System.Diagnostics.Process process)
     {
-        if (_handle == nint.Zero) return;
+        if (!OperatingSystem.IsWindows() || _handle == nint.Zero) return;
         try { AssignProcessToJobObject(_handle, process.Handle); } catch { }
     }
 
@@ -46,27 +55,31 @@ internal sealed class JobObject : IDisposable
     // so a ConPTY-spawned shell can be reaped without first wrapping it in a Process.
     public void Assign(nint hProcess)
     {
-        if (_handle == nint.Zero || hProcess == nint.Zero) return;
+        if (!OperatingSystem.IsWindows() || _handle == nint.Zero || hProcess == nint.Zero) return;
         try { AssignProcessToJobObject(_handle, hProcess); } catch { }
     }
 
     public void Dispose()
     {
-        if (_handle != nint.Zero) CloseHandle(_handle);
+        if (OperatingSystem.IsWindows() && _handle != nint.Zero) CloseHandle(_handle);
     }
 
     private const int JobObjectExtendedLimitInformation = 9;
     private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
 
+    [SupportedOSPlatform("windows")]
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern nint CreateJobObject(nint lpJobAttributes, string? lpName);
 
+    [SupportedOSPlatform("windows")]
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetInformationJobObject(nint hJob, int infoType, nint lpJobObjectInfo, uint cbJobObjectInfoLength);
 
+    [SupportedOSPlatform("windows")]
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool AssignProcessToJobObject(nint hJob, nint hProcess);
 
+    [SupportedOSPlatform("windows")]
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(nint hObject);
 
