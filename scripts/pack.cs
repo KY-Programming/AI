@@ -171,6 +171,12 @@ static void WritePlatformJson(string path, string name, string version, string d
     w.WriteString("version", version);
     w.WriteString("description", description);
     w.WriteString("license", "MIT");
+    w.WriteString("author", "KY-Programming");
+    w.WriteString("homepage", "https://github.com/KY-Programming/AI");
+    w.WriteStartObject("repository");
+    w.WriteString("type", "git");
+    w.WriteString("url", "git+https://github.com/KY-Programming/AI.git");
+    w.WriteEndObject();
     w.WriteStartArray("os"); w.WriteStringValue(os); w.WriteEndArray();
     w.WriteStartArray("cpu"); w.WriteStringValue(cpu); w.WriteEndArray();
     w.WriteStartArray("files"); w.WriteStringValue("bin"); w.WriteEndArray();
@@ -186,6 +192,12 @@ static void WriteMainJson(string path, string version, SortedDictionary<string, 
     w.WriteString("version", version);
     w.WriteString("description", "Run Angular dev servers with build state and logs exposed to AI agents over MCP. Self-contained; no .NET runtime required.");
     w.WriteString("license", "MIT");
+    w.WriteString("author", "KY-Programming");
+    w.WriteString("homepage", "https://github.com/KY-Programming/AI");
+    w.WriteStartObject("repository");
+    w.WriteString("type", "git");
+    w.WriteString("url", "git+https://github.com/KY-Programming/AI.git");
+    w.WriteEndObject();
     w.WriteStartObject("bin"); w.WriteString("ky-ai-ng", "bin/ky-ai-ng.js"); w.WriteEndObject();
     w.WriteStartArray("files"); w.WriteStringValue("bin"); w.WriteStringValue("README.md"); w.WriteEndArray();
     w.WriteStartObject("optionalDependencies");

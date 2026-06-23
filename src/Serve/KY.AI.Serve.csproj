@@ -13,16 +13,23 @@
     <PackageId>KY.AI.Serve</PackageId>
     <Authors>KY-Programming</Authors>
     <Company>KY-Programming</Company>
+    <Product>KY.AI</Product>
+    <Copyright>2026 - KY-Programming</Copyright>
     <Description>Shared hub, supervisor and MCP engine behind the KY.AI dev-loop tools.</Description>
     <PackageTags>mcp;ai;dev-server</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/KY-Programming/AI</PackageProjectUrl>
+    <PackageIcon>icon.png</PackageIcon>
+    <RepositoryUrl>https://github.com/KY-Programming/AI</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
   </PropertyGroup>
 
   <!-- Ship this README as the package readme (rendered on nuget.org). Use Update,
        not Include: the SDK already globs README.md as a None item. -->
   <ItemGroup>
     <None Update="README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\assets\icon.png" Pack="true" PackagePath="\" Visible="false" />
   </ItemGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
