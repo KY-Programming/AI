@@ -43,6 +43,8 @@ ScaffoldingReadMe.txt
 ~$*
 *~
 CodeCoverage/
+.idea
+.claude
 
 # MSBuild Binary and Structured Log
 *.binlog
@@ -55,3 +57,6 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# Aggregated publish output (all KY.AI tool exes, shared on PATH)
+dist/

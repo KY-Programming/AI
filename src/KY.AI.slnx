@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="Serve/KY.AI.Serve.csproj" />
+  <Project Path="Ng/KY.AI.Ng.csproj" />
+  <Project Path="Net/KY.AI.Net.csproj" />
+  <Project Path="Terminal/KY.AI.Terminal.csproj" />
+  <Project Path="Terminal.Tests/KY.AI.Terminal.Tests.csproj" />
+</Solution>
