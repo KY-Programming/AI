@@ -6,13 +6,14 @@
 //   scripts\publish.cmd --skip-nuget          npm only
 //   scripts\publish.cmd --source <url> --api-key <key>
 //
-// Run scripts\pack.cmd first. NuGet: pushes artifacts\*.nupkg (key from --api-key or the
-// NUGET_API_KEY env var; --skip-duplicate makes a re-push a no-op). npm: publishes each
+// Run scripts\pack.cmd first. NuGet: pushes artifacts\*.nupkg (key from --api-key, the
+// NUGET_API_KEY env var, or an interactive hidden prompt; --skip-duplicate no-ops a re-push). npm: publishes each
 // package under artifacts\npm\ with `npm publish --access public` (auth via your npm login /
 // .npmrc), platform packages before the main @ky-ai/ng so its optional deps already exist.
 
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Text;
 
 const string DefaultSource = "https://api.nuget.org/v3/index.json";
 
@@ -60,9 +61,12 @@ static int PushNuget(string root, string artifacts, string source, string? apiKe
     foreach (var p in packages) Console.WriteLine($"  - {Path.GetFileName(p)}");
     if (dryRun) return 0;
 
+    // No key from --api-key or NUGET_API_KEY — prompt for it (hidden input).
+    if (string.IsNullOrWhiteSpace(apiKey))
+        apiKey = ReadSecret($"NuGet API key for {source} (input hidden): ");
     if (string.IsNullOrWhiteSpace(apiKey))
     {
-        Console.Error.WriteLine("no API key — set NUGET_API_KEY or pass --api-key <key>. (Nothing pushed.)");
+        Console.Error.WriteLine("no API key entered — nothing pushed.");
         return 1;
     }
 
@@ -109,6 +113,32 @@ static int PublishNpm(string root, string artifacts, bool dryRun)
 static string NextArg(string[] args, ref int i)
     => i + 1 < args.Length ? args[++i] : throw new ArgumentException($"missing value for {args[i]}");
 
+// Read a secret without echoing it. Falls back to a plain read when stdin is redirected
+// (piped/non-interactive), where key-by-key masking isn't possible.
+static string ReadSecret(string prompt)
+{
+    Console.Write(prompt);
+    if (Console.IsInputRedirected)
+        return (Console.ReadLine() ?? "").Trim();
+
+    var sb = new StringBuilder();
+    while (true)
+    {
+        var key = Console.ReadKey(intercept: true);
+        if (key.Key == ConsoleKey.Enter) { Console.WriteLine(); break; }
+        if (key.Key == ConsoleKey.Backspace)
+        {
+            if (sb.Length > 0) { sb.Length--; Console.Write("\b \b"); }
+        }
+        else if (!char.IsControl(key.KeyChar))
+        {
+            sb.Append(key.KeyChar);
+            Console.Write('*');
+        }
+    }
+    return sb.ToString().Trim();
+}
+
 static int Run(string cwd, string exe, params string[] args)
 {
     var psi = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = cwd };
@@ -148,7 +178,7 @@ static void PrintUsage()
 
         Options:
           --source <url>    NuGet feed (default: nuget.org)
-          --api-key <key>   NuGet API key (default: NUGET_API_KEY env var)
+          --api-key <key>   NuGet API key (else NUGET_API_KEY env var, else prompted)
           --skip-nuget      publish npm only
           --skip-npm        publish NuGet only
           --dry-run, -n     validate/list only; push nothing (npm uses `npm publish --dry-run`)
