@@ -3,14 +3,14 @@ using KY.AI.Serve;
 namespace KY.AI.Ng;
 
 // ky-ai-ng — run the Angular CLI with output mirrored for agents.
-//   hub   : control plane — one MCP server + a registry of running supervisors
-//   serve : a frontend's dev-server supervisor (rolling log + REST control + auto-register)
-//   other : one-shot tee of any `ng` command (build, version, ...)
+//   serve    : a frontend's dev-server supervisor (rolling log + REST control + auto-register)
+//   shutdown : stop the hub and every supervisor it manages
+//   hub      : the control plane (auto-managed — started on demand, not run by hand)
+//   other    : one-shot tee of any `ng` command (build, version, ...)
 // The hub + supervisor + shutdown machinery lives in the shared KY.AI.Serve library; this file is
 // just the Angular-specific seam: CLI resolution, the build matcher, names and ports.
 internal static class Program
 {
-    private const string DefaultOneShotLog = "ng.log";
     private const int DefaultHubPort = 5101;
 
     private static readonly SupervisorConfig Supervisor = new()
@@ -47,6 +47,8 @@ internal static class Program
 
         if (string.Equals(args[0], "hub", StringComparison.OrdinalIgnoreCase))
             return await HubHost.RunAsync(HubCfg, args[1..]);
+        if (string.Equals(args[0], "shutdown", StringComparison.OrdinalIgnoreCase))
+            return await ShutdownCommand.RunAsync("ky-ai-ng", DefaultHubPort, args[1..]);
         if (string.Equals(args[0], "serve", StringComparison.OrdinalIgnoreCase))
             return await RunServeAsync(args[1..]);
         return RunOneShot(args);
@@ -57,7 +59,12 @@ internal static class Program
     {
         var o = ServeCommandLine.Parse(rest, DefaultHubPort);
         var cwd = Environment.CurrentDirectory;
-        var (fileName, prefix) = ResolveCli(cwd);
+
+        string fileName;
+        IReadOnlyList<string> prefix;
+        string workDir;
+        try { (fileName, prefix, workDir) = ResolveNgCli(cwd); }
+        catch (Exception ex) { Console.Error.WriteLine($"ky-ai-ng: {ex.Message}"); return 1; }
 
         var serveArgs = new List<string> { "serve" };
         serveArgs.AddRange(o.Extra);
@@ -68,7 +75,7 @@ internal static class Program
         var options = new SupervisorOptions
         {
             Name = o.Name ?? DeriveName(cwd),
-            WorkingDir = cwd,
+            WorkingDir = workDir,
             ChildFileName = fileName,
             ChildArgs = childArgs,
             BannerCommand = "ng " + string.Join(' ', serveArgs),
@@ -91,23 +98,19 @@ internal static class Program
         return dir.Name;
     }
 
-    // ── one-shot: tee any ng command to console + a full log file ─────────────
+    // ── one-shot: tee any ng command to console (+ a log file only when --log-file is given) ──
     private static int RunOneShot(string[] args)
     {
         var list = args.ToList();
 
-        string? logArg = null;
-        var li = list.FindIndex(a => a is "--log" or "-l");
-        if (li >= 0 && li + 1 < list.Count)
+        string? logFile = null;
+        var logLines = 200;
+        for (var i = 0; i < list.Count; i++)
         {
-            logArg = list[li + 1];
-            list.RemoveAt(li + 1);
-            list.RemoveAt(li);
-        }
-        else if (list.Count > 0 && list[^1].EndsWith(".log", StringComparison.OrdinalIgnoreCase))
-        {
-            logArg = list[^1];
-            list.RemoveAt(list.Count - 1);
+            if (list[i] == "--log-file" && i + 1 < list.Count)
+            { logFile = list[i + 1]; list.RemoveAt(i + 1); list.RemoveAt(i); i--; }
+            else if (list[i] == "--log-lines" && i + 1 < list.Count && int.TryParse(list[i + 1], out var n))
+            { logLines = Math.Max(0, n); list.RemoveAt(i + 1); list.RemoveAt(i); i--; }
         }
 
         if (list.Count == 0)
@@ -116,25 +119,42 @@ internal static class Program
             return 1;
         }
 
-        var logPath = Path.GetFullPath(logArg ?? DefaultOneShotLog);
-        var (fileName, prefix) = ResolveCli(Environment.CurrentDirectory);
-        return OneShot.Run("ky-ai-ng", fileName, prefix.Concat(list), logPath);
+        string fileName;
+        IReadOnlyList<string> prefix;
+        string workDir;
+        try { (fileName, prefix, workDir) = ResolveNgCli(Environment.CurrentDirectory); }
+        catch (Exception ex) { Console.Error.WriteLine($"ky-ai-ng: {ex.Message}"); return 1; }
+
+        var logPath = logFile is null ? null : Path.GetFullPath(logFile);
+        return OneShot.Run("ky-ai-ng", fileName, prefix.Concat(list), logPath, logLines, workingDir: workDir);
     }
 
-    // Prefer the project-local CLI (its ng.js via node); fall back to a global `ng`.
-    private static (string FileName, IReadOnlyList<string> PrefixArgs) ResolveCli(string startDir)
+    // Resolve the project-local Angular CLI (its ng.js, run via node) and the directory to run it in.
+    // First walk up from cwd; if nothing is found, descend into a `ClientApp` subfolder (the
+    // convention the name-derivation assumes — so `serve` works from a full-stack repo root too).
+    // Throws if neither yields node_modules\@angular\cli — no silent global-`ng` fallback.
+    private static (string FileName, IReadOnlyList<string> PrefixArgs, string WorkingDir) ResolveNgCli(string cwd)
     {
-        var dir = startDir;
+        static string NgJs(string root) => Path.Combine(root, "node_modules", "@angular", "cli", "bin", "ng.js");
+
+        // 1) the nearest CLI walking up from cwd — ng itself finds angular.json from here.
+        var dir = cwd;
         while (true)
         {
-            var ngJs = Path.Combine(dir, "node_modules", "@angular", "cli", "bin", "ng.js");
-            if (File.Exists(ngJs)) return ("node", new[] { ngJs });
-
+            if (File.Exists(NgJs(dir))) return ("node", new[] { NgJs(dir) }, cwd);
             var parent = Path.GetDirectoryName(dir);
             if (string.IsNullOrEmpty(parent) || parent == dir) break;
             dir = parent;
         }
-        return ("cmd.exe", new[] { "/c", "ng" });
+
+        // 2) a `ClientApp` workspace one level down — run ng there, where angular.json lives.
+        var clientApp = Path.Combine(cwd, "ClientApp");
+        if (File.Exists(NgJs(clientApp))) return ("node", new[] { NgJs(clientApp) }, clientApp);
+
+        throw new InvalidOperationException(
+            $"no Angular CLI found. Looked for node_modules\\@angular\\cli in '{cwd}' and its parents, " +
+            $"and in '{clientApp}'. Run ky-ai-ng from your Angular workspace (where angular.json is) or " +
+            "its parent (with a ClientApp subfolder), and make sure dependencies are installed (npm install).");
     }
 
     private static void PrintHelp()
@@ -142,30 +162,30 @@ internal static class Program
         Console.WriteLine("""
         ky-ai-ng — run the Angular CLI with output mirrored for agents.
 
-        HUB — the control plane agents talk to (one MCP server + supervisor registry).
-          A `serve` auto-starts it on demand; you never run it yourself.
-          MCP tools (each takes a `project`): list · status · wait_for_build · restart · stop · start · tail · set_log_lines · shutdown
-          shutdown (MCP) or POST/GET /shutdown stops the hub itself (frees the published binary).
-
-        SERVE — a frontend's dev server (run one per app, registers with the hub):
+        SERVE — a frontend's dev server (run one per app; registers with the hub for the agent):
           ky-ai-ng serve [options]
             --name <id>         Project name in the hub (default: parent folder of ClientApp)
-            --hub <url>         Hub URL (default: http://127.0.0.1:5101)
-            --log-lines <N>     Lines kept in the in-memory log buffer (default: 200)
+            --log-lines <N>     Lines kept in the in-memory log buffer (default: 200; 0 = unlimited)
             --log-file <file>   Also mirror the buffer to a file (default: off — MCP serves logs)
-            --control-port <N>  Local REST control port (default: OS-assigned)
-            --no-hub            Buffer-only; do not register with a hub
-            --no-hub-autostart  Use a hub if up, but don't auto-start one
+            --rest-port <N>     Local REST control port (default: OS-assigned)
+            --hub-port <N>      Hub port to register with (default: 5101; rarely needed — does not start a hub)
+            --no-hub            Standalone: buffer + local REST only; no hub, no agent access
           Anything else after `serve` is forwarded to `ng serve` (e.g. --port 4015).
-          If no hub is running, serve auto-starts one (detached) unless --no-hub-autostart.
-          Ctrl+C stops the dev server (whole tree) and deregisters from the hub.
+          Stopping (Ctrl+C or a hard kill) reaps the whole ng tree and deregisters from the hub.
 
-        ONE-SHOT — tee any ng command to console + a full log file:
-          ky-ai-ng build --configuration production prod-build.log
+        SHUTDOWN — stop the hub and every frontend it supervises:
+          ky-ai-ng shutdown
+          To stop a single app, stop its process in your IDE instead.
+
+        ONE-SHOT — tee any other ng command to the console (and a log file with --log-file):
+          ky-ai-ng build --configuration production --log-file prod-build.log
           ky-ai-ng version
+          Runs once and exits; not supervised and invisible to the agent (prints a reminder).
 
-        The Angular CLI is resolved from the nearest node_modules\@angular\cli
-        (run via node); if none is found, a global `ng` on PATH is used.
+        The Angular CLI (node_modules\@angular\cli) is found by searching up from the current
+        directory, then in a ./ClientApp subfolder; ky-ai-ng errors if neither has it (no global
+        `ng` fallback). An MCP hub auto-starts on demand and self-exits when idle — you never run
+        it yourself. All HTTP is loopback-only.
         """);
     }
 }

@@ -94,13 +94,28 @@ internal static class Hub
         }
     }
 
-    // Gracefully stop the hub process. Scheduled a beat later so the MCP/REST response flushes
-    // before the host tears down.
-    public static string RequestShutdown()
+    // Tear down the whole stack: tell every registered supervisor to exit (each deregisters and
+    // kills its dev-server tree), then stop the hub itself. This backs `<tool> shutdown`, the
+    // shutdown MCP tool, and POST/GET /shutdown — a `shutdown` means "stop everything".
+    public static async Task<string> ShutdownAllAsync()
     {
+        var regs = Registry.All();
+        await Task.WhenAll(regs.Select(async r =>
+        {
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                using var req = new HttpRequestMessage(HttpMethod.Post, r.ControlUrl.TrimEnd('/') + "/shutdown");
+                using var resp = await Http.SendAsync(req, cts.Token);
+            }
+            catch { /* already gone — nothing to stop */ }
+        }));
+
+        // Stop the hub a beat later so this response flushes before the host tears down.
         var hook = ShutdownHook;
         _ = Task.Run(async () => { await Task.Delay(250); hook?.Invoke(); });
-        return JsonSerializer.Serialize(new { ok = true, message = "hub shutting down" }, Json);
+        return JsonSerializer.Serialize(
+            new { ok = true, stopped = regs.Count, message = $"hub and {regs.Count} supervisor(s) shutting down" }, Json);
     }
 
     private static string UnknownProject(string project) => JsonSerializer.Serialize(new

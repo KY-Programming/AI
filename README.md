@@ -9,41 +9,15 @@ one **hub** per stack plus a **supervisor** per app, controllable over MCP.
 | [`KY.AI.Net`](src/Net/README.md) | `ky-ai-dotnet` | the .NET CLI (`dotnet run` / `dotnet build`) — backends |
 | `KY.AI.Serve` | — | the shared hub / supervisor / MCP engine the two tools build on |
 
-<!-- ===== TEMP: two Goal variants for comparison — delete the loser before committing ===== -->
-
-## Goal — Option A (original / more technical)
-
-When an AI agent works on a real app it needs the **dev server running and its build output
-visible** — but it shouldn't have to juggle OS processes to get there. Left to raw shell commands an
-agent ends up port-scanning, `Stop-Process`-ing the wrong PID, orphaning `node` / `dotnet` trees that
-keep holding the port, and scraping colour-coded console spam to guess whether the last edit
-compiled.
-
-KY.AI removes that. **You** own the dev servers — you start one supervisor per app in your IDE and
-watch its live console as usual. Each supervisor tees that output to an in-memory log, tracks the
-build state, and registers with a per-stack **hub** that exposes a single MCP server. The **agent**
-never touches processes: it calls `list` to see what's running, then `wait_for_build` / `tail` /
-`restart` / `stop` against any app by name.
-
-- **No orphaned processes** — every child runs under a Windows Job Object, so the tree dies with its
-  supervisor however it's stopped (Ctrl+C, Rider's Stop button, a hard kill).
-- **No port hunting** — apps are addressed by name through the hub, not by scanning for ports.
-- **Readable logs** — output is ANSI-stripped into a rolling buffer the agent reads over MCP.
-- **Deterministic verification** — `wait_for_build` blocks until the rebuild that includes your edit
-  settles, then reports `success` / `failed` plus the exact line that decided it (`settledBy`).
-
-One hub per stack runs side by side (`ky-ai-ng` on 5101, `ky-ai-dotnet` on 5102), so a full-stack
-agent drives frontends and backends through two independent MCP servers.
-
-<!-- ===== TEMP: current developer-facing rewrite ===== -->
-
-## Goal — Option B (developer-facing rewrite)
+## Goal
 
 You've paired an AI agent with a real app, and the same friction keeps coming back: it changes
-some code, then has to ask **you** whether it actually built. So you alt-tab to the dev server,
-copy the red errors out of the console, paste them in, wait — and do it again on the next change.
-Hand the agent the dev server instead and it's worse: it kills the wrong process, leaves a zombie
-still holding your port, and your own start won't come back up until you go hunt it down.
+some code, then has to ask **you** whether it actually built. So you search the window of your dev server,
+copy the red errors out, paste them in, wait — and do it again on the next change.
+Hand the agent the dev server instead and it's worse: for one quick rebuild it asks you to approve
+finding the process id, then asks again to kill that process, then asks again to start it back up —
+burning a pile of tokens and minutes on something that should be instant. And when you go to restart
+the app yourself, the port it left behind is already blocked.
 
 KY.AI ends that loop. **You** run your app exactly like you do today — start it once in your IDE
 and keep your live console. Your **agent** gets its own safe, by-name way to ask *"did it build?
@@ -55,7 +29,17 @@ backends, so a full-stack agent can drive both at once.
 
 ## Getting Started
 
-TODO: Add a note how to install the tools
+Install the tools from NuGet as **.NET global tools**:
+
+```powershell
+dotnet tool install --global KY.AI.Ng
+dotnet tool install --global KY.AI.Net
+```
+
+That puts `ky-ai-ng` and `ky-ai-dotnet` on your `PATH` (via `%USERPROFILE%\.dotnet\tools`); update
+later with `dotnet tool update --global KY.AI.Ng`. They're framework-dependent, so you need the
+**.NET 10 runtime** installed. (To run a build straight from this repo instead, see
+[Building from source](#building-from-source).)
 
 With both tools on your `PATH`:
 
@@ -63,7 +47,7 @@ With both tools on your `PATH`:
 
    ```powershell
    ky-ai-ng serve      # in an Angular workspace (the ClientApp folder)
-   ky-ai-dotnet run    # in a .NET project folder
+   ky-ai-dotnet serve  # in a .NET project folder
    ```
 
 2. **Wire the MCP client** — one `.mcp.json` per workspace; the ports are fixed:
@@ -100,26 +84,44 @@ shared engine and carries its own product version.
 
 ### Running an older major alongside the latest
 
-`PATH` always points at the **latest** major of each tool — what you want most of the time. When a
-project pins an older framework (say Angular 21), install that major into its own versioned folder
-and call it by full path; leave `PATH` on the newest:
+A global install points `PATH` at each tool's **latest** major — what you want most of the time.
+When a project pins an older framework (say Angular 21), pin the matching tool major to that project
+with a **local tool manifest**, leaving the global install newest:
 
 ```powershell
-# everyday: latest, via PATH
+# everyday: latest, globally installed
 ky-ai-ng serve
 
-# an older Angular 21 project: pin the matching major by full path
-%USERPROFILE%\.nuget\packages\ky.ai.ng\21.0.0\tools\ky-ai-ng.exe serve
+# an older Angular 21 project: pin the matching major locally
+dotnet new tool-manifest                     # once per repo (creates .config\dotnet-tools.json)
+dotnet tool install KY.AI.Ng --version 21.*  # pinned for this repo only
+dotnet ky-ai-ng serve                        # runs the pinned version
 ```
 
-That path is the NuGet global-packages cache (where `dotnet restore` unpacks a package); a
-`--tool-path` install places the exe elsewhere. The same applies to `ky-ai-dotnet` across .NET SDK
-majors — see each tool's README.
+A `dotnet tool install --tool-path <dir>` install (or the copy in the NuGet global-packages cache,
+`%USERPROFILE%\.nuget\packages\ky.ai.ng\<version>\tools\`) works too. The same applies to
+`ky-ai-dotnet` across .NET SDK majors — see each tool's README.
 
 ## Repository Layout
 
 ```
-src/      tool projects (Serve, Ng, Net)
-scripts/  build / publish / version automation
-dist/     aggregated output: every tool's exe + shared DLLs (git-ignored; one PATH entry)
+src/        tool projects (Serve, Ng, Net)
+scripts/    pack / publish / dist / version automation (dotnet-run C# scripts)
+artifacts/  packed NuGet packages — scripts\pack.cmd output (git-ignored)
+dist/       runnable local build for testing — scripts\dist.cmd output (git-ignored; put on PATH)
 ```
+
+## Building from source
+
+The `scripts/` folder holds dependency-free C# automation — run each with `dotnet run`, or use the
+matching `.cmd` launcher (which needs no PowerShell execution-policy change):
+
+```powershell
+scripts\dist.cmd       # publish a runnable build into dist\ for local PATH testing
+scripts\pack.cmd       # pack the NuGet packages into artifacts\
+scripts\publish.cmd    # push artifacts\*.nupkg to NuGet  (needs NUGET_API_KEY; --dry-run to preview)
+scripts\bump.cmd       # bump a project version (interactive, or e.g.  bump Ng --part minor)
+```
+
+A release is `pack` then `publish`; for local development, `dist` gives you the same `ky-ai-ng` /
+`ky-ai-dotnet` exes on `PATH` without installing from NuGet.

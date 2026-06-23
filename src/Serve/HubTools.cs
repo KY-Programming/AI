@@ -60,15 +60,15 @@ internal static class HubTools
         => Hub.ForwardAsync(project, HttpMethod.Get, $"/tail?lines={lines}", 5);
 
     [McpServerTool(Name = "set_log_lines"), Description(
-        "Change how many lines a dev server's rolling log keeps (buffer + file). Default is 200.")]
+        "Change how many lines a dev server's rolling log keeps (buffer + file). Default is 200; 0 = unlimited.")]
     public static Task<string> SetLogLines(
         [Description("Project name (see list)")] string project,
         [Description("Lines to keep (>= 1)")] int count)
         => Hub.ForwardAsync(project, HttpMethod.Post, $"/set-log-lines?count={count}", 5);
 
     [McpServerTool(Name = "shutdown"), Description(
-        "Gracefully stop the hub process itself (NOT a dev server). Use this to release the published " +
-        "hub binary so it can be re-published, or to clean up an auto-started hub. Dev-server " +
-        "supervisors keep running; a hub auto-starts again the next time a serve/run launches.")]
-    public static string Shutdown() => Hub.RequestShutdown();
+        "Tear down the whole stack: stop every registered dev server (each frees its port) and then " +
+        "the hub process itself. Use this to release the published binaries for a re-publish, or to " +
+        "stop everything at once. The `<tool> shutdown` CLI command and POST/GET /shutdown do the same.")]
+    public static Task<string> Shutdown() => Hub.ShutdownAllAsync();
 }

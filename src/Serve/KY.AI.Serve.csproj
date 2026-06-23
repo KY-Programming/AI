@@ -7,7 +7,23 @@
     <RootNamespace>KY.AI.Serve</RootNamespace>
     <Version>1.0.0</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- Published as a NuGet library (the shared hub / supervisor / MCP engine).
+         It also ships bundled inside the Ng and Net tool packages. -->
+    <PackageId>KY.AI.Serve</PackageId>
+    <Authors>KY-Programming</Authors>
+    <Company>KY-Programming</Company>
+    <Description>Shared hub, supervisor and MCP engine behind the KY.AI dev-loop tools.</Description>
+    <PackageTags>mcp;ai;dev-server</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
+
+  <!-- Ship this README as the package readme (rendered on nuget.org). Use Update,
+       not Include: the SDK already globs README.md as a None item. -->
+  <ItemGroup>
+    <None Update="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.4.0" />

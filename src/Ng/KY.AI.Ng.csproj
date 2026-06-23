@@ -9,9 +9,28 @@
     <AssemblyName>ky-ai-ng</AssemblyName>
     <Version>22.0.0</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <SelfContained>false</SelfContained>
+
+    <!-- Packed and published as a .NET global tool: dotnet tool install KY.AI.Ng.
+         Portable (no RuntimeIdentifier) so the tool shim runs wherever the
+         .NET 10 runtime is installed; Serve ships bundled inside the package.
+         The Web SDK disables packaging by default, so opt back in. -->
+    <IsPackable>true</IsPackable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>ky-ai-ng</ToolCommandName>
+    <PackageId>KY.AI.Ng</PackageId>
+    <Authors>KY-Programming</Authors>
+    <Company>KY-Programming</Company>
+    <Description>Angular CLI dev-loop runner for AI agents: runs ng serve/build with build state and logs exposed over MCP.</Description>
+    <PackageTags>angular;mcp;ai;dev-server;cli</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
+
+  <!-- Ship this README as the package readme (rendered on nuget.org). Use Update,
+       not Include: the SDK already globs README.md as a None item. -->
+  <ItemGroup>
+    <None Update="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
   <ItemGroup>
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.4.0" />
   </ItemGroup>

@@ -3,14 +3,14 @@ using KY.AI.Serve;
 namespace KY.AI.Net;
 
 // ky-ai-dotnet — run a .NET backend with output mirrored for agents.
-//   hub  : control plane — one MCP server + a registry of running supervisors
-//   run  : a backend's dev supervisor (rolling log + REST control + auto-register)
-//   other: one-shot tee of any `dotnet` command (build, test, ...)
+//   serve    : a backend's dev supervisor (dotnet watch run; rolling log + REST control + auto-register)
+//   shutdown : stop the hub and every supervisor it manages
+//   hub      : the control plane (auto-managed — started on demand, not run by hand)
+//   other    : one-shot tee of any `dotnet` command (build, test, ...)
 // The hub + supervisor + shutdown machinery lives in the shared KY.AI.Serve library; this file is
 // just the .NET-specific seam: the dotnet command, the build matcher, names and ports.
 internal static class Program
 {
-    private const string DefaultOneShotLog = "dotnet.log";
     private const int DefaultHubPort = 5102;
 
     private static readonly SupervisorConfig Supervisor = new()
@@ -46,13 +46,15 @@ internal static class Program
 
         if (string.Equals(args[0], "hub", StringComparison.OrdinalIgnoreCase))
             return await HubHost.RunAsync(HubCfg, args[1..]);
-        if (string.Equals(args[0], "run", StringComparison.OrdinalIgnoreCase))
-            return await RunSupervisorAsync(args[1..]);
-        return RunOneShot(args);
+        if (string.Equals(args[0], "shutdown", StringComparison.OrdinalIgnoreCase))
+            return await ShutdownCommand.RunAsync("ky-ai-dotnet", DefaultHubPort, args[1..]);
+        if (string.Equals(args[0], "serve", StringComparison.OrdinalIgnoreCase))
+            return await RunServeAsync(args[1..]);
+        return RunOneShot(args);   // `run`/`watch` land here and get nudged toward `serve`
     }
 
-    // ── run: supervisor with rolling log + REST control + hub registration ────
-    private static async Task<int> RunSupervisorAsync(string[] rest)
+    // ── serve: supervisor (dotnet watch run) with rolling log + REST control + hub registration ──
+    private static async Task<int> RunServeAsync(string[] rest)
     {
         var o = ServeCommandLine.Parse(rest, DefaultHubPort);
 
@@ -100,23 +102,19 @@ internal static class Program
         return new DirectoryInfo(cwd).Name;
     }
 
-    // ── one-shot: tee any dotnet command to console + a full log file ─────────
+    // ── one-shot: tee any dotnet command to console (+ a log file only when --log-file is given) ──
     private static int RunOneShot(string[] args)
     {
         var list = args.ToList();
 
-        string? logArg = null;
-        var li = list.FindIndex(a => a is "--log" or "-l");
-        if (li >= 0 && li + 1 < list.Count)
+        string? logFile = null;
+        var logLines = 200;
+        for (var i = 0; i < list.Count; i++)
         {
-            logArg = list[li + 1];
-            list.RemoveAt(li + 1);
-            list.RemoveAt(li);
-        }
-        else if (list.Count > 0 && list[^1].EndsWith(".log", StringComparison.OrdinalIgnoreCase))
-        {
-            logArg = list[^1];
-            list.RemoveAt(list.Count - 1);
+            if (list[i] == "--log-file" && i + 1 < list.Count)
+            { logFile = list[i + 1]; list.RemoveAt(i + 1); list.RemoveAt(i); i--; }
+            else if (list[i] == "--log-lines" && i + 1 < list.Count && int.TryParse(list[i + 1], out var n))
+            { logLines = Math.Max(0, n); list.RemoveAt(i + 1); list.RemoveAt(i); i--; }
         }
 
         if (list.Count == 0)
@@ -125,8 +123,14 @@ internal static class Program
             return 1;
         }
 
-        var logPath = Path.GetFullPath(logArg ?? DefaultOneShotLog);
-        return OneShot.Run("ky-ai-dotnet", "dotnet", list, logPath);
+        // Someone who typed `run`/`watch` lands here — nudge them to the supervised `serve`.
+        var verb = list[0].ToLowerInvariant();
+        var hint = verb is "run" or "watch"
+            ? $"Note: `{verb}` is not a supervised command — use `ky-ai-dotnet serve` for an agent-controllable dev server (add --no-watch for stable debugging)."
+            : null;
+
+        var logPath = logFile is null ? null : Path.GetFullPath(logFile);
+        return OneShot.Run("ky-ai-dotnet", "dotnet", list, logPath, logLines, hint);
     }
 
     private static void PrintHelp()
@@ -134,27 +138,28 @@ internal static class Program
         Console.WriteLine("""
         ky-ai-dotnet — run a .NET backend with output mirrored for agents.
 
-        HUB — the control plane agents talk to (one MCP server + supervisor registry).
-          A `run` auto-starts it on demand; you never run it yourself.
-          MCP tools (each takes a `project`): list · status · wait_for_build · restart · stop · start · tail · set_log_lines · shutdown
-          shutdown (MCP) or POST/GET /shutdown stops the hub itself (frees the published binary).
-
-        RUN — a backend's dev server (run one per app, registers with the hub):
-          ky-ai-dotnet run [options]
+        SERVE — a backend's dev server (run one per app; registers with the hub for the agent):
+          ky-ai-dotnet serve [options]
             --name <id>         Project name in the hub (default: the .csproj / folder name)
-            --hub <url>         Hub URL (default: http://127.0.0.1:5102)
-            --log-lines <N>     Lines kept in the rolling log (default: 200)
+            --log-lines <N>     Lines kept in the rolling log (default: 200; 0 = unlimited)
             --log-file <file>   Also mirror the rolling log to a file (default: off — MCP serves logs)
-            --control-port <N>  Local REST control port (default: OS-assigned)
-            --no-watch          Use `dotnet run` instead of `dotnet watch run`
-            --no-hub            Tee + rolling log only; do not register with a hub
-            --no-hub-autostart  Use a hub if up, but don't auto-start one
-          Anything else after `run` is forwarded to dotnet (e.g. --project ./Api.csproj).
+            --rest-port <N>     Local REST control port (default: OS-assigned)
+            --no-watch          Use `dotnet run` instead of `dotnet watch run` (stable for debugging)
+            --hub-port <N>      Hub port to register with (default: 5102; rarely needed — does not start a hub)
+            --no-hub            Standalone: tee + rolling log + local REST only; no hub, no agent access
+          Anything else after `serve` is forwarded to dotnet (e.g. --project ./Api.csproj).
+          `dotnet watch run` hot-reloads; the agent verifies builds via the hub's wait_for_build.
 
-        ONE-SHOT — tee any dotnet command to console + a full log file:
-          ky-ai-dotnet build -c Release build.log
+        SHUTDOWN — stop the hub and every backend it supervises:
+          ky-ai-dotnet shutdown
+          To stop a single app, stop its process in your IDE instead.
+
+        ONE-SHOT — tee any other dotnet command to the console (and a log file with --log-file):
+          ky-ai-dotnet build -c Release --log-file build.log
           ky-ai-dotnet test
+          Runs once and exits; not supervised and invisible to the agent (prints a reminder).
 
+        An MCP hub auto-starts on demand and self-exits when idle — you never run it yourself.
         Spawns `dotnet` from PATH. All HTTP is loopback-only.
         """);
     }

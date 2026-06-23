@@ -14,42 +14,46 @@ targets any backend by name.
    agent ── MCP ────► │  MCP server  +  registry of supervisors                │
                       └───▲───────────────▲───────────────▲────────────────────┘
                           │ register      │ register      │ register / forward
-                  ky-ai-dotnet run      ky-ai-dotnet run    ky-ai-dotnet run
+                  ky-ai-dotnet serve    ky-ai-dotnet serve  ky-ai-dotnet serve
                   (MyApp)            (...)            (...)
                   dotnet watch run   dotnet watch run dotnet watch run
 ```
 
-- **`hub`** — the control plane: one MCP server (`/mcp`) + a registry. No child process. You never
-  run it — a `run` auto-starts one (detached, self-exiting when idle) and the agent talks to it.
-- **`run`** — one per backend: runs `dotnet watch run`, tees output to the console (live, for you)
+- **`serve`** — one per backend: runs `dotnet watch run`, tees output to the console (live, for you)
   and to a **rolling log** (last N lines, default 200, oldest dropped), tracks the build/run
   state, hosts a small loopback **REST control API**, and **auto-registers with the hub**
   (re-registers every 15s — start order doesn't matter, and it survives a hub restart).
   `Ctrl+C` kills the whole tree and deregisters.
-- **one-shot** — tee any other `dotnet` command (`build`, `test`, …) to console + a full log.
+- **`shutdown`** — stop the hub and every backend it supervises (see below).
+- **one-shot** — tee any other `dotnet` command (`build`, `test`, …) to the console, and to a log
+  file when you add `--log-file`.
+- **`hub`** — the control plane: one MCP server (`/mcp`) + a registry, no child process. Auto-managed:
+  a `serve` starts one on demand (detached, self-exiting when idle) and the agent talks to it — you
+  never run it yourself.
 
 ## Ownership model
 
-**You own the backends** — you run each `ky-ai-dotnet run` in your IDE (Rider) and watch its live
+**You own the backends** — you run each `ky-ai-dotnet serve` in your IDE (Rider) and watch its live
 console; the hub is **auto-started on demand**. Agents never start/stop OS processes directly;
 they call the hub's MCP tools, which forward to the right supervisor (a restart re-runs only that
-backend; your console stays live). When a backend's `run` isn't running, it simply isn't in `list`.
+backend; your console stays live). When a backend's `serve` isn't running, it simply isn't in `list`.
 
 ## Usage
 
 ```
-ky-ai-dotnet run [options]                  # one per backend
+ky-ai-dotnet serve [options]                # one per backend (dotnet watch run)
   --name <id>         Project name in the hub (default: the .csproj / folder name)
-  --hub <url>         Hub URL (default: http://127.0.0.1:5102)
-  --log-lines <N>     Lines kept in the rolling log (default: 200)
+  --log-lines <N>     Lines kept in the rolling log (default: 200; 0 = unlimited)
   --log-file <file>   Also mirror the rolling log to a file (default: off — MCP serves logs)
-  --control-port <N>  Local REST control port (default: OS-assigned)
-  --no-watch          Use `dotnet run` instead of `dotnet watch run`
-  --no-hub            Tee + rolling log only; don't register
-  --no-hub-autostart  Use a hub if up, but don't auto-start one
-  (anything else after `run` is forwarded to dotnet, e.g. --project ./Api.csproj)
+  --rest-port <N>     Local REST control port (default: OS-assigned)
+  --no-watch          Use `dotnet run` instead of `dotnet watch run` (stable for debugging)
+  --hub-port <N>      Hub port to register with (default: 5102; rarely needed — doesn't start a hub)
+  --no-hub            Standalone: tee + rolling log + local REST only; no hub, no agent access
+  (anything else after `serve` is forwarded to dotnet, e.g. --project ./Api.csproj)
 
-ky-ai-dotnet <dotnet args...> [logfile]     # one-shot tee (full log)
+ky-ai-dotnet shutdown                       # stop the hub + every backend it supervises
+
+ky-ai-dotnet <dotnet args...> [--log-file f.log]   # one-shot tee (--log-file also writes a file)
 ```
 
 Spawns `dotnet` from PATH. Works from a bare terminal or a Rider run configuration.
@@ -59,6 +63,46 @@ Spawns `dotnet` from PATH. Works from a bare terminal or a Rider run configurati
 Each supervisor registers under a name the agent uses to target it. Default: the `.csproj`
 filename in the current directory (e.g. `MyApp`), else the folder name. Override with
 `--name`. **Keep names unique** — a duplicate overwrites the earlier registration.
+
+### Run it from your IDE
+
+`ky-ai-dotnet` is a plain executable, so run it from a **Shell Script** configuration in Rider —
+*not* a .NET config (that would debug ky-ai-dotnet itself):
+
+1. **Run/Debug Configurations → `+` → Shell Script**
+2. **Name:** e.g. `MyApp backend (ky-ai-dotnet)`
+3. **Execute:** `Script text`
+4. **Script text:** `ky-ai-dotnet serve`  *(needs `ky-ai-dotnet.exe` on PATH; otherwise the full publish path)*
+5. **Working directory:** the backend project folder (where the `.csproj` is) — this is how
+   `dotnet watch` finds the project and how the name defaults to the `.csproj` name
+6. **Interpreter path:** `powershell.exe`
+7. **Leave "Execute in the terminal" unchecked** — Rider then runs it as a managed process in the
+   **Run** tool window (green running state + a working red Stop button). Checked, the script runs in
+   a terminal tab Rider doesn't track, so it shows as *not running* and the Stop button below won't
+   apply to it.
+
+One config per backend. The MCP hub auto-starts, so there's no separate hub config.
+
+Stopping is safe **however** you do it: Rider's red Stop button hard-kills the process, but the
+Job Object (`KILL_ON_JOB_CLOSE`) means the OS still tears down the whole `dotnet` tree — nothing
+is left holding the port.
+
+#### Debugging (breakpoints)
+
+**A) Attach to Process — keeps the agent loop.** `dotnet run` / `dotnet watch run` build Debug by
+default, so symbols are present.
+1. Start your `ky-ai-dotnet serve` config.
+2. **Run → Attach to Process** (Ctrl+Alt+F5).
+3. Pick the **app** process — `dotnet` running your DLL (not the `dotnet watch` host, not ky-ai-dotnet).
+4. Breakpoints hit.
+
+A **rude edit** makes `dotnet watch` restart the app, detaching the debugger (re-attach);
+hot-reloadable edits keep it attached. If you debug a lot, run that backend with **`--no-watch`**
+(plain `dotnet run`; the process only restarts on an explicit `restart`), so the attach stays stable.
+
+**B) Native Debug session — no ky-ai-dotnet.** Use Rider's normal **.NET Launch Settings Profile**
+(green Debug button). Fully integrated, but that instance isn't managed by ky-ai-dotnet (no MCP
+control) and can't share the port — so it's either/or per backend, per session.
 
 ## Build verdict
 
@@ -87,8 +131,8 @@ Exposed by the **hub**; each (except `shutdown`) takes a `project` (from `list`)
 | `stop` | `project` | stop the backend (frees the port, unlocks output files); stays registered |
 | `start` | `project` | start if stopped; waits for it to come up |
 | `tail` | `project`, `lines?` | last N log lines (`0` = whole buffer) |
-| `set_log_lines` | `project`, `count` | change how many log lines are kept |
-| `shutdown` | — | stop the **hub** process itself (not a backend) — frees the published binary so it can be re-published, or cleans up an auto-started hub. Supervisors keep running; a hub auto-starts again the next time a `run` launches. Also reachable as `POST`/`GET /shutdown`. |
+| `set_log_lines` | `project`, `count` | change how many log lines are kept (`0` = unlimited) |
+| `shutdown` | — | tear down the **whole stack** — stop every running backend (freeing their ports) and then the hub. Same as the `ky-ai-dotnet shutdown` CLI command and `POST`/`GET /shutdown`. To stop just one app, stop its process in your IDE. |
 
 **When to `restart`:** `dotnet watch` hot-reloads code, so restart only for changes it can't apply
 (new files, `.csproj` / config changes, rude edits) or a wedged process. For routine edits, just
@@ -129,52 +173,16 @@ toolchain, install it into its own versioned folder and invoke it by full path, 
 the newest.
 
 ```powershell
-ky-ai-dotnet run                                              # latest, via PATH
-%USERPROFILE%\.nuget\packages\ky.ai.net\9.0.0\tools\ky-ai-dotnet.exe run     # against the .NET 9 SDK
+ky-ai-dotnet serve                                            # latest, via PATH
+%USERPROFILE%\.nuget\packages\ky.ai.net\9.0.0\tools\ky-ai-dotnet.exe serve   # against the .NET 9 SDK
 ```
-
-## Rider setup
-
-`ky-ai-dotnet` is a plain executable, so run it from a **Shell Script** configuration — *not* a
-.NET config (that would debug ky-ai-dotnet itself):
-
-1. **Run/Debug Configurations → `+` → Shell Script**
-2. **Name:** e.g. `MyApp backend (ky-ai-dotnet)`
-3. **Execute:** `Script text`
-4. **Script text:** `ky-ai-dotnet run`  *(needs `ky-ai-dotnet.exe` on PATH; otherwise the full publish path)*
-5. **Working directory:** the backend project folder (where the `.csproj` is) — this is how
-   `dotnet watch` finds the project and how the name defaults to the `.csproj` name
-6. **Interpreter path:** `powershell.exe`
-
-One config per backend. The MCP hub auto-starts, so there's no separate hub config.
-
-Stopping is safe **however** you do it: Rider's red Stop button hard-kills the process, but the
-Job Object (`KILL_ON_JOB_CLOSE`) means the OS still tears down the whole `dotnet` tree — nothing
-is left holding the port.
-
-### Debugging (breakpoints)
-
-**A) Attach to Process — keeps the agent loop.** `dotnet run` / `dotnet watch run` build Debug by
-default, so symbols are present.
-1. Start your `ky-ai-dotnet run` config.
-2. **Run → Attach to Process** (Ctrl+Alt+F5).
-3. Pick the **app** process — `dotnet` running your DLL (not the `dotnet watch` host, not ky-ai-dotnet).
-4. Breakpoints hit.
-
-A **rude edit** makes `dotnet watch` restart the app, detaching the debugger (re-attach);
-hot-reloadable edits keep it attached. If you debug a lot, run that backend with **`--no-watch`**
-(plain `dotnet run`; the process only restarts on an explicit `restart`), so the attach stays stable.
-
-**B) Native Debug session — no ky-ai-dotnet.** Use Rider's normal **.NET Launch Settings Profile**
-(green Debug button). Fully integrated, but that instance isn't managed by ky-ai-dotnet (no MCP
-control) and can't share the port — so it's either/or per backend, per session.
 
 ## Files
 
 This project is the thin **.NET seam**; the hub, supervisor, rolling log, build tracker and MCP
 tool surface all live in the shared **[`KY.AI.Serve`](../Serve)** library.
 
-- `Program.cs` — arg parsing (`hub` / `run` / one-shot) and the .NET `SupervisorConfig` /
+- `Program.cs` — arg parsing (`serve` / `shutdown` / one-shot) and the .NET `SupervisorConfig` /
   `HubConfig`: the `dotnet [watch] run` command, watched extensions, port and names.
 - `DotnetBuildMatcher.cs` — maps `dotnet watch` / ASP.NET host output lines to build-start /
   settle / error verdicts.

@@ -44,10 +44,10 @@ public static class HubHost
             return Results.Ok();
         });
         app.MapGet("/registry", () => Results.Json(Hub.Registry.All()));
-        // Gracefully stop the hub. Mapped for both verbs so it's trivial to hit by hand
-        // (a hidden auto-started hub otherwise needs Task Manager and locks the published binary).
+        // Tear down the whole stack (every supervisor, then the hub). Mapped for both verbs so it's
+        // trivial to hit by hand; this is what `<tool> shutdown` calls.
         app.MapMethods("/shutdown", new[] { "GET", "POST" },
-            () => Results.Content(Hub.RequestShutdown(), "application/json"));
+            async () => Results.Content(await Hub.ShutdownAllAsync(), "application/json"));
         app.Urls.Add($"http://127.0.0.1:{port}");
 
         try

@@ -17,8 +17,6 @@ calls `list` to discover what's running, then targets any frontend by name.
                   ng serve + log     ng serve + log  ng serve + log
 ```
 
-- **`hub`** — the control plane: one MCP server (`/mcp`) + a registry. No ng child. You never run
-  it — a `serve` auto-starts one (detached, self-exiting when idle) and the agent talks to it.
 - **`serve`** — one per frontend: runs `ng serve`, tees output to the console (live, for you)
   and to an **in-memory rolling buffer** (last N lines, default 200, served over MCP — add
   `--log-file` to also mirror it to disk), tracks the build
@@ -27,7 +25,12 @@ calls `list` to discover what's running, then targets any frontend by name.
   Stopping always reaps the whole ng tree: `Ctrl+C` deregisters and tears it down, and a **hard
   kill of `ky-ai-ng` (e.g. Rider's Stop button) also kills the tree** via a Windows Job Object
   (`KILL_ON_JOB_CLOSE`) — the port is never left orphaned, however ky-ai-ng is stopped.
-- **one-shot** — tee any other `ng` command (`build`, `version`, …) to console + a full log.
+- **`shutdown`** — stop the hub and every frontend it supervises (see below).
+- **one-shot** — tee any other `ng` command (`build`, `version`, …) to the console, and to a log
+  file when you add `--log-file`.
+- **`hub`** — the control plane: one MCP server (`/mcp`) + a registry, no ng child. Auto-managed:
+  a `serve` starts one on demand (detached, self-exiting when idle) and the agent talks to it — you
+  never run it yourself.
 
 ## Ownership model
 
@@ -41,20 +44,22 @@ your console stays live). When a frontend's `serve` isn't running, it simply isn
 ```
 ky-ai-ng serve [options]                   # one per frontend
   --name <id>         Project name in the hub (default: parent folder of ClientApp)
-  --hub <url>         Hub URL (default: http://127.0.0.1:5101)
-  --log-lines <N>     Lines kept in the in-memory log buffer (default: 200)
+  --log-lines <N>     Lines kept in the in-memory log buffer (default: 200; 0 = unlimited)
   --log-file <file>   Also mirror the buffer to a file (default: off — MCP serves logs)
-  --control-port <N>  Local REST control port (default: OS-assigned)
-  --no-hub            Buffer-only; don't register
-  --no-hub-autostart  Use a hub if up, but don't auto-start one
+  --rest-port <N>     Local REST control port (default: OS-assigned)
+  --hub-port <N>      Hub port to register with (default: 5101; rarely needed — doesn't start a hub)
+  --no-hub            Standalone: buffer + local REST only; no hub, no agent access
   (anything else after `serve` is forwarded to `ng serve`, e.g. --port 4015)
 
-ky-ai-ng <ng args...> [logfile]            # one-shot tee (full log)
+ky-ai-ng shutdown                          # stop the hub + every frontend it supervises
+
+ky-ai-ng <ng args...> [--log-file f.log]   # one-shot tee (--log-file also writes a file)
 ```
 
-The Angular CLI is resolved from the nearest `node_modules\@angular\cli\bin\ng.js` (run via
-`node`); otherwise a global `ng` on PATH is used. So it works from a bare terminal, an npm
-script, or a Rider run configuration.
+The Angular CLI (`node_modules\@angular\cli\bin\ng.js`, run via `node`) is found by searching up
+from the current directory, then in a `ClientApp` subfolder — so `serve` works whether you launch
+from the workspace itself or a full-stack repo root. If neither has it, `ky-ai-ng` errors (it does
+**not** fall back to a global `ng`). Make sure dependencies are installed (`npm install`).
 
 ### Project name
 
@@ -71,7 +76,20 @@ A `start:ai` script per frontend, run in Rider — the first one auto-starts the
 "scripts": { "start:ai": "ky-ai-ng serve" }
 ```
 
-Requires `ky-ai-ng.exe` on `PATH`.
+**Alternative — a Shell Script config** (no `package.json` edit; mirrors the `ky-ai-dotnet` setup):
+
+1. **Run/Debug Configurations → `+` → Shell Script**
+2. **Name:** e.g. `MyApp frontend (ky-ai-ng)`
+3. **Execute:** `Script text`
+4. **Script text:** `ky-ai-ng serve`  *(needs `ky-ai-ng.exe` on PATH; otherwise the full publish path)*
+5. **Working directory:** the Angular workspace (the `ClientApp` folder, where `angular.json` is) —
+   this is how the name defaults to the parent folder of `ClientApp`
+6. **Interpreter path:** `powershell.exe`
+7. **Leave "Execute in the terminal" unchecked** — Rider then runs it as a managed process in the
+   **Run** tool window (green running state + a working red Stop button). Checked, the script runs in
+   a terminal tab Rider doesn't track, so it shows as *not running*.
+
+One config per frontend either way; the MCP hub auto-starts, so there's no separate hub config.
 
 ## MCP tools (for agents)
 
@@ -87,8 +105,8 @@ Exposed by the **hub**; each (except `shutdown`) takes a `project` (from `list`)
 | `stop` | `project` | stop the ng child (frees the port); stays registered |
 | `start` | `project` | start if stopped; waits for the build |
 | `tail` | `project`, `lines?` | last N log lines (`0` = whole buffer) |
-| `set_log_lines` | `project`, `count` | change how many log lines are kept |
-| `shutdown` | — | stop the **hub** process itself (not a frontend) — frees the published binary so it can be re-published, or cleans up an auto-started hub. Supervisors keep running; a hub auto-starts again the next time a `serve` launches. Also reachable as `POST`/`GET /shutdown`. |
+| `set_log_lines` | `project`, `count` | change how many log lines are kept (`0` = unlimited) |
+| `shutdown` | — | tear down the **whole stack** — stop every running frontend (freeing their ports) and then the hub. Same as the `ky-ai-ng shutdown` CLI command and `POST`/`GET /shutdown`. To stop just one app, stop its process in your IDE. |
 
 **Verifying an edit:** call `wait_for_build` — it blocks until the rebuild that includes your
 change settles (debouncing rapid multi-file saves) and returns the verdict. The verdict carries
@@ -152,7 +170,7 @@ That path is the NuGet global-packages cache (where `dotnet restore` unpacks a p
 This project is the thin **Angular seam**; the hub, supervisor, rolling log, build tracker and MCP
 tool surface all live in the shared **[`KY.AI.Serve`](../Serve)** library.
 
-- `Program.cs` — arg parsing (`hub` / `serve` / one-shot) and the Angular `SupervisorConfig` /
+- `Program.cs` — arg parsing (`serve` / `shutdown` / one-shot) and the Angular `SupervisorConfig` /
   `HubConfig`: CLI resolution (`node_modules\@angular\cli`), watched extensions, port and names.
 - `NgBuildMatcher.cs` — maps ng/esbuild output lines to build-start / settle / error verdicts.
 

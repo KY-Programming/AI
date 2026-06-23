@@ -35,6 +35,14 @@ public static class SupervisorHost
             server.SetLogCapacity(count);
             return Results.Content(server.StatusJson(), "application/json");
         });
+        // Exit this supervisor process (the hub calls this when tearing the whole stack down).
+        // ApplicationStopping deregisters and kills the dev-server tree; delayed a beat so the
+        // response reaches the hub before the host tears down.
+        app.MapPost("/shutdown", () =>
+        {
+            _ = Task.Run(async () => { await Task.Delay(250); app.Lifetime.StopApplication(); });
+            return Results.Content("{\"ok\":true,\"action\":\"shutdown\"}", "application/json");
+        });
         app.Urls.Add($"http://127.0.0.1:{opt.ControlPort}");
 
         var stopping = new CancellationTokenSource();
