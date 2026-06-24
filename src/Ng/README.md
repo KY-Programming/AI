@@ -105,28 +105,39 @@ One config per frontend either way; the MCP hub auto-starts, so there's no separ
 
 ## MCP tools (for agents)
 
-Exposed by the **hub**; each (except `shutdown`) takes a `project` (from `list`). Allow-list as
+Exposed by the **hub**; each (except `shutdown`/`list`) takes a `project` (from `list`) — **omit
+it when only one frontend is registered** and it resolves automatically. Allow-list as
 `mcp__ky-ai-ng__<name>`. All return JSON except `tail` (text).
 
 | Tool | Args | Purpose |
 |---|---|---|
 | `list` | — | running frontends + each one's last build status. **Call first.** |
-| `status` | `project?` | one frontend, or all if omitted — includes `building`/`pending` flags |
-| `wait_for_build` | `project`, `timeoutMs?` | **block until the in-flight rebuild settles** (debounced), return `{status, errors, errorLines, durationMs}` — the deterministic way to verify after an edit |
-| `restart` | `project` | restart, **wait for the rebuild**, return the verdict (status, errors, duration, error lines, tail) |
-| `stop` | `project` | stop the ng child (frees the port); stays registered |
-| `start` | `project` | start if stopped; waits for the build |
-| `tail` | `project`, `lines?` | last N log lines (`0` = whole buffer) |
-| `set_log_lines` | `project`, `count` | change how many log lines are kept (`0` = unlimited) |
+| `status` | `project?` | one frontend, or all if omitted — includes `building`/`pending`, `errors`/`warnings`, `diagnostics`, `filesInLastBuild` |
+| `wait_for_build` | `project?`, `timeoutMs?` | **block until the in-flight rebuild settles** (debounced), return the verdict + a noise-free `summary` — the deterministic way to verify after an edit |
+| `restart` | `project?` | restart, **wait for the rebuild**, return the verdict + `summary` |
+| `stop` | `project?` | stop the ng child (frees the port); stays registered |
+| `start` | `project?` | start if stopped; waits for the build |
+| `tail` | `project?`, `lines?`, `summary?`, `sinceSeq?`, `grep?` | last N log lines (`0` = whole buffer); `summary` drops the chunk table + vite ws-proxy noise, `sinceSeq` scopes to one rebuild, `grep` filters by substring |
+| `set_log_lines` | `count`, `project?` | change how many log lines are kept (`0` = unlimited) |
 | `shutdown` | — | tear down the **whole stack** — stop every running frontend (freeing their ports) and then the hub. Same as the `ky-ai-ng shutdown` CLI command and `POST`/`GET /shutdown`. To stop just one app, stop its process in your IDE. |
 
 **Verifying an edit:** call `wait_for_build` — it blocks until the rebuild that includes your
-change settles (debouncing rapid multi-file saves) and returns the verdict. The verdict carries
-`settledBy` — the exact ng line it matched to decide success/failed — so a mis-matched detector
-is obvious at a glance. `status` also
-exposes `building` (a rebuild is running) and `pending` (a saved change the latest build hasn't
-incorporated yet) if you'd rather poll. Stored log lines are ANSI-stripped and all ky-ai-ng
-timestamps are ISO-8601 with offset.
+change settles (debouncing rapid multi-file saves) and returns the verdict. The verdict carries:
+
+- `errors`/`warnings` counts, `errorLines`/`warningLines` (raw), and structured `diagnostics`
+  (`{severity, file, line, col, message, raw}`) so you can jump straight to a fix — `raw` is always
+  kept when a line doesn't parse.
+- `settledBy` — the verbatim ng line it matched to decide success/failed (its timestamp, if any, is
+  the dev server's own — not one ky-ai-ng emits).
+- `filesInLastBuild` + `lastChangeAt` — the source files this build incorporated, so you can
+  confirm **your** edit is reflected rather than rebuilding to be sure.
+- a `summary` alongside the verdict — the build's trigger/error/warning/settle lines only, with the
+  esbuild chunk-size table and `[vite] ws proxy error` spam dropped (the same filtering `tail`'s
+  `summary=true` applies).
+
+`status` also exposes `building` (a rebuild is running) and `pending` (a saved change the latest
+build hasn't incorporated yet) if you'd rather poll. Stored log lines are ANSI-stripped and all
+ky-ai-ng-emitted timestamps are ISO-8601 with offset.
 
 **When to `restart`:** `ng serve` hot-reloads code, so restart only for changes it doesn't
 pick up — `angular.json` / proxy / `tsconfig` paths, new dependencies — or a wedged server.
@@ -136,7 +147,9 @@ pick up — `angular.json` / proxy / `tsconfig` paths, new dependencies — or a
 ```json
 { "frontends": [
   { "name": "MyApp", "controlUrl": "http://127.0.0.1:51234",
-    "status": { "running": true, "build": { "status": "success", "errors": 0, "durationMs": 2310 } } }
+    "status": { "running": true, "build": {
+      "status": "success", "errors": 0, "warnings": 1, "durationMs": 2310,
+      "filesInLastBuild": ["src/app/app.component.ts"] } } }
 ] }
 ```
 
@@ -189,7 +202,8 @@ tool surface all live in the shared **[`KY.AI.Serve`](../Serve)** library.
 - `Program.cs` — arg parsing (`serve` / `run` / `shutdown` / `setup` / one-shot) and the Angular
   `SupervisorConfig` / `HubConfig`: CLI resolution (`node_modules\@angular\cli`), the npm-script
   runner, watched extensions, port and names.
-- `NgBuildMatcher.cs` — maps ng/esbuild output lines to build-start / settle / error verdicts.
+- `NgBuildMatcher.cs` — maps ng/esbuild output lines to build-start / settle / error / warning
+  verdicts and parses esbuild's two-line diagnostics into `{severity, file, line, col, message}`.
 
 In `KY.AI.Serve` (shared): `HubHost` · `Hub` · `HubTools` (incl. `shutdown`) · `SupervisorHost` ·
 `DevServer` · `RollingLog` · `BuildTracker` · `SetupCommand` · `JobObject` · `Ansi`.

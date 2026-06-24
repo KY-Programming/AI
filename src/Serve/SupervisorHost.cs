@@ -27,7 +27,8 @@ public static class SupervisorHost
         app.MapPost("/restart", async () => Results.Content(await server.RestartJsonAsync(), "application/json"));
         app.MapPost("/stop", async () => Results.Content(await server.StopJsonAsync(), "application/json"));
         app.MapPost("/start", async () => Results.Content(await server.StartJsonAsync(), "application/json"));
-        app.MapGet("/tail", (int? lines) => Results.Text(server.TailText(lines ?? 0)));
+        app.MapGet("/tail", (int? lines, bool? summary, long? sinceSeq, string? grep) =>
+            Results.Text(server.TailText(lines ?? 0, summary ?? false, sinceSeq ?? 0, grep)));
         app.MapPost("/wait-for-build", async (int? timeout, int? quiet) =>
             Results.Content(await server.WaitForBuildJsonAsync(timeout ?? cfg.DefaultTimeoutMs, quiet ?? 500), "application/json"));
         app.MapPost("/set-log-lines", (int count) =>

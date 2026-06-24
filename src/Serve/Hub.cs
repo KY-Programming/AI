@@ -23,10 +23,10 @@ internal static class Hub
     // Forward a request to a named supervisor and return its raw response body. A transient
     // blip is retried; persistent failure is reported as a soft error (left registered so a
     // heartbeat can re-confirm a live app and list/prune removes a genuinely dead one).
-    public static async Task<string> ForwardAsync(string project, HttpMethod method, string path, int timeoutSec)
+    public static async Task<string> ForwardAsync(string? project, HttpMethod method, string path, int timeoutSec)
     {
-        var reg = Registry.Get(project);
-        if (reg is null) return UnknownProject(project);
+        var reg = Resolve(project, out var resolveError);
+        if (reg is null) return resolveError!;
 
         var url = reg.ControlUrl.TrimEnd('/') + path;
         for (var attempt = 1; ; attempt++)
@@ -52,6 +52,32 @@ internal static class Hub
                 return Soft($"timed out after {timeoutSec}s waiting for the {Noun}", project, null);
             }
         }
+    }
+
+    // Resolve the target supervisor: an explicit name, or — when the name is omitted and exactly
+    // one supervisor is registered — that sole supervisor (so single-app workflows skip the name
+    // on every call). Otherwise `error` is set to a helpful payload and null is returned.
+    private static Registration? Resolve(string? project, out string? error)
+    {
+        error = null;
+        if (!string.IsNullOrWhiteSpace(project))
+        {
+            var reg = Registry.Get(project!);
+            if (reg is not null) return reg;
+            error = UnknownProject(project!);
+            return null;
+        }
+
+        var all = Registry.All();
+        if (all.Count == 1) return all.First();
+
+        error = JsonSerializer.Serialize(new
+        {
+            error = all.Count == 0 ? $"no {NounPlural} registered" : $"multiple {NounPlural} registered — specify project",
+            known = all.Select(r => r.Name).ToArray(),
+            hint = $"call list to see the running {NounPlural}",
+        }, Json);
+        return null;
     }
 
     private static string Soft(string error, string project, string? detail) =>

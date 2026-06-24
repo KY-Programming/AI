@@ -15,5 +15,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Serve\KY.AI.Serve.csproj" />
+    <ProjectReference Include="..\Ng\KY.AI.Ng.csproj" />
+    <ProjectReference Include="..\Net\KY.AI.Net.csproj" />
   </ItemGroup>
 </Project>

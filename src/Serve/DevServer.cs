@@ -106,7 +106,7 @@ internal sealed class DevServer : IDisposable
         proc.OutputDataReceived += (_, e) => { if (e.Data != null) OnLine(e.Data, false); };
         proc.ErrorDataReceived += (_, e) => { if (e.Data != null) OnLine(e.Data, true); };
 
-        WriteLocal($"↻ {_bannerCommand}  ·  {DateTimeOffset.Now:yyyy-MM-ddTHH:mm:sszzz}");
+        WriteLocal($"↻ {_bannerCommand}  ·  {DateTimeOffset.Now.ToString(BuildTracker.IsoFormat)}");
         _tracker.MarkBuilding();
         proc.Start();
         _job.Assign(proc); // OS kills the whole child tree if the supervisor dies, however it dies
@@ -136,8 +136,10 @@ internal sealed class DevServer : IDisposable
     {
         lock (_ioSync) (isErr ? Console.Error : Console.Out).WriteLine(line); // raw (keeps colour)
         var clean = Ansi.Strip(line);
-        _log.Add(clean);
-        _tracker.Observe(clean);
+        // Observe first so a build-start line is tagged with the new seq, then store the line
+        // with its build cycle + classification (powers the summary / since-seq / grep tails).
+        var (kind, seq) = _tracker.Observe(clean);
+        _log.Add(clean, seq, kind);
     }
 
     private void WriteLocal(string msg)
@@ -166,10 +168,10 @@ internal sealed class DevServer : IDisposable
                 IncludeSubdirectories = true,
                 NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size,
             };
-            void OnFs(object _, FileSystemEventArgs e) { if (IsSource(e.FullPath)) _tracker.NoteSourceChange(); }
+            void OnFs(object _, FileSystemEventArgs e) { if (IsSource(e.FullPath)) _tracker.NoteSourceChange(Rel(e.FullPath)); }
             w.Changed += OnFs;
             w.Created += OnFs;
-            w.Renamed += (_, e) => { if (IsSource(e.FullPath)) _tracker.NoteSourceChange(); };
+            w.Renamed += (_, e) => { if (IsSource(e.FullPath)) _tracker.NoteSourceChange(Rel(e.FullPath)); };
             w.EnableRaisingEvents = true;
             return w;
         }
@@ -188,6 +190,13 @@ internal sealed class DevServer : IDisposable
         return false;
     }
 
+    // Project-relative, forward-slashed path for reporting which files a build incorporated.
+    private string Rel(string fullPath)
+    {
+        try { return Path.GetRelativePath(_workingDir, fullPath).Replace('\\', '/'); }
+        catch { return fullPath; }
+    }
+
     // ---- JSON payloads served by the local REST control API (and forwarded by the hub) ----
 
     public string StatusJson() => JsonSerializer.Serialize(new
@@ -204,14 +213,20 @@ internal sealed class DevServer : IDisposable
     public async Task<string> RestartJsonAsync()
     {
         var build = await RestartAsync();
-        return JsonSerializer.Serialize(new { name = Name, action = "restart", running = Running, build, tail = _log.Tail(15) }, Json);
+        return JsonSerializer.Serialize(new { name = Name, action = "restart", running = Running, build, summary = SummaryFor(build) }, Json);
     }
 
     public async Task<string> StartJsonAsync()
     {
         var build = await StartIfStoppedAsync();
-        return JsonSerializer.Serialize(new { name = Name, action = "start", running = Running, build, tail = _log.Tail(15) }, Json);
+        return JsonSerializer.Serialize(new { name = Name, action = "start", running = Running, build, summary = SummaryFor(build) }, Json);
     }
+
+    // The noise-free slice an agent actually wants: the classified trigger/error/warning/settle
+    // lines of the just-settled build cycle — drops the esbuild chunk-size table and the repeated
+    // [vite] ws-proxy spam that otherwise bury the one line that matters.
+    private IReadOnlyList<string> SummaryFor(BuildResult build) =>
+        _log.Tail(40, summaryOnly: true, sinceSeq: build.Seq);
 
     public async Task<string> StopJsonAsync()
     {
@@ -222,12 +237,15 @@ internal sealed class DevServer : IDisposable
     public async Task<string> WaitForBuildJsonAsync(int timeoutMs, int quietMs)
     {
         var build = await WaitForBuildAsync(timeoutMs, quietMs);
-        return JsonSerializer.Serialize(new { name = Name, action = "wait_for_build", running = Running, build, tail = _log.Tail(15) }, Json);
+        return JsonSerializer.Serialize(new { name = Name, action = "wait_for_build", running = Running, build, summary = SummaryFor(build) }, Json);
     }
 
-    public string TailText(int lines)
+    // Raw tail with optional filters: summary (classified lines only), sinceSeq (current build is
+    // build.Seq from a verdict), grep (case-insensitive substring).
+    public string TailText(int lines, bool summary = false, long sinceSeq = 0, string? grep = null)
     {
-        var tail = _log.Tail(lines <= 0 ? _log.Capacity : lines);
+        var count = lines <= 0 ? _log.Capacity : lines;
+        var tail = _log.Tail(count, summary, sinceSeq, grep);
         return string.Join('\n', tail);
     }
 

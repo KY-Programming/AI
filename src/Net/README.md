@@ -117,31 +117,38 @@ Detection keys off `dotnet watch` / ASP.NET host phrasing:
 - **failed** — `Build FAILED` / `Waiting for a file to change before restarting`
 - **errors** — lines containing `: error ` (counted only during a build, so runtime log lines
   that mention "error" don't inflate the count)
+- **warnings** — lines containing `: warning ` (same build-only guard), surfaced as `warnings`/
+  `warningLines` so a green build still flags deprecations
 
-The verdict carries **`settledBy`** — the exact line that produced it — so a mis-matched detector
-is obvious. These are string matches; if a verdict looks wrong, check `settledBy` and tune
+Roslyn/MSBuild diagnostics (`File.cs(12,34): error CS0103: …`) are parsed into structured
+`diagnostics` (`{severity, file, line, col, message, raw}`), with `raw` kept when a line doesn't
+parse. The verdict carries **`settledBy`** — the exact line that produced it — so a mis-matched
+detector is obvious. These are string matches; if a verdict looks wrong, check `settledBy` and tune
 `DotnetBuildMatcher.cs`.
 
 ## MCP tools (for agents)
 
-Exposed by the **hub**; each (except `shutdown`) takes a `project` (from `list`). Allow-list as
+Exposed by the **hub**; each (except `shutdown`/`list`) takes a `project` (from `list`) — **omit it
+when only one backend is registered** and it resolves automatically. Allow-list as
 `mcp__ky-ai-dotnet__<name>`. All return JSON except `tail` (text).
 
 | Tool | Args | Purpose |
 |---|---|---|
 | `list` | — | running backends + each one's last build status. **Call first.** |
-| `status` | `project?` | one backend, or all if omitted — includes `building`/`pending` flags |
-| `wait_for_build` | `project`, `timeoutMs?` | **block until the rebuild/restart settles** (debounced), return `{status, errors, errorLines, durationMs, settledBy}` — the deterministic way to verify after an edit (default 90s) |
-| `restart` | `project` | restart, wait for it to come back up, return the verdict |
-| `stop` | `project` | stop the backend (frees the port, unlocks output files); stays registered |
-| `start` | `project` | start if stopped; waits for it to come up |
-| `tail` | `project`, `lines?` | last N log lines (`0` = whole buffer) |
-| `set_log_lines` | `project`, `count` | change how many log lines are kept (`0` = unlimited) |
+| `status` | `project?` | one backend, or all if omitted — includes `building`/`pending`, `errors`/`warnings`, `diagnostics`, `filesInLastBuild` |
+| `wait_for_build` | `project?`, `timeoutMs?` | **block until the rebuild/restart settles** (debounced), return the verdict + a noise-free `summary` — the deterministic way to verify after an edit (default 90s) |
+| `restart` | `project?` | restart, wait for it to come back up, return the verdict + `summary` |
+| `stop` | `project?` | stop the backend (frees the port, unlocks output files); stays registered |
+| `start` | `project?` | start if stopped; waits for it to come up |
+| `tail` | `project?`, `lines?`, `summary?`, `sinceSeq?`, `grep?` | last N log lines (`0` = whole buffer); `summary` keeps only build-relevant lines, `sinceSeq` scopes to one rebuild, `grep` filters by substring |
+| `set_log_lines` | `count`, `project?` | change how many log lines are kept (`0` = unlimited) |
 | `shutdown` | — | tear down the **whole stack** — stop every running backend (freeing their ports) and then the hub. Same as the `ky-ai-dotnet shutdown` CLI command and `POST`/`GET /shutdown`. To stop just one app, stop its process in your IDE. |
 
 **When to `restart`:** `dotnet watch` hot-reloads code, so restart only for changes it can't apply
 (new files, `.csproj` / config changes, rude edits) or a wedged process. For routine edits, just
-`wait_for_build`. Stored log lines are ANSI-stripped and all timestamps are ISO-8601 with offset.
+`wait_for_build` — its verdict adds `warnings`/`diagnostics` and `filesInLastBuild`/`lastChangeAt`
+(the files that build incorporated, so you can confirm your edit landed). Stored log lines are
+ANSI-stripped and all ky-ai-dotnet-emitted timestamps are ISO-8601 with offset.
 
 ## Client configuration
 
@@ -195,7 +202,8 @@ tool surface all live in the shared **[`KY.AI.Serve`](../Serve)** library.
   `SupervisorConfig` / `HubConfig`: the `dotnet [watch] run` command, watched extensions, port and
   names.
 - `DotnetBuildMatcher.cs` — maps `dotnet watch` / ASP.NET host output lines to build-start /
-  settle / error verdicts.
+  settle / error / warning verdicts and parses single-line Roslyn/MSBuild diagnostics into
+  `{severity, file, line, col, message}`.
 
 In `KY.AI.Serve` (shared): `HubHost` · `Hub` · `HubTools` (incl. `shutdown`) · `SupervisorHost` ·
 `DevServer` · `RollingLog` · `BuildTracker` · `SetupCommand` · `JobObject` · `Ansi`.

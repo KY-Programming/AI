@@ -6,10 +6,17 @@ namespace KY.AI.Serve;
 // When the line count exceeds the capacity the oldest lines are dropped; a capacity of 0 means
 // unlimited (no trimming). A file, when used, is kept open with shared read/write access so it
 // can be tailed while running.
+//
+// Each line carries the build seq it belongs to and its matcher classification (Kind), so the
+// same buffer can serve the raw human view, a noise-free "summary" (classified lines only), and
+// since-rebuild / grep filters. Callers that don't track builds (e.g. the terminal audit log)
+// use the bare Add(string)/Tail(int) overloads, which default the metadata.
 internal sealed class RollingLog : IDisposable
 {
+    private readonly record struct Entry(long Seq, LineKind Kind, string Text);
+
     private readonly object _sync = new();
-    private readonly LinkedList<string> _lines = new();
+    private readonly LinkedList<Entry> _lines = new();
     private readonly FileStream? _fs;
     private int _capacity;
 
@@ -28,9 +35,12 @@ internal sealed class RollingLog : IDisposable
     public int Capacity { get { lock (_sync) return _capacity; } }
     public int Count { get { lock (_sync) return _lines.Count; } }
 
-    public void Add(string line)
+    // Untracked add (seq 0, unclassified) — for callers that don't observe builds.
+    public void Add(string line) => Add(line, 0, LineKind.None);
+
+    public void Add(string text, long seq, LineKind kind)
     {
-        lock (_sync) { _lines.AddLast(line); Trim(); Flush(); }
+        lock (_sync) { _lines.AddLast(new Entry(seq, kind, text)); Trim(); Flush(); }
     }
 
     public void SetCapacity(int capacity)
@@ -38,12 +48,32 @@ internal sealed class RollingLog : IDisposable
         lock (_sync) { _capacity = Math.Max(0, capacity); Trim(); Flush(); }
     }
 
+    // Plain trailing tail (0 = whole buffer).
     public IReadOnlyList<string> Tail(int count)
     {
         lock (_sync)
         {
-            if (count <= 0 || count >= _lines.Count) return _lines.ToList();
-            return _lines.Skip(_lines.Count - count).ToList();
+            if (count <= 0 || count >= _lines.Count) return _lines.Select(e => e.Text).ToList();
+            return _lines.Skip(_lines.Count - count).Select(e => e.Text).ToList();
+        }
+    }
+
+    // Filtered tail: optionally only build-relevant (classified) lines, only lines from builds at
+    // or after `sinceSeq`, and/or lines containing `grep` (case-insensitive). Filters are applied
+    // first, then the trailing `count` is taken (0 = all matching).
+    public IReadOnlyList<string> Tail(int count, bool summaryOnly, long sinceSeq = 0, string? grep = null)
+    {
+        lock (_sync)
+        {
+            IEnumerable<Entry> q = _lines;
+            if (summaryOnly) q = q.Where(e => e.Kind != LineKind.None);
+            if (sinceSeq > 0) q = q.Where(e => e.Seq >= sinceSeq);
+            if (!string.IsNullOrEmpty(grep))
+                q = q.Where(e => e.Text.Contains(grep, StringComparison.OrdinalIgnoreCase));
+
+            var list = q.Select(e => e.Text).ToList();
+            if (count > 0 && count < list.Count) list = list.Skip(list.Count - count).ToList();
+            return list;
         }
     }
 
@@ -61,7 +91,7 @@ internal sealed class RollingLog : IDisposable
         try
         {
             var sb = new StringBuilder(_lines.Count * 80);
-            foreach (var l in _lines) sb.Append(l).Append("\r\n");
+            foreach (var e in _lines) sb.Append(e.Text).Append("\r\n");
             var bom = Encoding.UTF8.GetPreamble();
             var body = new UTF8Encoding(false).GetBytes(sb.ToString());
             _fs.SetLength(0);

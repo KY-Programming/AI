@@ -4,3 +4,7 @@ using System.Runtime.CompilerServices;
 // the JobObject tree-kill, and the RollingLog buffer — without those types having to become part
 // of Serve's public surface. Keep this in sync with the exe's AssemblyName.
 [assembly: InternalsVisibleTo("ky-ai-terminal")]
+
+// The test project exercises the internal build-verdict core (BuildTracker, RollingLog,
+// BuildResult) directly.
+[assembly: InternalsVisibleTo("KY.AI.Serve.Tests")]

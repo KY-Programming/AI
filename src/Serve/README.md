@@ -12,15 +12,19 @@ can reuse the same hub/supervisor machinery:
   supervisors, addressed by name (incl. the `shutdown` tool).
 - **`SupervisorHost` / `DevServer`** — runs a framework CLI, tees output, tracks build state, and
   auto-registers with the hub.
-- **`RollingLog` · `BuildTracker` · `JobObject` · `Ansi`** — the in-memory log buffer, build
-  verdict logic, Windows Job Object process reaping, and ANSI stripping.
+- **`RollingLog` · `BuildTracker` · `JobObject` · `Ansi`** — the build-aware log buffer (each line
+  tagged with its build seq + classification, so it serves the raw view, a noise-free `summary`,
+  and since-seq / grep filters), the build-verdict logic (errors **and** warnings, structured
+  `diagnostics`, and change→build correlation), Windows Job Object process reaping, and ANSI
+  stripping.
 - **`SetupCommand` / `ShutdownCommand`** — the shared CLI commands each exe dispatches:
   `<tool> setup` wires the tool into a Claude Code workspace (merges its MCP server into the
   nearest `.mcp.json` and its command allow-list + `enabledMcpjsonServers` into
   `.claude/settings.local.json`), and `<tool> shutdown` tears down the hub and its supervisors.
 
-A framework tool supplies a `BuildMatcher` (mapping CLI output to build start/settle/error) and its
-supervisor/hub configuration; the rest is shared here.
+A framework tool supplies a `BuildMatcher` (mapping CLI output to build start/settle/error/warning,
+and optionally parsing diagnostic lines into structured `{severity, file, line, col, message}`) and
+its supervisor/hub configuration; the rest is shared here.
 
 Loopback-only — nothing is exposed off the machine. See the
 [project README](https://github.com/) for the full picture.
