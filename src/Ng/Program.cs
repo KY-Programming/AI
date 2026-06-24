@@ -53,6 +53,8 @@ internal static class Program
             return SetupCommand.Run("ky-ai-ng", DefaultHubPort, args[1..]);
         if (string.Equals(args[0], "serve", StringComparison.OrdinalIgnoreCase))
             return await RunServeAsync(args[1..]);
+        if (string.Equals(args[0], "run", StringComparison.OrdinalIgnoreCase))
+            return await RunNpmScriptAsync(args[1..]);
         return RunOneShot(args);
     }
 
@@ -89,6 +91,89 @@ internal static class Program
             AutostartHub = o.AutostartHub,
         };
         return await SupervisorHost.RunAsync(options, Supervisor);
+    }
+
+    // ── run: supervise an npm script (`npm run <script>`) exactly like `serve` ──
+    // Same supervisor machinery (rolling log + REST control + hub registration + build tracking via
+    // NgBuildMatcher), but the child is `npm run <script>` instead of `ng serve`. For scripts that
+    // wrap `ng serve` (e.g. start:debug) the agent watches builds just as it does for serve.
+    private static async Task<int> RunNpmScriptAsync(string[] rest)
+    {
+        var o = ServeCommandLine.Parse(rest, DefaultHubPort);
+        if (o.Extra.Count == 0)
+        {
+            Console.Error.WriteLine("ky-ai-ng: `run` needs a script name (e.g. `ky-ai-ng run start:debug`). Use --help.");
+            return 1;
+        }
+
+        var script = o.Extra[0];
+        var forwarded = o.Extra.Skip(1).ToList();   // forwarded to the script via `npm run <s> -- ...`
+
+        string workDir;
+        try { workDir = ResolveNpmWorkingDir(Environment.CurrentDirectory); }
+        catch (Exception ex) { Console.Error.WriteLine($"ky-ai-ng: {ex.Message}"); return 1; }
+
+        var (fileName, childArgs) = BuildNpmCommand(script, forwarded);
+        var banner = "npm run " + script + (forwarded.Count > 0 ? " -- " + string.Join(' ', forwarded) : "");
+
+        var options = new SupervisorOptions
+        {
+            Name = o.Name ?? DeriveName(workDir),
+            WorkingDir = workDir,
+            ChildFileName = fileName,
+            ChildArgs = childArgs,
+            BannerCommand = banner,
+            LogPath = o.LogArg is null ? null : Path.GetFullPath(o.LogArg),
+            LogLines = o.LogLines,
+            ControlPort = o.ControlPort,
+            HubUrl = o.HubUrl,
+            UseHub = o.UseHub,
+            AutostartHub = o.AutostartHub,
+        };
+        return await SupervisorHost.RunAsync(options, Supervisor);
+    }
+
+    // Build the child command for `npm run <script> [-- <forwarded>]`, cross-platform.
+    // On Windows `npm` is `npm.cmd` (a batch file) which CreateProcess can't exec directly with
+    // UseShellExecute=false, so route through the command interpreter; elsewhere `npm` is on PATH.
+    private static (string FileName, IReadOnlyList<string> Args) BuildNpmCommand(string script, IReadOnlyList<string> forwarded)
+    {
+        var npmArgs = new List<string> { "run", script };
+        if (forwarded.Count > 0) { npmArgs.Add("--"); npmArgs.AddRange(forwarded); }
+
+        if (OperatingSystem.IsWindows())
+        {
+            var comspec = Environment.GetEnvironmentVariable("ComSpec");
+            var shell = string.IsNullOrEmpty(comspec) ? "cmd.exe" : comspec;
+            var args = new List<string> { "/c", "npm" };
+            args.AddRange(npmArgs);
+            return (shell, args);
+        }
+        return ("npm", npmArgs);
+    }
+
+    // The directory to run npm in: the nearest package.json walking up from cwd, then a ./ClientApp
+    // subfolder (the full-stack-repo convention, mirroring how ResolveNgCli locates the workspace).
+    private static string ResolveNpmWorkingDir(string cwd)
+    {
+        static bool HasPkg(string d) => File.Exists(Path.Combine(d, "package.json"));
+
+        var dir = cwd;
+        while (true)
+        {
+            if (HasPkg(dir)) return dir;
+            var parent = Path.GetDirectoryName(dir);
+            if (string.IsNullOrEmpty(parent) || parent == dir) break;
+            dir = parent;
+        }
+
+        var clientApp = Path.Combine(cwd, "ClientApp");
+        if (HasPkg(clientApp)) return clientApp;
+
+        throw new InvalidOperationException(
+            $"no package.json found. Looked in '{cwd}' and its parents, and in '{clientApp}'. " +
+            "Run `ky-ai-ng run` from your Angular workspace (or its parent with a ClientApp subfolder), " +
+            "and make sure dependencies are installed (npm install).");
     }
 
     // Default project name: the parent folder of ClientApp (e.g. MyApp), else the cwd name.
@@ -174,6 +259,18 @@ internal static class Program
             --no-hub            Standalone: buffer + local REST only; no hub, no agent access
           Anything else after `serve` is forwarded to `ng serve` (e.g. --port 4015).
           Stopping (Ctrl+C or a hard kill) reaps the whole ng tree and deregisters from the hub.
+
+        RUN — supervise an npm script (package.json) the same way as serve:
+          ky-ai-ng run <script> [options] [-- <args forwarded to the script>]
+            Runs `npm run <script>` under the supervisor — same rolling log, REST control, hub
+            registration and build tracking as serve, so the agent watches its builds the same way.
+            Options are the same as serve (--name, --log-lines, --log-file, --rest-port,
+            --hub-port, --no-hub). The script runs in the nearest package.json dir (searching up,
+            then ./ClientApp).
+          Examples:
+            ky-ai-ng run start:debug
+            ky-ai-ng run start -- --port 4201
+          Note: `run` is reserved for npm scripts here, so a raw `ng run <target>` is not proxied.
 
         SETUP — wire ky-ai-ng into a Claude Code workspace (.mcp.json + allow-list):
           ky-ai-ng setup [-y] [--dir <path>]
