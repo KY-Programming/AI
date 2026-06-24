@@ -26,6 +26,9 @@ calls `list` to discover what's running, then targets any frontend by name.
   kill of `ky-ai-ng` (e.g. Rider's Stop button) also kills the tree** via a Windows Job Object
   (`KILL_ON_JOB_CLOSE`) — the port is never left orphaned, however ky-ai-ng is stopped.
 - **`shutdown`** — stop the hub and every frontend it supervises (see below).
+- **`setup`** — wire ky-ai-ng into a Claude Code workspace: finds the nearest `.mcp.json` /
+  `.claude/` and, each step confirmed, adds the MCP server and allows its commands (see
+  [Client configuration](#client-configuration)).
 - **one-shot** — tee any other `ng` command (`build`, `version`, …) to the console, and to a log
   file when you add `--log-file`.
 - **`hub`** — the control plane: one MCP server (`/mcp`) + a registry, no ng child. Auto-managed:
@@ -52,6 +55,8 @@ ky-ai-ng serve [options]                   # one per frontend
   (anything else after `serve` is forwarded to `ng serve`, e.g. --port 4015)
 
 ky-ai-ng shutdown                          # stop the hub + every frontend it supervises
+
+ky-ai-ng setup [-y] [--dir <path>]         # wire it into a Claude Code workspace (.mcp.json + allow-list)
 
 ky-ai-ng <ng args...> [--log-file f.log]   # one-shot tee (--log-file also writes a file)
 ```
@@ -130,6 +135,10 @@ pick up — `angular.json` / proxy / `tsconfig` paths, new dependencies — or a
 
 ## Client configuration
 
+**`ky-ai-ng setup` writes both files below for you** — it walks up to the nearest `.mcp.json` and
+`.claude/`, adds the server, and allows the commands (idempotent; `-y` skips the prompts,
+`--dir <path>` starts the search elsewhere). To wire it by hand instead:
+
 Per-project `.mcp.json` (one entry total, regardless of how many frontends):
 
 ```json
@@ -170,9 +179,10 @@ That path is the NuGet global-packages cache (where `dotnet restore` unpacks a p
 This project is the thin **Angular seam**; the hub, supervisor, rolling log, build tracker and MCP
 tool surface all live in the shared **[`KY.AI.Serve`](../Serve)** library.
 
-- `Program.cs` — arg parsing (`serve` / `shutdown` / one-shot) and the Angular `SupervisorConfig` /
-  `HubConfig`: CLI resolution (`node_modules\@angular\cli`), watched extensions, port and names.
+- `Program.cs` — arg parsing (`serve` / `shutdown` / `setup` / one-shot) and the Angular
+  `SupervisorConfig` / `HubConfig`: CLI resolution (`node_modules\@angular\cli`), watched
+  extensions, port and names.
 - `NgBuildMatcher.cs` — maps ng/esbuild output lines to build-start / settle / error verdicts.
 
 In `KY.AI.Serve` (shared): `HubHost` · `Hub` · `HubTools` (incl. `shutdown`) · `SupervisorHost` ·
-`DevServer` · `RollingLog` · `BuildTracker` · `JobObject` · `Ansi`.
+`DevServer` · `RollingLog` · `BuildTracker` · `SetupCommand` · `JobObject` · `Ansi`.

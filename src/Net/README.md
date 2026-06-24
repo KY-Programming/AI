@@ -25,6 +25,9 @@ targets any backend by name.
   (re-registers every 15s — start order doesn't matter, and it survives a hub restart).
   `Ctrl+C` kills the whole tree and deregisters.
 - **`shutdown`** — stop the hub and every backend it supervises (see below).
+- **`setup`** — wire ky-ai-dotnet into a Claude Code workspace: finds the nearest `.mcp.json` /
+  `.claude/` and, each step confirmed, adds the MCP server and allows its commands (see
+  [Client configuration](#client-configuration)).
 - **one-shot** — tee any other `dotnet` command (`build`, `test`, …) to the console, and to a log
   file when you add `--log-file`.
 - **`hub`** — the control plane: one MCP server (`/mcp`) + a registry, no child process. Auto-managed:
@@ -52,6 +55,8 @@ ky-ai-dotnet serve [options]                # one per backend (dotnet watch run)
   (anything else after `serve` is forwarded to dotnet, e.g. --project ./Api.csproj)
 
 ky-ai-dotnet shutdown                       # stop the hub + every backend it supervises
+
+ky-ai-dotnet setup [-y] [--dir <path>]      # wire it into a Claude Code workspace (.mcp.json + allow-list)
 
 ky-ai-dotnet <dotnet args...> [--log-file f.log]   # one-shot tee (--log-file also writes a file)
 ```
@@ -140,6 +145,10 @@ Exposed by the **hub**; each (except `shutdown`) takes a `project` (from `list`)
 
 ## Client configuration
 
+**`ky-ai-dotnet setup` writes both files below for you** — it walks up to the nearest `.mcp.json`
+and `.claude/`, adds the server, and allows the commands (idempotent; `-y` skips the prompts,
+`--dir <path>` starts the search elsewhere). To wire it by hand instead:
+
 Per-project `.mcp.json` (one entry total, regardless of how many backends):
 
 ```json
@@ -182,10 +191,11 @@ ky-ai-dotnet serve                                            # latest, via PATH
 This project is the thin **.NET seam**; the hub, supervisor, rolling log, build tracker and MCP
 tool surface all live in the shared **[`KY.AI.Serve`](../Serve)** library.
 
-- `Program.cs` — arg parsing (`serve` / `shutdown` / one-shot) and the .NET `SupervisorConfig` /
-  `HubConfig`: the `dotnet [watch] run` command, watched extensions, port and names.
+- `Program.cs` — arg parsing (`serve` / `shutdown` / `setup` / one-shot) and the .NET
+  `SupervisorConfig` / `HubConfig`: the `dotnet [watch] run` command, watched extensions, port and
+  names.
 - `DotnetBuildMatcher.cs` — maps `dotnet watch` / ASP.NET host output lines to build-start /
   settle / error verdicts.
 
 In `KY.AI.Serve` (shared): `HubHost` · `Hub` · `HubTools` (incl. `shutdown`) · `SupervisorHost` ·
-`DevServer` · `RollingLog` · `BuildTracker` · `JobObject` · `Ansi`.
+`DevServer` · `RollingLog` · `BuildTracker` · `SetupCommand` · `JobObject` · `Ansi`.
