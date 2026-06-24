@@ -49,6 +49,8 @@ internal static class Program
             return await HubHost.RunAsync(HubCfg, args[1..]);
         if (string.Equals(args[0], "shutdown", StringComparison.OrdinalIgnoreCase))
             return await ShutdownCommand.RunAsync("ky-ai-ng", DefaultHubPort, args[1..]);
+        if (string.Equals(args[0], "setup", StringComparison.OrdinalIgnoreCase))
+            return SetupCommand.Run("ky-ai-ng", DefaultHubPort, args[1..]);
         if (string.Equals(args[0], "serve", StringComparison.OrdinalIgnoreCase))
             return await RunServeAsync(args[1..]);
         return RunOneShot(args);
@@ -172,6 +174,11 @@ internal static class Program
             --no-hub            Standalone: buffer + local REST only; no hub, no agent access
           Anything else after `serve` is forwarded to `ng serve` (e.g. --port 4015).
           Stopping (Ctrl+C or a hard kill) reaps the whole ng tree and deregisters from the hub.
+
+        SETUP — wire ky-ai-ng into a Claude Code workspace (.mcp.json + allow-list):
+          ky-ai-ng setup [-y] [--dir <path>]
+          Finds the nearest .mcp.json and .claude/, then (each step confirmed) adds the MCP
+          server and allows its commands. Merges into existing files; safe to re-run.
 
         SHUTDOWN — stop the hub and every frontend it supervises:
           ky-ai-ng shutdown

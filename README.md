@@ -63,7 +63,19 @@ With the tool(s) on your `PATH`:
    ky-ai-dotnet serve  # in a .NET project folder
    ```
 
-2. **Wire the MCP client** — one `.mcp.json` per workspace; the ports are fixed:
+2. **Wire the MCP client.** The quickest way for **Claude Code** is the built-in `setup` command —
+   run it once per tool from anywhere in your workspace:
+
+   ```powershell
+   ky-ai-ng setup        # add -y to skip the prompts
+   ky-ai-dotnet setup
+   ```
+
+   It walks up to the nearest `.mcp.json` and `.claude/` folder, then — each step confirmed — adds
+   the tool's MCP server to `.mcp.json` and allows its commands (and pre-enables the server) in
+   `.claude/settings.local.json`. Both writes merge into existing files and are safe to re-run.
+
+   To wire it **by hand** instead — one `.mcp.json` per workspace; the ports are fixed:
 
    ```json
    {
