@@ -19,6 +19,7 @@ public static class SupervisorHost
         if (opt.LogPath is not null) Cli.EnsureDir(opt.LogPath);
 
         using var server = new DevServer(opt, cfg);
+        using var afterStart = opt.AfterStart is { Count: > 0 } ? new AfterStartLauncher() : null;
 
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
@@ -65,6 +66,7 @@ public static class SupervisorHost
         app.Lifetime.ApplicationStopping.Register(() =>
         {
             stopping.Cancel();
+            try { afterStart?.Dispose(); } catch { /* reap the --after-start child tree */ }
             try { if (opt.UseHub) DeregisterAsync(opt.HubUrl, opt.Name).GetAwaiter().GetResult(); } catch { /* hub gone */ }
             try { server.RevertInject(); } catch { /* leave index.html clean even if ky-ai-browser died */ }
             try { server.StopAsync().GetAwaiter().GetResult(); } catch { /* shutting down */ }
@@ -101,6 +103,11 @@ public static class SupervisorHost
         else
         {
             Console.WriteLine($"{cfg.ToolName} · standalone (--no-hub); not registered with a hub");
+        }
+        if (afterStart is not null && opt.AfterStart is { Count: > 0 } afterCmd)
+        {
+            Console.WriteLine($"{cfg.ToolName} · --after-start queued (runs after first build): {string.Join(' ', afterCmd)}");
+            _ = afterStart.LaunchAfterBuildAsync(cfg, server, afterCmd, stopping.Token);
         }
         Console.WriteLine($"{cfg.ToolName} · Ctrl+C to stop");
 

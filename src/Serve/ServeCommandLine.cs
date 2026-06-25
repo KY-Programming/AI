@@ -13,6 +13,11 @@ public sealed class ServeOptions
     public bool UseHub { get; set; } = true;
     public bool AutostartHub { get; set; } = true;  // always on (the hub is auto-managed)
     public List<string> Extra { get; } = new();
+
+    // Command to launch once the dev server has finished its first build (i.e. is "up"). argv-style,
+    // already split by the shell; empty = nothing to run. Fills the gap left by PowerShell having no
+    // `serve & sleep 1 && other` — but keyed off the real ready signal instead of a fixed sleep.
+    public List<string> AfterStart { get; } = new();
 }
 
 // Parses the flags shared by both tools' supervisor subcommands. Everything loopback-only, so
@@ -34,6 +39,9 @@ public static class ServeCommandLine
                 case "--log-lines": if (++i < rest.Length && int.TryParse(rest[i], out var n)) o.LogLines = Math.Max(0, n); break;  // 0 = unlimited
                 case "--rest-port": if (++i < rest.Length && int.TryParse(rest[i], out var cp)) o.ControlPort = cp; break;
                 case "--no-hub": o.UseHub = false; break;
+                // Greedy: everything after --after-start is the command to launch once the server is
+                // up. argv-style (no shell re-parsing), so it must come last on the line.
+                case "--after-start": for (i++; i < rest.Length; i++) o.AfterStart.Add(rest[i]); break;
                 default: o.Extra.Add(a); break;
             }
         }

@@ -35,6 +35,13 @@ ky-ai-browser [options]            # run alongside `ky-ai-ng serve`
   -y, --yes           Skip the inject confirmation (default answer is yes anyway)
 ```
 
+Usually you launch it together with the dev server — let `ky-ai-ng serve` start
+`ky-ai-browser` once the first build settles (it shares the console and is killed when serve stops):
+
+```
+ky-ai-ng serve --after-start ky-ai-browser -y
+```
+
 ## MCP tools (for agents)
 
 | Tool | Args | Purpose |

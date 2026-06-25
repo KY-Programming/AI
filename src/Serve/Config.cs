@@ -54,6 +54,7 @@ public sealed class SupervisorOptions
     public required string HubUrl { get; init; }
     public bool UseHub { get; init; } = true;
     public bool AutostartHub { get; init; } = true;
+    public IReadOnlyList<string>? AfterStart { get; init; }         // command to launch once up (null/empty → none)
 }
 
 // Tool-specific identity for the hub control plane.

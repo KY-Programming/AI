@@ -94,6 +94,7 @@ internal static class Program
             HubUrl = o.HubUrl,
             UseHub = o.UseHub,
             AutostartHub = o.AutostartHub,
+            AfterStart = o.AfterStart.Count > 0 ? o.AfterStart : null,
         };
         return await SupervisorHost.RunAsync(options, Supervisor);
     }
@@ -134,6 +135,7 @@ internal static class Program
             HubUrl = o.HubUrl,
             UseHub = o.UseHub,
             AutostartHub = o.AutostartHub,
+            AfterStart = o.AfterStart.Count > 0 ? o.AfterStart : null,
         };
         return await SupervisorHost.RunAsync(options, Supervisor);
     }
@@ -262,19 +264,25 @@ internal static class Program
             --rest-port <N>     Local REST control port (default: OS-assigned)
             --hub-port <N>      Hub port to register with (default: 5101; rarely needed — does not start a hub)
             --no-hub            Standalone: buffer + local REST only; no hub, no agent access
+            --after-start <cmd...>  Run <cmd> once the first build settles (the dev server is up).
+                                    Greedy — everything after it is the command, so put it last.
+                                    Replaces the PowerShell-unfriendly `serve & sleep 1 && cmd`.
+                                    The command shares this console and is killed when serve stops.
           Anything else after `serve` is forwarded to `ng serve` (e.g. --port 4015).
           Stopping (Ctrl+C or a hard kill) reaps the whole ng tree and deregisters from the hub.
+          Example: ky-ai-ng serve --port 4015 --after-start ky-ai-browser -y
 
         RUN — supervise an npm script (package.json) the same way as serve:
           ky-ai-ng run <script> [options] [-- <args forwarded to the script>]
             Runs `npm run <script>` under the supervisor — same rolling log, REST control, hub
             registration and build tracking as serve, so the agent watches its builds the same way.
             Options are the same as serve (--name, --log-lines, --log-file, --rest-port,
-            --hub-port, --no-hub). The script runs in the nearest package.json dir (searching up,
-            then ./ClientApp).
+            --hub-port, --no-hub, --after-start). The script runs in the nearest package.json dir
+            (searching up, then ./ClientApp).
           Examples:
             ky-ai-ng run start:debug
             ky-ai-ng run start -- --port 4201
+            ky-ai-ng run start:dev --after-start ky-ai-browser -y
           Note: `run` is reserved for npm scripts here, so a raw `ng run <target>` is not proxied.
 
         INIT — wire ky-ai-ng into a Claude Code workspace (.mcp.json + allow-list):

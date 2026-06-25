@@ -55,7 +55,11 @@ ky-ai-ng serve [options]                   # one per frontend
   --rest-port <N>     Local REST control port (default: OS-assigned)
   --hub-port <N>      Hub port to register with (default: 5101; rarely needed — doesn't start a hub)
   --no-hub            Standalone: buffer + local REST only; no hub, no agent access
+  --after-start <cmd...>  Run <cmd> once the first build settles (the dev server is up); greedy,
+                          so put it last. Replaces `serve & sleep 1 && cmd` (PowerShell has no `&`).
+                          Shares this console and is killed when serve stops.
   (anything else after `serve` is forwarded to `ng serve`, e.g. --port 4015)
+  e.g. ky-ai-ng serve --after-start ky-ai-browser -y
 
 ky-ai-ng run <script> [options] [-- <args>]  # supervise `npm run <script>` like serve
   (same options as serve; runs in the nearest package.json dir, then ./ClientApp)

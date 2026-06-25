@@ -90,6 +90,7 @@ internal static class Program
             HubUrl = o.HubUrl,
             UseHub = o.UseHub,
             AutostartHub = o.AutostartHub,
+            AfterStart = o.AfterStart.Count > 0 ? o.AfterStart : null,
         };
         return await SupervisorHost.RunAsync(options, Supervisor);
     }
@@ -151,6 +152,10 @@ internal static class Program
             --no-watch          Use `dotnet run` instead of `dotnet watch run` (stable for debugging)
             --hub-port <N>      Hub port to register with (default: 5102; rarely needed — does not start a hub)
             --no-hub            Standalone: tee + rolling log + local REST only; no hub, no agent access
+            --after-start <cmd...>  Run <cmd> once the first build settles (the backend is up).
+                                    Greedy — everything after it is the command, so put it last.
+                                    Replaces the PowerShell-unfriendly `serve & sleep 1 && cmd`.
+                                    The command shares this console and is killed when serve stops.
           Anything else after `serve` is forwarded to dotnet (e.g. --project ./Api.csproj).
           `dotnet watch run` hot-reloads; the agent verifies builds via the hub's wait_for_build.
 

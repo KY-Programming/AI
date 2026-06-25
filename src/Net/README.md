@@ -52,6 +52,9 @@ ky-ai-dotnet serve [options]                # one per backend (dotnet watch run)
   --no-watch          Use `dotnet run` instead of `dotnet watch run` (stable for debugging)
   --hub-port <N>      Hub port to register with (default: 5102; rarely needed — doesn't start a hub)
   --no-hub            Standalone: tee + rolling log + local REST only; no hub, no agent access
+  --after-start <cmd...>  Run <cmd> once the first build settles (the backend is up); greedy, so
+                          put it last. Replaces `serve & sleep 1 && cmd` (PowerShell has no `&`).
+                          Shares this console and is killed when serve stops.
   (anything else after `serve` is forwarded to dotnet, e.g. --project ./Api.csproj)
 
 ky-ai-dotnet shutdown                       # stop the hub + every backend it supervises
