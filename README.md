@@ -64,12 +64,12 @@ With the tool(s) on your `PATH`:
    ky-ai-dotnet serve  # in a .NET project folder
    ```
 
-2. **Wire the MCP client.** The quickest way for **Claude Code** is the built-in `setup` command —
+2. **Wire the MCP client.** The quickest way for **Claude Code** is the built-in `init` command —
    run it once per tool from anywhere in your workspace:
 
    ```powershell
-   ky-ai-ng setup        # add -y to skip the prompts
-   ky-ai-dotnet setup
+   ky-ai-ng init         # add -y to skip the prompts
+   ky-ai-dotnet init
    ```
 
    It walks up to the nearest `.mcp.json` and `.claude/` folder, then — each step confirmed — adds

@@ -56,8 +56,8 @@ internal static class Program
             return await HubHost.RunAsync(HubCfg, args[1..]);
         if (string.Equals(args[0], "shutdown", StringComparison.OrdinalIgnoreCase))
             return await ShutdownCommand.RunAsync("ky-ai-ng", DefaultHubPort, args[1..]);
-        if (string.Equals(args[0], "setup", StringComparison.OrdinalIgnoreCase))
-            return SetupCommand.Run("ky-ai-ng", DefaultHubPort, args[1..]);
+        if (string.Equals(args[0], "init", StringComparison.OrdinalIgnoreCase))
+            return InitCommand.Run("ky-ai-ng", DefaultHubPort, args[1..]);
         if (string.Equals(args[0], "update", StringComparison.OrdinalIgnoreCase))
             return UpdateCommand.Run("ky-ai-ng", "KY.AI.Ng", "@ky-ai/ng", args[1..]);
         if (string.Equals(args[0], "serve", StringComparison.OrdinalIgnoreCase))
@@ -281,8 +281,8 @@ internal static class Program
             ky-ai-ng run start -- --port 4201
           Note: `run` is reserved for npm scripts here, so a raw `ng run <target>` is not proxied.
 
-        SETUP — wire ky-ai-ng into a Claude Code workspace (.mcp.json + allow-list):
-          ky-ai-ng setup [-y] [--dir <path>]
+        INIT — wire ky-ai-ng into a Claude Code workspace (.mcp.json + allow-list):
+          ky-ai-ng init [-y] [--dir <path>]
           Finds the nearest .mcp.json and .claude/, then (each step confirmed) adds the MCP
           server and allows its commands. Merges into existing files; safe to re-run.
 

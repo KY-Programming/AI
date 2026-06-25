@@ -7,7 +7,7 @@ using ModelContextProtocol.Server;
 
 namespace KY.AI.Serve;
 
-// `<tool> setup` — wire THIS tool into a Claude Code workspace with two confirmed steps:
+// `<tool> init` — wire THIS tool into a Claude Code workspace with two confirmed steps:
 //   1. add the tool's MCP server to the nearest `.mcp.json` (walking up from the cwd)
 //   2. allow the tool's MCP commands (and pre-enable the server) in `.claude/settings.local.json`
 // Each step is idempotent and merges into existing files without disturbing other content, so
@@ -16,7 +16,7 @@ namespace KY.AI.Serve;
 //
 // The discovery and JSON-merge logic is split into pure, file-system-free statics (Discover,
 // MergeMcpJson, MergeSettingsJson, DiscoverToolNames) so they can be unit-tested directly.
-public static class SetupCommand
+public static class InitCommand
 {
     private static readonly JsonSerializerOptions WriteOpts = new()
     {
@@ -27,7 +27,7 @@ public static class SetupCommand
     private const string Check = "✓"; // ✓
     private const string Bullet = "·"; // ·
 
-    public sealed record SetupPaths(
+    public sealed record InitPaths(
         string Root,
         string McpPath, bool McpExists,
         string SettingsPath, bool SettingsExists,
@@ -55,22 +55,22 @@ public static class SetupCommand
                 case "--dir": if (++i < rest.Length) startDir = Path.GetFullPath(rest[i]); break;
                 case "-h" or "--help": PrintHelp(toolName, hubPort); return 0;
                 default:
-                    Console.Error.WriteLine($"{toolName} setup: unknown option '{rest[i]}'. Try `{toolName} setup --help`.");
+                    Console.Error.WriteLine($"{toolName} init: unknown option '{rest[i]}'. Try `{toolName} init --help`.");
                     return 1;
             }
         }
 
-        var commands = DiscoverToolNames(toolsAssembly ?? typeof(SetupCommand).Assembly);
+        var commands = DiscoverToolNames(toolsAssembly ?? typeof(InitCommand).Assembly);
         if (commands.Count == 0)
         {
-            Console.Error.WriteLine($"{toolName} setup: found no MCP commands to allow (internal error).");
+            Console.Error.WriteLine($"{toolName} init: found no MCP commands to allow (internal error).");
             return 1;
         }
 
         var paths = Discover(startDir);
         var url = $"http://127.0.0.1:{hubPort}/mcp";
 
-        Console.WriteLine($"{toolName} setup");
+        Console.WriteLine($"{toolName} init");
         Console.WriteLine($"  Agent:        Claude Code  {(paths.AgentDetected ? "(found .claude/)" : $"(no .claude/ — will create under {paths.Root})")}");
         Console.WriteLine($"  MCP config:   {paths.McpPath}{(paths.McpExists ? "" : "  (will create)")}");
         Console.WriteLine($"  Local config: {paths.SettingsPath}{(paths.SettingsExists ? "" : "  (will create)")}");
@@ -151,7 +151,7 @@ public static class SetupCommand
 
     // ── discovery: nearest `.claude/` dir and `.mcp.json`, walking up from startDir ──
     // Missing pieces are planned next to whichever was found (the project root), else in startDir.
-    public static SetupPaths Discover(string startDir)
+    public static InitPaths Discover(string startDir)
     {
         startDir = Path.GetFullPath(startDir);
 
@@ -180,7 +180,7 @@ public static class SetupCommand
         var claudeOut = claudeDir ?? Path.Combine(root, ".claude");
         var settingsPath = Path.Combine(claudeOut, "settings.local.json");
 
-        return new SetupPaths(
+        return new InitPaths(
             root,
             mcpPath, mcpFile is not null,
             settingsPath, File.Exists(settingsPath),
@@ -351,14 +351,14 @@ public static class SetupCommand
     private static void PrintHelp(string toolName, int hubPort)
     {
         Console.WriteLine($"""
-        {toolName} setup — wire this tool into a Claude Code workspace.
+        {toolName} init — wire this tool into a Claude Code workspace.
 
         Walks up from the current directory to find the nearest `.mcp.json` and `.claude/`
         folder, then (each step confirmed) adds the {toolName} MCP server (127.0.0.1:{hubPort})
         to `.mcp.json` and allows its MCP commands in `.claude/settings.local.json`. Both
         steps merge into existing files and are safe to re-run.
 
-          {toolName} setup [options]
+          {toolName} init [options]
             -y, --yes        Accept both prompts (non-interactive)
             --dir <path>     Start the search from <path> instead of the current directory
             -h, --help       Show this help

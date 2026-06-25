@@ -29,9 +29,9 @@ calls `list` to discover what's running, then targets any frontend by name.
   rolling log, REST control, hub registration and build tracking, so the agent watches its builds
   the same way. Use it for `package.json` scripts that wrap `ng serve` (e.g. `start:debug`).
 - **`shutdown`** — stop the hub and every frontend it supervises (see below).
-- **`setup`** — wire ky-ai-ng into a Claude Code workspace: finds the nearest `.mcp.json` /
+- **`init`** — wire ky-ai-ng into a Claude Code workspace: finds the nearest `.mcp.json` /
   `.claude/` and, each step confirmed, adds the MCP server and allows its commands (see
-  [Client configuration](#client-configuration)).
+  [Client init](#client-init)).
 - **one-shot** — tee any other `ng` command (`build`, `version`, …) to the console, and to a log
   file when you add `--log-file`.
 - **`hub`** — the control plane: one MCP server (`/mcp`) + a registry, no ng child. Auto-managed:
@@ -63,7 +63,7 @@ ky-ai-ng run <script> [options] [-- <args>]  # supervise `npm run <script>` like
 
 ky-ai-ng shutdown                          # stop the hub + every frontend it supervises
 
-ky-ai-ng setup [-y] [--dir <path>]         # wire it into a Claude Code workspace (.mcp.json + allow-list)
+ky-ai-ng init [-y] [--dir <path>]          # wire it into a Claude Code workspace (.mcp.json + allow-list)
 
 ky-ai-ng <ng args...> [--log-file f.log]   # one-shot tee (--log-file also writes a file)
 ```
@@ -103,9 +103,9 @@ A `start:ai` script per frontend, run in Rider — the first one auto-starts the
 
 One config per frontend either way; the MCP hub auto-starts, so there's no separate hub config.
 
-## Client configuration
+## Client init
 
-**`ky-ai-ng setup` writes both files below for you** — it walks up to the nearest `.mcp.json` and
+**`ky-ai-ng init` writes both files below for you** — it walks up to the nearest `.mcp.json` and
 `.claude/`, adds the server, and allows the commands (idempotent; `-y` skips the prompts,
 `--dir <path>` starts the search elsewhere). To wire it by hand instead:
 
@@ -215,11 +215,11 @@ That path is the NuGet global-packages cache (where `dotnet restore` unpacks a p
 This project is the thin **Angular seam**; the hub, supervisor, rolling log, build tracker and MCP
 tool surface all live in the shared **[`KY.AI.Serve`](../Serve)** library.
 
-- `Program.cs` — arg parsing (`serve` / `run` / `shutdown` / `setup` / one-shot) and the Angular
+- `Program.cs` — arg parsing (`serve` / `run` / `shutdown` / `init` / one-shot) and the Angular
   `SupervisorConfig` / `HubConfig`: CLI resolution (`node_modules\@angular\cli`), the npm-script
   runner, watched extensions, port and names.
 - `NgBuildMatcher.cs` — maps ng/esbuild output lines to build-start / settle / error / warning
   verdicts and parses esbuild's two-line diagnostics into `{severity, file, line, col, message}`.
 
 In `KY.AI.Serve` (shared): `HubHost` · `Hub` · `HubTools` (incl. `shutdown`) · `SupervisorHost` ·
-`DevServer` · `RollingLog` · `BuildTracker` · `SetupCommand` · `JobObject` · `Ansi`.
+`DevServer` · `RollingLog` · `BuildTracker` · `InitCommand` · `JobObject` · `Ansi`.

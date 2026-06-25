@@ -17,8 +17,8 @@ can reuse the same hub/supervisor machinery:
   and since-seq / grep filters), the build-verdict logic (errors **and** warnings, structured
   `diagnostics`, and change→build correlation), Windows Job Object process reaping, and ANSI
   stripping.
-- **`SetupCommand` / `ShutdownCommand`** — the shared CLI commands each exe dispatches:
-  `<tool> setup` wires the tool into a Claude Code workspace (merges its MCP server into the
+- **`InitCommand` / `ShutdownCommand`** — the shared CLI commands each exe dispatches:
+  `<tool> init` wires the tool into a Claude Code workspace (merges its MCP server into the
   nearest `.mcp.json` and its command allow-list + `enabledMcpjsonServers` into
   `.claude/settings.local.json`), and `<tool> shutdown` tears down the hub and its supervisors.
 

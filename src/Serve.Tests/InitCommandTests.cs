@@ -5,16 +5,16 @@ using Xunit;
 
 namespace KY.AI.Serve.Tests;
 
-// Exercises the pure, file-system-free core of `<tool> setup`: MCP-command reflection, the two
+// Exercises the pure, file-system-free core of `<tool> init`: MCP-command reflection, the two
 // JSON merges (idempotent, content-preserving), and the walk-up discovery of .mcp.json / .claude.
-public class SetupCommandTests
+public class InitCommandTests
 {
     // ── DiscoverToolNames: reflect the MCP command list off a tool's MCP tool type ──
 
     [Fact]
     public void DiscoverToolNames_reads_hub_tools_from_serve_assembly()
     {
-        var names = SetupCommand.DiscoverToolNames(typeof(SetupCommand).Assembly);
+        var names = InitCommand.DiscoverToolNames(typeof(InitCommand).Assembly);
 
         // HubTools (the commands ky-ai-ng / ky-ai-dotnet expose), sorted and de-duplicated.
         Assert.Equal(
@@ -27,7 +27,7 @@ public class SetupCommandTests
     {
         // Reflects FakeTools below: explicit names are kept as-is, an attribute with no Name
         // falls back to snake_case of the method name, plain methods are ignored, output is sorted.
-        var names = SetupCommand.DiscoverToolNames(typeof(FakeTools).Assembly);
+        var names = InitCommand.DiscoverToolNames(typeof(FakeTools).Assembly);
 
         Assert.Equal(new[] { "alpha", "mixed_case_name", "zebra" }, names);
     }
@@ -37,7 +37,7 @@ public class SetupCommandTests
     [Fact]
     public void MergeMcpJson_adds_server_to_empty_input()
     {
-        var res = SetupCommand.MergeMcpJson(null, "ky-ai-ng", 5101);
+        var res = InitCommand.MergeMcpJson(null, "ky-ai-ng", 5101);
 
         Assert.True(res.Added);
         Assert.True(res.Changed);
@@ -51,7 +51,7 @@ public class SetupCommandTests
     {
         const string existing = """{ "mcpServers": { "other": { "type": "http", "url": "http://127.0.0.1:9999/mcp" } } }""";
 
-        var res = SetupCommand.MergeMcpJson(existing, "ky-ai-dotnet", 5102);
+        var res = InitCommand.MergeMcpJson(existing, "ky-ai-dotnet", 5102);
 
         var servers = JsonNode.Parse(res.Json)!["mcpServers"]!.AsObject();
         Assert.True(servers.ContainsKey("other"));
@@ -62,8 +62,8 @@ public class SetupCommandTests
     [Fact]
     public void MergeMcpJson_is_idempotent_when_already_present()
     {
-        var first = SetupCommand.MergeMcpJson(null, "ky-ai-ng", 5101);
-        var second = SetupCommand.MergeMcpJson(first.Json, "ky-ai-ng", 5101);
+        var first = InitCommand.MergeMcpJson(null, "ky-ai-ng", 5101);
+        var second = InitCommand.MergeMcpJson(first.Json, "ky-ai-ng", 5101);
 
         Assert.False(second.Changed);
         Assert.False(second.Added);
@@ -72,9 +72,9 @@ public class SetupCommandTests
     [Fact]
     public void MergeMcpJson_updates_when_url_differs()
     {
-        var first = SetupCommand.MergeMcpJson(null, "ky-ai-ng", 5101);
+        var first = InitCommand.MergeMcpJson(null, "ky-ai-ng", 5101);
 
-        var changed = SetupCommand.MergeMcpJson(first.Json, "ky-ai-ng", 5999); // different port
+        var changed = InitCommand.MergeMcpJson(first.Json, "ky-ai-ng", 5999); // different port
 
         Assert.True(changed.Changed);
         Assert.False(changed.Added);  // updated, not added
@@ -84,7 +84,7 @@ public class SetupCommandTests
     [Fact]
     public void MergeMcpJson_throws_on_non_object_root()
     {
-        Assert.Throws<InvalidDataException>(() => SetupCommand.MergeMcpJson("[1,2,3]", "ky-ai-ng", 5101));
+        Assert.Throws<InvalidDataException>(() => InitCommand.MergeMcpJson("[1,2,3]", "ky-ai-ng", 5101));
     }
 
     // ── MergeSettingsJson ──
@@ -94,7 +94,7 @@ public class SetupCommandTests
     {
         var cmds = new[] { "list", "status", "restart" };
 
-        var res = SetupCommand.MergeSettingsJson(null, "ky-ai-ng", cmds);
+        var res = InitCommand.MergeSettingsJson(null, "ky-ai-ng", cmds);
 
         Assert.Equal(3, res.CommandsAdded);
         Assert.True(res.ServerEnabledAdded);
@@ -115,7 +115,7 @@ public class SetupCommandTests
         { "permissions": { "allow": [ "Bash(dotnet run *)", "mcp__ky-ai-ng__list" ] } }
         """;
 
-        var res = SetupCommand.MergeSettingsJson(existing, "ky-ai-ng", new[] { "list", "status" });
+        var res = InitCommand.MergeSettingsJson(existing, "ky-ai-ng", new[] { "list", "status" });
 
         Assert.Equal(1, res.CommandsAdded);          // only `status` is new; `list` already there
         Assert.True(res.ServerEnabledAdded);
@@ -130,9 +130,9 @@ public class SetupCommandTests
     public void MergeSettingsJson_is_idempotent()
     {
         var cmds = new[] { "list", "status" };
-        var first = SetupCommand.MergeSettingsJson(null, "ky-ai-ng", cmds);
+        var first = InitCommand.MergeSettingsJson(null, "ky-ai-ng", cmds);
 
-        var second = SetupCommand.MergeSettingsJson(first.Json, "ky-ai-ng", cmds);
+        var second = InitCommand.MergeSettingsJson(first.Json, "ky-ai-ng", cmds);
 
         Assert.Equal(0, second.CommandsAdded);
         Assert.False(second.ServerEnabledAdded);
@@ -151,7 +151,7 @@ public class SetupCommandTests
         var nested = Path.Combine(root, "src", "app", "deep");
         Directory.CreateDirectory(nested);
 
-        var paths = SetupCommand.Discover(nested);
+        var paths = InitCommand.Discover(nested);
 
         Assert.True(paths.AgentDetected);
         Assert.True(paths.McpExists);
@@ -167,7 +167,7 @@ public class SetupCommandTests
         var start = Path.Combine(temp.Path, "lonely");
         Directory.CreateDirectory(start);
 
-        var paths = SetupCommand.Discover(start);
+        var paths = InitCommand.Discover(start);
 
         Assert.False(paths.AgentDetected);
         Assert.False(paths.McpExists);
@@ -190,7 +190,7 @@ public class SetupCommandTests
     private sealed class TempDir : IDisposable
     {
         public string Path { get; } = System.IO.Path.Combine(
-            System.IO.Path.GetTempPath(), "kyai-setup-" + Guid.NewGuid().ToString("N"));
+            System.IO.Path.GetTempPath(), "kyai-init-" + Guid.NewGuid().ToString("N"));
 
         public TempDir() => Directory.CreateDirectory(Path);
 

@@ -48,8 +48,8 @@ internal static class Program
             return await HubHost.RunAsync(HubCfg, args[1..]);
         if (string.Equals(args[0], "shutdown", StringComparison.OrdinalIgnoreCase))
             return await ShutdownCommand.RunAsync("ky-ai-dotnet", DefaultHubPort, args[1..]);
-        if (string.Equals(args[0], "setup", StringComparison.OrdinalIgnoreCase))
-            return SetupCommand.Run("ky-ai-dotnet", DefaultHubPort, args[1..]);
+        if (string.Equals(args[0], "init", StringComparison.OrdinalIgnoreCase))
+            return InitCommand.Run("ky-ai-dotnet", DefaultHubPort, args[1..]);
         if (string.Equals(args[0], "update", StringComparison.OrdinalIgnoreCase))
             return UpdateCommand.Run("ky-ai-dotnet", "KY.AI.Net", npmPackageId: null, args[1..]);
         if (string.Equals(args[0], "serve", StringComparison.OrdinalIgnoreCase))
@@ -154,8 +154,8 @@ internal static class Program
           Anything else after `serve` is forwarded to dotnet (e.g. --project ./Api.csproj).
           `dotnet watch run` hot-reloads; the agent verifies builds via the hub's wait_for_build.
 
-        SETUP — wire ky-ai-dotnet into a Claude Code workspace (.mcp.json + allow-list):
-          ky-ai-dotnet setup [-y] [--dir <path>]
+        INIT — wire ky-ai-dotnet into a Claude Code workspace (.mcp.json + allow-list):
+          ky-ai-dotnet init [-y] [--dir <path>]
           Finds the nearest .mcp.json and .claude/, then (each step confirmed) adds the MCP
           server and allows its commands. Merges into existing files; safe to re-run.
 
