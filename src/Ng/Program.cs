@@ -25,13 +25,9 @@ internal static class Program
         WatchRoot = wd => { var src = Path.Combine(wd, "src"); return Directory.Exists(src) ? src : wd; },
         DefaultTimeoutMs = 60000,
         DefaultQuietMs = 400,
-        // The file ky-ai tool's reversible inject targets: the app's index.html (the Angular
-        // default; src/index.html under the workspace). Null if it isn't there.
-        ResolveInjectTarget = wd =>
-        {
-            var idx = Path.Combine(wd, "src", "index.html");
-            return File.Exists(idx) ? idx : null;
-        },
+        // The file ky-ai tool's reversible inject targets: the app's index.html, resolved from
+        // angular.json's build `index` option (falling back to src/index.html).
+        ResolveInjectTarget = NgIndexResolver.Resolve,
     };
 
     private static readonly HubConfig HubCfg = new()

@@ -1,4 +1,10 @@
 <Solution>
+  <Folder Name="/Misc/">
+    <File Path="../README.md" />
+    <File Path="../TODOs.md" />
+  </Folder>
+  <Project Path="Browser/KY.AI.Browser.csproj" />
+  <Project Path="Browser.Tests/KY.AI.Browser.Tests.csproj" />
   <Project Path="Serve/KY.AI.Serve.csproj" />
   <Project Path="Serve.Tests/KY.AI.Serve.Tests.csproj" />
   <Project Path="Ng/KY.AI.Ng.csproj" />

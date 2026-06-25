@@ -50,6 +50,7 @@ public static class SupervisorHost
             return Results.Content(server.InjectJson(req.File, req.Path ?? "/html/head", req.Content), "application/json");
         });
         app.MapPost("/uninject", () => Results.Content(server.UninjectJson(), "application/json"));
+        app.MapPost("/inject/heartbeat", () => Results.Content(server.InjectHeartbeatJson(), "application/json"));
         // Exit this supervisor process (the hub calls this when tearing the whole stack down).
         // ApplicationStopping deregisters and kills the dev-server tree; delayed a beat so the
         // response reaches the hub before the host tears down.

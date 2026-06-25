@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text.Json;
 using KY.AI.Serve;
 using Xunit;
 
@@ -76,5 +77,22 @@ public class DevServerInjectTests
         var dir = Directory.CreateTempSubdirectory().FullName;
         using var dev = New(dir, injectTarget: null);   // dotnet-like: no inject target
         Assert.Contains("\"ok\":false", dev.InjectJson(null, "/html/head", "<s>"));
+    }
+
+    [Fact]
+    public void Heartbeat_reports_active_after_inject_then_inactive_after_uninject()
+    {
+        var dir = Directory.CreateTempSubdirectory().FullName;
+        var idx = Path.Combine(dir, "index.html");
+        File.WriteAllText(idx, "<html><head></head></html>");
+        using var dev = New(dir, idx);
+
+        dev.InjectJson(null, "/html/head", "<script></script>");
+        using (var d = JsonDocument.Parse(dev.InjectHeartbeatJson()))
+            Assert.True(d.RootElement.GetProperty("active").GetBoolean());
+
+        dev.UninjectJson();
+        using (var d = JsonDocument.Parse(dev.InjectHeartbeatJson()))
+            Assert.False(d.RootElement.GetProperty("active").GetBoolean());
     }
 }

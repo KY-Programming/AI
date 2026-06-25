@@ -12,6 +12,7 @@ internal sealed class DevServer : IDisposable
 {
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
     private const string InjectMarker = "ky-ai-ng-inject";
+    private const int InjectStaleSeconds = 15;   // revert if the injector (ky-ai-browser) stops heartbeating
 
     private readonly string _fileName;
     private readonly IReadOnlyList<string> _args;
@@ -29,6 +30,13 @@ internal sealed class DevServer : IDisposable
     private readonly FileSystemWatcher? _watcher;
     private readonly JobObject _job = new();
     private Process? _child;
+
+    // Inject liveness: while a tool (ky-ai-browser) has a tag injected it heartbeats us; the watchdog
+    // auto-reverts index.html if those stop, so a crashed/killed driver never leaves the app modified.
+    private readonly object _injectSync = new();
+    private readonly Timer _injectWatchdog;
+    private bool _injectActive;
+    private DateTimeOffset _lastInjectHeartbeat;
 
     public DevServer(SupervisorOptions opt, SupervisorConfig cfg)
     {
@@ -48,6 +56,7 @@ internal sealed class DevServer : IDisposable
         // exists, so the strip doesn't register as a spurious pending source change).
         RevertInject();
         _watcher = TryCreateWatcher(cfg.WatchRoot(_workingDir));
+        _injectWatchdog = new Timer(_ => CheckInjectStale(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
     }
 
     public string Name { get; }
@@ -272,6 +281,7 @@ internal sealed class DevServer : IDisposable
             if (updated is null)
                 return JsonSerializer.Serialize(new { ok = false, error = $"unsupported path '{path}' (use /html/head or /html/body)", file = target }, Json);
             if (updated != html) File.WriteAllText(target, updated);
+            lock (_injectSync) { _injectActive = true; _lastInjectHeartbeat = DateTimeOffset.UtcNow; }
             return JsonSerializer.Serialize(new { ok = true, file = target, marker = InjectMarker }, Json);
         }
         catch (Exception ex)
@@ -282,18 +292,40 @@ internal sealed class DevServer : IDisposable
 
     public string UninjectJson() => JsonSerializer.Serialize(new { ok = true, removed = Uninject() }, Json);
 
+    // Heartbeat from the tool that injected (ky-ai-browser): refreshes the liveness timestamp so the
+    // watchdog leaves the tag in place, and returns the current build seq for console↔build correlation.
+    public string InjectHeartbeatJson()
+    {
+        bool active;
+        lock (_injectSync) { _lastInjectHeartbeat = DateTimeOffset.UtcNow; active = _injectActive; }
+        return JsonSerializer.Serialize(new { ok = true, active, buildSeq = _tracker.CurrentBuildSeq }, Json);
+    }
+
     // Public hook so the host can revert on shutdown / self-heal on startup.
     public void RevertInject() { try { Uninject(); } catch { /* best-effort */ } }
 
     // Strip the marked block from the default target. Returns true if something was removed.
     private bool Uninject()
     {
+        lock (_injectSync) _injectActive = false;
         var target = ResolveTarget(null);
         if (target is null || !File.Exists(target)) return false;
         var html = File.ReadAllText(target);
         if (!HtmlInjector.Contains(html, InjectMarker)) return false;
         File.WriteAllText(target, HtmlInjector.Remove(html, InjectMarker));
         return true;
+    }
+
+    // Watchdog: if the injector stopped heartbeating (crash/kill), auto-revert so index.html is never
+    // left with a stranded capture <script>.
+    private void CheckInjectStale()
+    {
+        bool stale;
+        lock (_injectSync)
+            stale = _injectActive && DateTimeOffset.UtcNow - _lastInjectHeartbeat > TimeSpan.FromSeconds(InjectStaleSeconds);
+        if (!stale) return;
+        RevertInject();   // clears _injectActive via Uninject
+        lock (_ioSync) Console.WriteLine($"{Name} · inject heartbeat lost — reverted index.html");
     }
 
     private string? ResolveTarget(string? file)
@@ -305,6 +337,7 @@ internal sealed class DevServer : IDisposable
 
     public void Dispose()
     {
+        _injectWatchdog.Dispose();
         _watcher?.Dispose();
         _job.Dispose();
         _log.Dispose();

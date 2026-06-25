@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>KY.AI.Browser</RootNamespace>
+    <AssemblyName>ky-ai-browser</AssemblyName>
+    <Version>1.0.0</Version>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- Packed and published as a .NET global tool: dotnet tool install KY.AI.Browser.
+         The Web SDK disables packaging by default, so opt back in. -->
+    <IsPackable>true</IsPackable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>ky-ai-browser</ToolCommandName>
+    <PackageId>KY.AI.Browser</PackageId>
+    <Authors>KY-Programming</Authors>
+    <Company>KY-Programming</Company>
+    <Product>KY.AI</Product>
+    <Copyright>2026 - KY-Programming</Copyright>
+    <Description>Browser/runtime console capture for AI agents: attaches to a running ky-ai-ng and exposes the served app's console over MCP.</Description>
+    <PackageTags>browser;console;mcp;ai;dev-server</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/KY-Programming/AI</PackageProjectUrl>
+    <PackageIcon>icon.png</PackageIcon>
+    <RepositoryUrl>https://github.com/KY-Programming/AI</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Update="README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\assets\icon.png" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.4.0" />
+  </ItemGroup>
+  <!-- For the shared `init` command (InitCommand lives in Serve). One-directional: Serve does
+       not reference Browser. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Serve\KY.AI.Serve.csproj" />
+  </ItemGroup>
+  <!-- The browser-console capture snippet, injected (by ky-ai-ng) into the served app's HTML. Embedded
+       so it ships inside the published binary; token + ingest URL are templated in at serve time. -->
+  <ItemGroup>
+    <EmbeddedResource Include="console-capture.js" />
+  </ItemGroup>
+</Project>

@@ -226,6 +226,10 @@ internal sealed class BuildTracker
 
     public BuildResult Snapshot() { lock (_sync) return SnapshotNoLock(); }
 
+    // Current build seq (read-only) — lets the inject heartbeat report the build cycle so
+    // ky-ai-browser can tag console events with it (console↔build correlation).
+    public long CurrentBuildSeq { get { lock (_sync) return _seq; } }
+
     private bool PendingNoLock()
     {
         if (_status == BuildStatus.Building) return true;
