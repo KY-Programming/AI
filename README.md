@@ -38,10 +38,11 @@ dotnet tool install --global KY.AI.Ng
 dotnet tool install --global KY.AI.Net
 ```
 
+These are framework-dependent, so the **.NET 10 runtime** must be installed.
+
 This puts `ky-ai-ng` and `ky-ai-dotnet` on your `PATH` (via the .NET tools dir —
 `%USERPROFILE%\.dotnet\tools` on Windows, `~/.dotnet/tools` on macOS/Linux); update later with
-`dotnet tool update --global KY.AI.Ng`. These are framework-dependent, so the **.NET 10 runtime**
-must be installed.
+`dotnet tool update --global KY.AI.Ng`.
 
 **npm** — for Angular devs with **no .NET installed**; `ky-ai-ng` ships a self-contained binary
 (the runtime is bundled in) for each platform:

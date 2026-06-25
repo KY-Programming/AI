@@ -63,6 +63,50 @@ ky-ai-dotnet <dotnet args...> [--log-file f.log]   # one-shot tee (--log-file al
 
 Spawns `dotnet` from PATH. Works from a bare terminal or a Rider run configuration.
 
+## Client configuration
+
+**`ky-ai-dotnet setup` writes both files below for you** — it walks up to the nearest `.mcp.json`
+and `.claude/`, adds the server, and allows the commands (idempotent; `-y` skips the prompts,
+`--dir <path>` starts the search elsewhere). To wire it by hand instead:
+
+Per-project `.mcp.json` (one entry total, regardless of how many backends):
+
+```json
+{
+  "mcpServers": {
+    "ky-ai-dotnet": {
+      "type": "http",
+      "url": "http://127.0.0.1:5102/mcp"
+    }
+  }
+}
+```
+
+For Claude Code, enable it and allow the tools (`.claude/settings.local.json`):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__ky-ai-dotnet__list",
+      "mcp__ky-ai-dotnet__status",
+      "mcp__ky-ai-dotnet__wait_for_build",
+      "mcp__ky-ai-dotnet__restart",
+      "mcp__ky-ai-dotnet__stop",
+      "mcp__ky-ai-dotnet__start",
+      "mcp__ky-ai-dotnet__tail",
+      "mcp__ky-ai-dotnet__set_log_lines",
+      "mcp__ky-ai-dotnet__shutdown"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "ky-ai-dotnet"
+  ]
+}
+```
+
+Runs on port **5102** — the two are fully independent control planes.
+
 ### Project name
 
 Each supervisor registers under a name the agent uses to target it. Default: the `.csproj`
@@ -109,6 +153,18 @@ hot-reloadable edits keep it attached. If you debug a lot, run that backend with
 (green Debug button). Fully integrated, but that instance isn't managed by ky-ai-dotnet (no MCP
 control) and can't share the port — so it's either/or per backend, per session.
 
+## Update
+
+Update to the latest release with the tool's own command:
+
+```bash
+ky-ai-dotnet update
+```
+
+It runs `dotnet tool update --global KY.AI.Net`. On Windows the update runs in a **new window that
+opens once `ky-ai-dotnet` exits** — a running tool can't overwrite its own files, so it waits for
+this process to close first. (You can always run the `dotnet tool update` command yourself.)
+
 ## Build verdict
 
 Detection keys off `dotnet watch` / ASP.NET host phrasing:
@@ -149,33 +205,6 @@ when only one backend is registered** and it resolves automatically. Allow-list 
 `wait_for_build` — its verdict adds `warnings`/`diagnostics` and `filesInLastBuild`/`lastChangeAt`
 (the files that build incorporated, so you can confirm your edit landed). Stored log lines are
 ANSI-stripped and all ky-ai-dotnet-emitted timestamps are ISO-8601 with offset.
-
-## Client configuration
-
-**`ky-ai-dotnet setup` writes both files below for you** — it walks up to the nearest `.mcp.json`
-and `.claude/`, adds the server, and allows the commands (idempotent; `-y` skips the prompts,
-`--dir <path>` starts the search elsewhere). To wire it by hand instead:
-
-Per-project `.mcp.json` (one entry total, regardless of how many backends):
-
-```json
-{ "mcpServers": { "ky-ai-dotnet": { "type": "http", "url": "http://127.0.0.1:5102/mcp" } } }
-```
-
-For Claude Code, enable it and allow the tools (`.claude/settings.local.json`):
-
-```json
-{
-  "permissions": { "allow": [
-    "mcp__ky-ai-dotnet__list", "mcp__ky-ai-dotnet__status", "mcp__ky-ai-dotnet__wait_for_build",
-    "mcp__ky-ai-dotnet__restart", "mcp__ky-ai-dotnet__stop", "mcp__ky-ai-dotnet__start",
-    "mcp__ky-ai-dotnet__tail", "mcp__ky-ai-dotnet__set_log_lines", "mcp__ky-ai-dotnet__shutdown"
-  ] },
-  "enabledMcpjsonServers": ["ky-ai-dotnet"]
-}
-```
-
-Runs on port **5102** (ky-ai-ng uses 5101) — the two are fully independent control planes.
 
 ## What the version tracks, and multiple .NET SDKs
 

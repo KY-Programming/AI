@@ -103,6 +103,47 @@ A `start:ai` script per frontend, run in Rider — the first one auto-starts the
 
 One config per frontend either way; the MCP hub auto-starts, so there's no separate hub config.
 
+## Client configuration
+
+**`ky-ai-ng setup` writes both files below for you** — it walks up to the nearest `.mcp.json` and
+`.claude/`, adds the server, and allows the commands (idempotent; `-y` skips the prompts,
+`--dir <path>` starts the search elsewhere). To wire it by hand instead:
+
+Per-project `.mcp.json` (one entry total, regardless of how many frontends):
+
+```json
+{ "mcpServers": { "ky-ai-ng": { "type": "http", "url": "http://127.0.0.1:5101/mcp" } } }
+```
+
+For Claude Code, enable it and allow the tools (`.claude/settings.local.json`):
+
+```json
+{
+  "permissions": { "allow": [
+    "mcp__ky-ai-ng__list", "mcp__ky-ai-ng__status", "mcp__ky-ai-ng__wait_for_build",
+    "mcp__ky-ai-ng__restart", "mcp__ky-ai-ng__stop", "mcp__ky-ai-ng__start",
+    "mcp__ky-ai-ng__tail", "mcp__ky-ai-ng__set_log_lines", "mcp__ky-ai-ng__shutdown"
+  ] },
+  "enabledMcpjsonServers": ["ky-ai-ng"]
+}
+```
+
+## Update
+
+Update to the latest release with the tool's own command — it detects how it was installed and runs
+the matching package manager:
+
+```bash
+ky-ai-ng update
+```
+
+- installed via **npm** → `npm install --global @ky-ai/ng@latest`
+- installed as a **.NET global tool** → `dotnet tool update --global KY.AI.Ng`
+
+On Windows the update runs in a **new window that opens once `ky-ai-ng` exits** — a running tool
+can't overwrite its own files, so it waits for this process to close first. (You can always run the
+underlying command yourself.)
+
 ## MCP tools (for agents)
 
 Exposed by the **hub**; each (except `shutdown`/`list`) takes a `project` (from `list`) — **omit
@@ -151,31 +192,6 @@ pick up — `angular.json` / proxy / `tsconfig` paths, new dependencies — or a
       "status": "success", "errors": 0, "warnings": 1, "durationMs": 2310,
       "filesInLastBuild": ["src/app/app.component.ts"] } } }
 ] }
-```
-
-## Client configuration
-
-**`ky-ai-ng setup` writes both files below for you** — it walks up to the nearest `.mcp.json` and
-`.claude/`, adds the server, and allows the commands (idempotent; `-y` skips the prompts,
-`--dir <path>` starts the search elsewhere). To wire it by hand instead:
-
-Per-project `.mcp.json` (one entry total, regardless of how many frontends):
-
-```json
-{ "mcpServers": { "ky-ai-ng": { "type": "http", "url": "http://127.0.0.1:5101/mcp" } } }
-```
-
-For Claude Code, enable it and allow the tools (`.claude/settings.local.json`):
-
-```json
-{
-  "permissions": { "allow": [
-    "mcp__ky-ai-ng__list", "mcp__ky-ai-ng__status", "mcp__ky-ai-ng__wait_for_build",
-    "mcp__ky-ai-ng__restart", "mcp__ky-ai-ng__stop", "mcp__ky-ai-ng__start",
-    "mcp__ky-ai-ng__tail", "mcp__ky-ai-ng__set_log_lines", "mcp__ky-ai-ng__shutdown"
-  ] },
-  "enabledMcpjsonServers": ["ky-ai-ng"]
-}
 ```
 
 ## Running multiple Angular majors on one machine

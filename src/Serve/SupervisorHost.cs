@@ -12,6 +12,8 @@ namespace KY.AI.Serve;
 // per-invocation values and SupervisorConfig the tool-specific strategy.
 public static class SupervisorHost
 {
+    private static readonly JsonSerializerOptions InjectJsonOpts = new() { PropertyNameCaseInsensitive = true };
+
     public static async Task<int> RunAsync(SupervisorOptions opt, SupervisorConfig cfg)
     {
         if (opt.LogPath is not null) Cli.EnsureDir(opt.LogPath);
@@ -36,6 +38,18 @@ public static class SupervisorHost
             server.SetLogCapacity(count);
             return Results.Content(server.StatusJson(), "application/json");
         });
+        // Generic, reversible HTML injection (driven by ky-ai-browser): add/strip a marked block in
+        // the app's index.html. Available only where the tool supplies a target (ng does; dotnet not).
+        app.MapPost("/inject", async (HttpContext ctx) =>
+        {
+            InjectRequest? req;
+            try { req = await JsonSerializer.DeserializeAsync<InjectRequest>(ctx.Request.Body, InjectJsonOpts); }
+            catch { req = null; }
+            if (req is null || string.IsNullOrEmpty(req.Content))
+                return Results.BadRequest(new { ok = false, error = "inject requires { path, content }" });
+            return Results.Content(server.InjectJson(req.File, req.Path ?? "/html/head", req.Content), "application/json");
+        });
+        app.MapPost("/uninject", () => Results.Content(server.UninjectJson(), "application/json"));
         // Exit this supervisor process (the hub calls this when tearing the whole stack down).
         // ApplicationStopping deregisters and kills the dev-server tree; delayed a beat so the
         // response reaches the hub before the host tears down.
@@ -51,6 +65,7 @@ public static class SupervisorHost
         {
             stopping.Cancel();
             try { if (opt.UseHub) DeregisterAsync(opt.HubUrl, opt.Name).GetAwaiter().GetResult(); } catch { /* hub gone */ }
+            try { server.RevertInject(); } catch { /* leave index.html clean even if ky-ai-browser died */ }
             try { server.StopAsync().GetAwaiter().GetResult(); } catch { /* shutting down */ }
         });
 

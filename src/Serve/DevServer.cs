@@ -11,6 +11,7 @@ namespace KY.AI.Serve;
 internal sealed class DevServer : IDisposable
 {
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+    private const string InjectMarker = "ky-ai-ng-inject";
 
     private readonly string _fileName;
     private readonly IReadOnlyList<string> _args;
@@ -22,6 +23,7 @@ internal sealed class DevServer : IDisposable
     private readonly int _defaultQuietMs;
     private readonly RollingLog _log;
     private readonly BuildTracker _tracker;
+    private readonly Func<string, string?>? _resolveInjectTarget;
     private readonly object _ioSync = new();
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly FileSystemWatcher? _watcher;
@@ -41,6 +43,10 @@ internal sealed class DevServer : IDisposable
         Name = opt.Name;
         _log = new RollingLog(opt.LogPath, opt.LogLines);
         _tracker = new BuildTracker(cfg.Matcher);
+        _resolveInjectTarget = cfg.ResolveInjectTarget;
+        // Self-heal: drop any capture tag a previous ky-ai tool left behind (before the watcher
+        // exists, so the strip doesn't register as a spurious pending source change).
+        RevertInject();
         _watcher = TryCreateWatcher(cfg.WatchRoot(_workingDir));
     }
 
@@ -249,6 +255,54 @@ internal sealed class DevServer : IDisposable
         return string.Join('\n', tail);
     }
 
+    // ---- Reversible HTML injection (the generic mechanism `ky-ai tool` drives) ----
+
+    // Inject `content` at a DOM `path` (e.g. /html/head) of `file` — or this tool's default target
+    // (ng → the app's index.html) when file is null — wrapped in `ky-ai-ng-inject` markers. Idempotent
+    // (re-applying replaces). ng's own file watcher then reloads the served page.
+    public string InjectJson(string? file, string path, string content)
+    {
+        var target = ResolveTarget(file);
+        if (target is null)
+            return JsonSerializer.Serialize(new { ok = false, error = "no inject target (this tool has none, or index.html was not found)" }, Json);
+        try
+        {
+            var html = File.ReadAllText(target);
+            var updated = HtmlInjector.Apply(html, path, content, InjectMarker);
+            if (updated is null)
+                return JsonSerializer.Serialize(new { ok = false, error = $"unsupported path '{path}' (use /html/head or /html/body)", file = target }, Json);
+            if (updated != html) File.WriteAllText(target, updated);
+            return JsonSerializer.Serialize(new { ok = true, file = target, marker = InjectMarker }, Json);
+        }
+        catch (Exception ex)
+        {
+            return JsonSerializer.Serialize(new { ok = false, error = ex.Message, file = target }, Json);
+        }
+    }
+
+    public string UninjectJson() => JsonSerializer.Serialize(new { ok = true, removed = Uninject() }, Json);
+
+    // Public hook so the host can revert on shutdown / self-heal on startup.
+    public void RevertInject() { try { Uninject(); } catch { /* best-effort */ } }
+
+    // Strip the marked block from the default target. Returns true if something was removed.
+    private bool Uninject()
+    {
+        var target = ResolveTarget(null);
+        if (target is null || !File.Exists(target)) return false;
+        var html = File.ReadAllText(target);
+        if (!HtmlInjector.Contains(html, InjectMarker)) return false;
+        File.WriteAllText(target, HtmlInjector.Remove(html, InjectMarker));
+        return true;
+    }
+
+    private string? ResolveTarget(string? file)
+    {
+        if (!string.IsNullOrWhiteSpace(file))
+            return Path.IsPathRooted(file) ? file : Path.GetFullPath(Path.Combine(_workingDir, file));
+        return _resolveInjectTarget?.Invoke(_workingDir);
+    }
+
     public void Dispose()
     {
         _watcher?.Dispose();
@@ -256,3 +310,6 @@ internal sealed class DevServer : IDisposable
         _log.Dispose();
     }
 }
+
+// Body of a POST /inject request (file optional → the tool's default target, e.g. ng's index.html).
+internal sealed record InjectRequest(string? File, string? Path, string? Content);

@@ -32,6 +32,11 @@ public sealed class SupervisorConfig
 
     // Debounce quiet-window in ms used by restart/start (Angular 400, .NET 500).
     public int DefaultQuietMs { get; init; } = 500;
+
+    // Resolves the file an `inject` request targets when no explicit file is given (ng → the app's
+    // index.html). Null (default) means the supervisor has no inject target and /inject 400s — so the
+    // generic inject mechanism is available only where a tool opts in (ng does; dotnet doesn't).
+    public Func<string, string?>? ResolveInjectTarget { get; init; }
 }
 
 // Per-invocation runtime values for one `serve`/`run`, resolved from the command line by the

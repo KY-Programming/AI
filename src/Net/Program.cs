@@ -50,6 +50,8 @@ internal static class Program
             return await ShutdownCommand.RunAsync("ky-ai-dotnet", DefaultHubPort, args[1..]);
         if (string.Equals(args[0], "setup", StringComparison.OrdinalIgnoreCase))
             return SetupCommand.Run("ky-ai-dotnet", DefaultHubPort, args[1..]);
+        if (string.Equals(args[0], "update", StringComparison.OrdinalIgnoreCase))
+            return UpdateCommand.Run("ky-ai-dotnet", "KY.AI.Net", npmPackageId: null, args[1..]);
         if (string.Equals(args[0], "serve", StringComparison.OrdinalIgnoreCase))
             return await RunServeAsync(args[1..]);
         return RunOneShot(args);   // `run`/`watch` land here and get nudged toward `serve`
@@ -156,6 +158,11 @@ internal static class Program
           ky-ai-dotnet setup [-y] [--dir <path>]
           Finds the nearest .mcp.json and .claude/, then (each step confirmed) adds the MCP
           server and allows its commands. Merges into existing files; safe to re-run.
+
+        UPDATE — update this tool to the latest version (via the package manager it came from):
+          ky-ai-dotnet update
+          Runs `dotnet tool update --global KY.AI.Net`. On Windows it opens a new window so the
+          update can replace this running tool after it exits.
 
         SHUTDOWN — stop the hub and every backend it supervises:
           ky-ai-dotnet shutdown

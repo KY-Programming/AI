@@ -39,7 +39,9 @@ public static class SetupCommand
     // ── entry point (called from each tool's Program) ──
     // toolsAssembly defaults to this (Serve) assembly, which carries HubTools — correct for
     // ky-ai-ng / ky-ai-dotnet. ky-ai-terminal passes its own assembly (TerminalTools).
-    public static int Run(string toolName, int hubPort, string[] rest, Assembly? toolsAssembly = null)
+    // runHint is the subcommand to suggest at the end ("serve" for ng/net). Pass null for a tool that
+    // is just run by name (e.g. ky-ai-browser) so the closing line doesn't suggest a bogus subcommand.
+    public static int Run(string toolName, int hubPort, string[] rest, Assembly? toolsAssembly = null, string? runHint = "serve")
     {
         Cli.TrySetUtf8Console();
 
@@ -140,8 +142,9 @@ public static class SetupCommand
         }
 
         Console.WriteLine();
+        var runPart = string.IsNullOrEmpty(runHint) ? "" : $", then run `{toolName} {runHint}`";
         Console.WriteLine(rc == 0
-            ? $"Done. Reload your MCP client (restart Claude Code) to pick up '{toolName}', then run `{toolName} serve`."
+            ? $"Done. Reload your MCP client (restart Claude Code) to pick up '{toolName}'{runPart}."
             : "Finished with errors — see the messages above.");
         return rc;
     }

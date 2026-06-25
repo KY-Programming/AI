@@ -25,6 +25,13 @@ internal static class Program
         WatchRoot = wd => { var src = Path.Combine(wd, "src"); return Directory.Exists(src) ? src : wd; },
         DefaultTimeoutMs = 60000,
         DefaultQuietMs = 400,
+        // The file ky-ai tool's reversible inject targets: the app's index.html (the Angular
+        // default; src/index.html under the workspace). Null if it isn't there.
+        ResolveInjectTarget = wd =>
+        {
+            var idx = Path.Combine(wd, "src", "index.html");
+            return File.Exists(idx) ? idx : null;
+        },
     };
 
     private static readonly HubConfig HubCfg = new()
@@ -51,6 +58,8 @@ internal static class Program
             return await ShutdownCommand.RunAsync("ky-ai-ng", DefaultHubPort, args[1..]);
         if (string.Equals(args[0], "setup", StringComparison.OrdinalIgnoreCase))
             return SetupCommand.Run("ky-ai-ng", DefaultHubPort, args[1..]);
+        if (string.Equals(args[0], "update", StringComparison.OrdinalIgnoreCase))
+            return UpdateCommand.Run("ky-ai-ng", "KY.AI.Ng", "@ky-ai/ng", args[1..]);
         if (string.Equals(args[0], "serve", StringComparison.OrdinalIgnoreCase))
             return await RunServeAsync(args[1..]);
         if (string.Equals(args[0], "run", StringComparison.OrdinalIgnoreCase))
@@ -276,6 +285,11 @@ internal static class Program
           ky-ai-ng setup [-y] [--dir <path>]
           Finds the nearest .mcp.json and .claude/, then (each step confirmed) adds the MCP
           server and allows its commands. Merges into existing files; safe to re-run.
+
+        UPDATE — update this tool to the latest version (via the package manager it came from):
+          ky-ai-ng update
+          npm install -> `npm install --global @ky-ai/ng@latest`; .NET tool -> `dotnet tool update
+          --global KY.AI.Ng`. On Windows it opens a new window to update after this one exits.
 
         SHUTDOWN — stop the hub and every frontend it supervises:
           ky-ai-ng shutdown
