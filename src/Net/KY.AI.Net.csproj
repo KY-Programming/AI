@@ -7,7 +7,7 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>KY.AI.Net</RootNamespace>
     <AssemblyName>ky-ai-dotnet</AssemblyName>
-    <Version>10.2.0</Version>
+    <Version>10.3.0</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
 
     <!-- Packed and published as a .NET global tool: dotnet tool install KY.AI.Net.
