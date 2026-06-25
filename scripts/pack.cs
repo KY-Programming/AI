@@ -5,7 +5,7 @@
 //     --skip-nuget   only build the npm packages
 //
 // Produces two distribution channels into artifacts\:
-//   * NuGet  (artifacts\*.nupkg)      — Serve (lib) + Ng/Net as portable .NET global tools,
+//   * NuGet  (artifacts\*.nupkg)      — Serve (lib) + Ng/Net/Browser as portable .NET global tools,
 //                                        for users who have the .NET SDK (e.g. full-stack devs).
 //   * npm    (artifacts\npm\...)       — @ky-ai/ng plus per-platform packages bundling a
 //                                        self-contained ky-ai-ng binary, so Angular devs on
@@ -51,6 +51,7 @@ static int PackNuget(string root, string artifacts)
         Path.Combine(root, "src", "Serve", "KY.AI.Serve.csproj"),
         Path.Combine(root, "src", "Ng", "KY.AI.Ng.csproj"),
         Path.Combine(root, "src", "Net", "KY.AI.Net.csproj"),
+        Path.Combine(root, "src", "Browser", "KY.AI.Browser.csproj"),
     ];
 
     foreach (var proj in projects)
@@ -62,7 +63,7 @@ static int PackNuget(string root, string artifacts)
 
     var packages = Directory.GetFiles(artifacts, "*.nupkg").OrderBy(f => f).ToArray();
     // dotnet pack only warns (exit 0) when packaging is disabled, so confirm each one landed.
-    string[] expected = ["KY.AI.Serve", "KY.AI.Ng", "KY.AI.Net"];
+    string[] expected = ["KY.AI.Serve", "KY.AI.Ng", "KY.AI.Net", "KY.AI.Browser"];
     var missing = expected
         .Where(id => !packages.Any(p => Path.GetFileName(p).StartsWith(id + ".", StringComparison.OrdinalIgnoreCase)))
         .ToArray();

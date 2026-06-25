@@ -7,7 +7,8 @@ one **hub** per stack plus a **supervisor** per app, controllable over MCP.
 |------|-----|--------|
 | [`KY.AI.Ng`](src/Ng/README.md)   | `ky-ai-ng`  | the Angular CLI (`ng serve` / `ng build`) — frontends |
 | [`KY.AI.Net`](src/Net/README.md) | `ky-ai-dotnet` | the .NET CLI (`dotnet run` / `dotnet build`) — backends |
-| `KY.AI.Serve` | — | the shared hub / supervisor / MCP engine the two tools build on |
+| [`KY.AI.Browser`](src/Browser/README.md) | `ky-ai-browser` | the served app's runtime console — attaches to a running `ky-ai-ng` |
+| `KY.AI.Serve` | — | the shared hub / supervisor / MCP engine the tools build on |
 
 ## Goal
 
@@ -31,11 +32,12 @@ backends, so a full-stack agent can drive both at once.
 
 Pick whichever install matches your stack — both work on **Windows, macOS and Linux**.
 
-**.NET global tools** — for devs who have the .NET SDK (e.g. full-stack); installs both tools:
+**.NET global tools** — for devs who have the .NET SDK (e.g. full-stack); installs the tools:
 
 ```bash
 dotnet tool install --global KY.AI.Ng
 dotnet tool install --global KY.AI.Net
+dotnet tool install --global KY.AI.Browser   # optional: browser/runtime console capture for ky-ai-ng
 ```
 
 These are framework-dependent, so the **.NET 10 runtime** must be installed.
@@ -106,6 +108,7 @@ shared engine and carries its own product version.
 |------|--------------|---------|-------|
 | `KY.AI.Ng`    | 22.x | Angular 22  | major **=** Angular major |
 | `KY.AI.Net`   | 10.x | .NET 10 SDK | major **=** the .NET **SDK** major whose build output it parses (not its own TFM) |
+| `KY.AI.Browser` | 1.x | —          | console-capture add-on for `ky-ai-ng` |
 | `KY.AI.Serve` | 1.x  | —           | shared engine; own product version |
 
 ### Running an older major alongside the latest
@@ -139,7 +142,7 @@ A `dotnet tool install --tool-path <dir>` install (or the copy in the NuGet glob
 ## Repository Layout
 
 ```
-src/        tool projects (Serve, Ng, Net)
+src/        tool projects (Serve, Ng, Net, Browser)
 scripts/    pack / publish / dist / version automation (dotnet-run C# scripts)
 artifacts/  packed NuGet packages — scripts\pack.cmd output (git-ignored)
 dist/       runnable local build for testing — scripts\dist.cmd output (git-ignored; put on PATH)

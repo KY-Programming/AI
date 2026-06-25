@@ -2,11 +2,11 @@
 //
 //   dotnet run scripts/dist.cs        (or:  scripts\dist.cmd)
 //
-// Builds a runnable, framework-dependent copy of both tools into dist\ so you
-// can put that one folder on PATH and exercise ky-ai-ng / ky-ai-dotnet locally
-// without installing them from NuGet. Both share the output folder, so the
-// Serve DLL lands once. dist\ is cleared first (publish never prunes). Needs
-// the .NET 10 runtime to run the result.
+// Builds a runnable, framework-dependent copy of the tools into dist\ so you
+// can put that one folder on PATH and exercise ky-ai-ng / ky-ai-dotnet /
+// ky-ai-terminal locally without installing them from NuGet. They share the
+// output folder, so the Serve DLL lands once. dist\ is cleared first (publish
+// never prunes). Needs the .NET 10 runtime to run the result.
 //
 // Shipping the suite to NuGet is a separate flow: scripts\pack.cmd then
 // scripts\publish.cmd.
@@ -23,6 +23,8 @@ string[] projects =
 [
     Path.Combine(root, "src", "Ng", "KY.AI.Ng.csproj"),
     Path.Combine(root, "src", "Net", "KY.AI.Net.csproj"),
+    Path.Combine(root, "src", "Browser", "KY.AI.Browser.csproj"),
+    Path.Combine(root, "src", "Terminal", "KY.AI.Terminal.csproj"),
 ];
 
 foreach (var proj in projects)
@@ -37,7 +39,7 @@ foreach (var proj in projects)
 }
 
 // Verify the aggregated output is what PATH expects.
-string[] expected = ["ky-ai-ng.exe", "ky-ai-dotnet.exe", "KY.AI.Serve.dll"];
+string[] expected = ["ky-ai-ng.exe", "ky-ai-dotnet.exe", "ky-ai-terminal.exe", "ky-ai-browser.exe", "KY.AI.Serve.dll"];
 var missing = expected.Where(f => !File.Exists(Path.Combine(dist, f))).ToArray();
 if (missing.Length > 0)
 {

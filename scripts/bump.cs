@@ -1,6 +1,7 @@
 // bump.cs — bump a project's <Version> and keep README's table in sync.
 //
-//   Serve (plain SemVer):   dotnet run scripts/bump.cs -- Serve --part minor
+//   Serve/Browser (SemVer): dotnet run scripts/bump.cs -- Serve   --part minor
+//                           dotnet run scripts/bump.cs -- Browser --part patch
 //   Ng / Net leaf tools:    dotnet run scripts/bump.cs -- Ng    --part patch
 //                           dotnet run scripts/bump.cs -- Net   --set-major 11
 //   Preview only:           ... --dry-run
@@ -10,7 +11,7 @@
 //   (scripts\bump.cmd replaces "dotnet run scripts/bump.cs --"; pass args for scripted use.)
 //
 // Versioning scheme — independent per project, no central props:
-//   * KY.AI.Serve is plain SemVer: --part major|minor|patch increments it.
+//   * KY.AI.Serve and KY.AI.Browser are plain SemVer: --part major|minor|patch increments them.
 //   * KY.AI.Ng / KY.AI.Net are leaf tools whose MAJOR is pinned to the
 //     framework they target (Ng major = Angular major; Net major = the .NET
 //     *SDK* major whose build output it parses — not its own TFM). So their
@@ -196,13 +197,14 @@ static BumpRequest ParseArgs(string[] args)
         }
     }
 
-    if (project is null) throw new BumpError("no project given (Serve, Ng or Net)");
+    if (project is null) throw new BumpError("no project given (Serve, Ng, Net or Browser)");
     project = project.ToLowerInvariant() switch
     {
         "serve" => "Serve",
         "ng" => "Ng",
         "net" => "Net",
-        _ => throw new BumpError($"project must be Serve, Ng or Net (got '{project}')"),
+        "browser" => "Browser",
+        _ => throw new BumpError($"project must be Serve, Ng, Net or Browser (got '{project}')"),
     };
 
     int? setMajor = null;
@@ -229,7 +231,7 @@ static List<BumpRequest>? Interactive(string root)
     Console.WriteLine("Interactive version bump — select project(s), then one bump part applied to all.");
     Console.WriteLine();
 
-    string[] projects = ["Serve", "Ng", "Net"];
+    string[] projects = ["Serve", "Ng", "Net", "Browser"];
     var curVers = projects.Select(p => TryCurrentVersion(root, p)).ToArray();
     // Pad the "(current X.Y.Z)" token to a common width so the commit counter lines up across rows.
     var verTokens = curVers.Select(v => $"(current {v?.ToString() ?? "?"})").ToArray();
@@ -237,7 +239,7 @@ static List<BumpRequest>? Interactive(string root)
 
     var labels = new string[projects.Length];
     for (int i = 0; i < projects.Length; i++)
-        labels[i] = $"KY.AI.{projects[i],-5}  {verTokens[i].PadRight(verW)}{CommitSuffix(root, projects[i], curVers[i])}";
+        labels[i] = $"KY.AI.{projects[i],-7}  {verTokens[i].PadRight(verW)}{CommitSuffix(root, projects[i], curVers[i])}";
 
     var picks = MultiSelect("Which project(s)?", labels);
     if (picks is null) return null;
@@ -266,7 +268,7 @@ static List<BumpRequest>? Interactive(string root)
     {
         var project = projects[idx];
 
-        if (part == "major" && project != "Serve")
+        if (part == "major" && project is not "Serve" and not "Browser")
         {
             Console.WriteLine($"  KY.AI.{project} — major is framework-pinned; skipped (use --set-major).");
             continue;
@@ -448,10 +450,10 @@ static Ver Compute(string project, Ver cur, string? part, int? setMajor)
 {
     part = part?.ToLowerInvariant();
 
-    if (project == "Serve")
+    if (project is "Serve" or "Browser")
     {
         if (setMajor is not null)
-            throw new BumpError("--set-major is for the leaf tools (Ng, Net); Serve uses --part major|minor|patch");
+            throw new BumpError("--set-major is for the framework-pinned tools (Ng, Net); Serve/Browser use --part major|minor|patch");
         return part switch
         {
             "major" => new Ver(cur.Major + 1, 0, 0),
@@ -567,8 +569,9 @@ static void PrintUsage()
           dotnet run scripts/bump.cs                       (no args -> interactive: select project(s) w/ arrows+space, bump each)
           dotnet run scripts/bump.cs -- <project> <bump> [--dry-run]
 
-        Serve (plain SemVer):
-          -- Serve --part major|minor|patch
+        Serve / Browser (plain SemVer):
+          -- Serve   --part major|minor|patch
+          -- Browser --part major|minor|patch
 
         Ng / Net (leaf tools; major is pinned to the framework):
           -- Ng  --set-major <n>      set major to the Angular major (resets minor/patch)
