@@ -17,6 +17,14 @@ public sealed class ConsoleCollector
 
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
+    // Compact mode: same camelCase, but null fields are omitted so a slim event has no empty keys.
+    private static readonly JsonSerializerOptions CompactJson = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+    };
+    private const int CompactStackFrames = 6;   // frames kept per stack in compact mode
+
     // Defensive server-side caps (the snippet caps too; this is belt-and-braces against a flood or
     // a hand-crafted post). A console.log in a render loop must never OOM the supervisor.
     private const int MaxEventsPerBatch = 500;
@@ -81,8 +89,8 @@ public sealed class ConsoleCollector
 
     public IReadOnlyList<ConsoleEvent> Tail(
         int count, string? minLevel = null, long sinceSeq = 0, long sinceBuildSeq = 0,
-        string? grep = null, string? pageLoadId = null) =>
-        _log.Tail(count, minLevel, sinceSeq, sinceBuildSeq, grep, pageLoadId);
+        string? grep = null, string? pageLoadId = null, bool dropTransportNoise = false) =>
+        _log.Tail(count, minLevel, sinceSeq, sinceBuildSeq, grep, pageLoadId, dropTransportNoise);
 
     public void Clear() => _log.Clear();
 
@@ -123,12 +131,26 @@ public sealed class ConsoleCollector
         return s.Length <= max ? s : s[..max] + "…[truncated]";
     }
 
-    // JSON the control API returns for /console/tail (the hub forwards it verbatim). `dropped` is
-    // surfaced inline so the agent sees a flood without a second call.
+    // JSON the MCP console_tail tool returns. `dropped` is surfaced inline so the agent sees a flood
+    // without a second call. compact slims each event (drops args when text carries them, truncates
+    // stacks, omits null fields); appOnly drops dev-transport churn (SignalR/WebSocket/[vite]).
     public string TailJson(string name, bool enabled,
-        int count, string? minLevel, long sinceSeq, long sinceBuildSeq, string? grep, string? pageLoadId)
+        int count, string? minLevel, long sinceSeq, long sinceBuildSeq, string? grep, string? pageLoadId,
+        bool compact = false, bool appOnly = false)
     {
-        var events = Tail(count, minLevel, sinceSeq, sinceBuildSeq, grep, pageLoadId);
+        var events = Tail(count, minLevel, sinceSeq, sinceBuildSeq, grep, pageLoadId, appOnly);
+        if (compact)
+            return JsonSerializer.Serialize(new
+            {
+                name,
+                enabled,
+                compact = true,
+                returned = events.Count,
+                total = Count,
+                dropped = Dropped,
+                events = events.Select(ToCompact),
+            }, CompactJson);
+
         return JsonSerializer.Serialize(new
         {
             name,
@@ -138,6 +160,32 @@ public sealed class ConsoleCollector
             dropped = Dropped,
             events,
         }, Json);
+    }
+
+    // Slim view of one event: keep args only when there is no `text` to carry them, clip the stack to
+    // the top frames, and let CompactJson drop every null field.
+    private static object ToCompact(ConsoleEvent e) => new
+    {
+        e.Seq,
+        e.Level,
+        args = string.IsNullOrEmpty(e.Text) && e.Args.Count > 0 ? e.Args : null,
+        e.Text,
+        e.Source,
+        e.Line,
+        e.Col,
+        stack = TruncateStack(e.Stack, CompactStackFrames),
+        e.Timestamp,
+        e.BuildSeq,
+        e.PageLoadId,
+    };
+
+    // Keep the top `frames` lines of a stack, noting how many were dropped. Null/short stacks pass through.
+    private static string? TruncateStack(string? stack, int frames)
+    {
+        if (string.IsNullOrEmpty(stack)) return stack;
+        var lines = stack.Split('\n');
+        if (lines.Length <= frames) return stack;
+        return string.Join('\n', lines.Take(frames)) + $"\n…(+{lines.Length - frames} frames)";
     }
 
     public string ClearJson(string name)

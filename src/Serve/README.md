@@ -5,8 +5,8 @@ build tracker and MCP tool surface that [`ky-ai-ng`](https://www.nuget.org/packa
 [`ky-ai-dotnet`](https://www.nuget.org/packages/KY.AI.Net) build on.
 
 Most users want one of those tools, not this library directly — install them with
-`dotnet tool install --global KY.AI.Ng` / `KY.AI.Net`. This package exists so a new framework seam
-can reuse the same hub/supervisor machinery:
+`dotnet tool install --global KY.AI.Ng` / `KY.AI.Net` (plus the optional `KY.AI.Browser` console
+add-on). This package exists so a new framework seam can reuse the same hub/supervisor machinery:
 
 - **`HubHost` / `Hub` / `HubTools`** — the control plane: one MCP server plus a registry of
   supervisors, addressed by name (incl. the `shutdown` tool).
@@ -27,4 +27,4 @@ and optionally parsing diagnostic lines into structured `{severity, file, line, 
 its supervisor/hub configuration; the rest is shared here.
 
 Loopback-only — nothing is exposed off the machine. See the
-[project README](https://github.com/) for the full picture.
+[project README](../../README.md) for the full picture.

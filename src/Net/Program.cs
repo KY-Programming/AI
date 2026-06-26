@@ -51,7 +51,7 @@ internal static class Program
         if (string.Equals(args[0], "init", StringComparison.OrdinalIgnoreCase))
             return InitCommand.Run("ky-ai-dotnet", DefaultHubPort, args[1..]);
         if (string.Equals(args[0], "update", StringComparison.OrdinalIgnoreCase))
-            return UpdateCommand.Run("ky-ai-dotnet", "KY.AI.Net", npmPackageId: null, args[1..]);
+            return await UpdateCommand.RunAsync("ky-ai-dotnet", "KY.AI.Net", npmPackageId: null, DefaultHubPort, args[1..]);
         if (string.Equals(args[0], "serve", StringComparison.OrdinalIgnoreCase))
             return await RunServeAsync(args[1..]);
         return RunOneShot(args);   // `run`/`watch` land here and get nudged toward `serve`
@@ -166,8 +166,9 @@ internal static class Program
 
         UPDATE — update this tool to the latest version (via the package manager it came from):
           ky-ai-dotnet update
-          Runs `dotnet tool update --global KY.AI.Net`. On Windows it opens a new window so the
-          update can replace this running tool after it exits.
+          Runs `dotnet tool update --global KY.AI.Net --no-cache`. Stops other running instances
+          first (they lock the files): asks you to close them, sends shutdown, then hard-kills any
+          leftovers. On Windows it opens a new window so the update can replace this tool after exit.
 
         SHUTDOWN — stop the hub and every backend it supervises:
           ky-ai-dotnet shutdown

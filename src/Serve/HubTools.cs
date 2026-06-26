@@ -11,17 +11,23 @@ namespace KY.AI.Serve;
 internal static class HubTools
 {
     [McpServerTool(Name = "list"), Description(
-        "List the dev servers currently registered with the hub, each with its last build " +
-        "status. Call this first to learn the project names the other tools expect.")]
-    public static Task<string> List() => Hub.ListAsync();
+        "List the dev servers currently registered with the hub. Call this first to learn the project " +
+        "names the other tools expect. Compact by default — each entry is {name, running, pid, build:" +
+        "{status, errors, warnings, building, pending}}, just the headline. Set detail=true (or use " +
+        "`status` with no project) for the full per-server payload incl. structured diagnostics, file " +
+        "lists and log paths.")]
+    public static Task<string> List(
+        [Description("Include each server's full status (diagnostics, files, log paths) instead of the headline")] bool detail = false)
+        => Hub.ListAsync(detail);
 
     [McpServerTool(Name = "status"), Description(
         "Get the status of one dev server (pass project) or all of them (omit project): running, pid, " +
         "log path/capacity, and the last build result — including `building` (a rebuild is running), " +
         "`pending` (a saved change the latest build hasn't incorporated yet), `errors`/`warnings`, the " +
-        "structured `diagnostics`, and `filesInLastBuild`/`lastChangeAt`.")]
+        "structured `diagnostics`, and `filesInLastBuild`/`lastChangeAt`. For just the headline across " +
+        "all servers, use `list` instead.")]
     public static Task<string> Status([Description("Project name; omit for all")] string? project = null)
-        => string.IsNullOrWhiteSpace(project) ? Hub.ListAsync() : Hub.ForwardAsync(project!, HttpMethod.Get, "/status", 5);
+        => string.IsNullOrWhiteSpace(project) ? Hub.ListAsync(detail: true) : Hub.ForwardAsync(project!, HttpMethod.Get, "/status", 5);
 
     [McpServerTool(Name = "wait_for_build"), Description(
         "Block until the dev server's in-flight rebuild settles (incorporating the latest file change, " +
@@ -32,9 +38,12 @@ internal static class HubTools
         "structured {severity, file, line, col, message, raw} (raw is always kept). `settledBy` is the " +
         "verbatim dev-server line that produced the verdict (its timestamp, if any, is the dev server's " +
         "own). `filesInLastBuild` lists the source files this build incorporated, so you can confirm your " +
-        "edit is reflected. Use this after editing files to verify deterministically instead of polling " +
-        "tail. Returns timedOut:true if it doesn't settle within the timeout. Omit project when only one " +
-        "dev server is registered.")]
+        "edit is reflected. When `mayHaveStaleInstances` is true the rebuild changed code (not just " +
+        "templates/styles) and a hot reload may have kept already-created objects on the old version — " +
+        "`staleHint` explains it; reload the page (ky-ai-browser's reload_page) if runtime state looks " +
+        "stale. Use this after editing files to verify deterministically instead of polling tail. Returns " +
+        "timedOut:true if it doesn't settle within the timeout. Omit project when only one dev server is " +
+        "registered.")]
     public static Task<string> WaitForBuild(
         [Description("Project name; omit when only one is registered")] string? project = null,
         [Description("Max ms to wait (default 60000)")] int timeoutMs = 60000)

@@ -7,12 +7,14 @@ using ModelContextProtocol.Server;
 
 namespace KY.AI.Serve;
 
-// `<tool> init` — wire THIS tool into a Claude Code workspace with two confirmed steps:
+// `<tool> init` — wire THIS tool into a Claude Code workspace in two steps:
 //   1. add the tool's MCP server to the nearest `.mcp.json` (walking up from the cwd)
 //   2. allow the tool's MCP commands (and pre-enable the server) in `.claude/settings.local.json`
-// Each step is idempotent and merges into existing files without disturbing other content, so
-// running it again — or once per tool in a full-stack repo — only adds what's missing. The MCP
-// command list is read by reflection from the tool's own MCP tool type, so it never drifts.
+// Each step prompts ONLY when it would actually change the file; a step that is already in place
+// just reports "no change" without a question. So re-running after new commands ship (or once per
+// tool in a full-stack repo) asks about exactly what's missing and nothing else. Each step merges
+// into existing files without disturbing other content; the MCP command list is read by reflection
+// from the tool's own MCP tool type, so it never drifts.
 //
 // The discovery and JSON-merge logic is split into pure, file-system-free statics (Discover,
 // MergeMcpJson, MergeSettingsJson, DiscoverToolNames) so they can be unit-tested directly.
@@ -78,67 +80,61 @@ public static class InitCommand
 
         var rc = 0;
 
-        // ── step 1: the MCP server entry ──
-        if (Confirm($"Add the {toolName} MCP server to .mcp.json?", assumeYes))
+        // ── step 1: the MCP server entry ── (prompt only when it would actually change the file)
+        try
         {
-            try
+            var existing = paths.McpExists ? File.ReadAllText(paths.McpPath) : null;
+            var res = MergeMcpJson(existing, toolName, hubPort);
+            if (!res.Changed)
             {
-                var existing = paths.McpExists ? File.ReadAllText(paths.McpPath) : null;
-                var res = MergeMcpJson(existing, toolName, hubPort);
-                if (res.Changed)
-                {
-                    WriteFile(paths.McpPath, res.Json);
-                    Console.WriteLine($"  {Check} {(res.Added ? "added" : "updated")} MCP server '{toolName}' → {url}");
-                }
-                else
-                {
-                    Console.WriteLine($"  {Check} MCP server '{toolName}' already configured — no change.");
-                }
+                Console.WriteLine($"  {Check} MCP server '{toolName}' already configured — no change.");
             }
-            catch (Exception ex)
+            else if (Confirm($"Add the {toolName} MCP server to .mcp.json?", assumeYes))
             {
-                Console.Error.WriteLine($"  ! could not write {paths.McpPath}: {ex.Message}");
-                rc = 1;
+                WriteFile(paths.McpPath, res.Json);
+                Console.WriteLine($"  {Check} {(res.Added ? "added" : "updated")} MCP server '{toolName}' → {url}");
+            }
+            else
+            {
+                Console.WriteLine($"  {Bullet} skipped MCP server.");
             }
         }
-        else
+        catch (Exception ex)
         {
-            Console.WriteLine($"  {Bullet} skipped MCP server.");
+            Console.Error.WriteLine($"  ! could not update {paths.McpPath}: {ex.Message}");
+            rc = 1;
         }
 
         Console.WriteLine();
 
-        // ── step 2: the allow-list + enabled server ──
-        if (Confirm($"Allow all {commands.Count} of {toolName}'s MCP commands for this project?", assumeYes))
+        // ── step 2: the allow-list + enabled server ── (prompt only when something is missing)
+        try
         {
-            try
+            var existing = paths.SettingsExists ? File.ReadAllText(paths.SettingsPath) : null;
+            var res = MergeSettingsJson(existing, toolName, commands);
+            if (res.CommandsAdded == 0 && !res.ServerEnabledAdded)
             {
-                var existing = paths.SettingsExists ? File.ReadAllText(paths.SettingsPath) : null;
-                var res = MergeSettingsJson(existing, toolName, commands);
-                if (res.CommandsAdded > 0 || res.ServerEnabledAdded)
-                {
-                    WriteFile(paths.SettingsPath, res.Json);
-                    var partial = res.CommandsAdded > 0 && res.CommandsAdded < commands.Count;
-                    var bits = new List<string>();
-                    if (res.CommandsAdded > 0)
-                        bits.Add($"{res.CommandsAdded} command{(res.CommandsAdded == 1 ? "" : "s")} allowed{(partial ? $" (of {commands.Count})" : "")}");
-                    if (res.ServerEnabledAdded) bits.Add("server enabled");
-                    Console.WriteLine($"  {Check} {string.Join(", ", bits)}.");
-                }
-                else
-                {
-                    Console.WriteLine($"  {Check} all {commands.Count} commands already allowed — no change.");
-                }
+                Console.WriteLine($"  {Check} all {commands.Count} commands already allowed — no change.");
             }
-            catch (Exception ex)
+            else if (Confirm($"Allow all {commands.Count} of {toolName}'s MCP commands for this project?", assumeYes))
             {
-                Console.Error.WriteLine($"  ! could not write {paths.SettingsPath}: {ex.Message}");
-                rc = 1;
+                WriteFile(paths.SettingsPath, res.Json);
+                var partial = res.CommandsAdded > 0 && res.CommandsAdded < commands.Count;
+                var bits = new List<string>();
+                if (res.CommandsAdded > 0)
+                    bits.Add($"{res.CommandsAdded} command{(res.CommandsAdded == 1 ? "" : "s")} allowed{(partial ? $" (of {commands.Count})" : "")}");
+                if (res.ServerEnabledAdded) bits.Add("server enabled");
+                Console.WriteLine($"  {Check} {string.Join(", ", bits)}.");
+            }
+            else
+            {
+                Console.WriteLine($"  {Bullet} skipped allow-list.");
             }
         }
-        else
+        catch (Exception ex)
         {
-            Console.WriteLine($"  {Bullet} skipped allow-list.");
+            Console.Error.WriteLine($"  ! could not update {paths.SettingsPath}: {ex.Message}");
+            rc = 1;
         }
 
         Console.WriteLine();
@@ -354,9 +350,10 @@ public static class InitCommand
         {toolName} init — wire this tool into a Claude Code workspace.
 
         Walks up from the current directory to find the nearest `.mcp.json` and `.claude/`
-        folder, then (each step confirmed) adds the {toolName} MCP server (127.0.0.1:{hubPort})
-        to `.mcp.json` and allows its MCP commands in `.claude/settings.local.json`. Both
-        steps merge into existing files and are safe to re-run.
+        folder, then adds the {toolName} MCP server (127.0.0.1:{hubPort}) to `.mcp.json` and
+        allows its MCP commands in `.claude/settings.local.json`. Each step prompts only when it
+        would change the file (an already-configured step just reports "no change"). Both steps
+        merge into existing files and are safe to re-run.
 
           {toolName} init [options]
             -y, --yes        Accept both prompts (non-interactive)

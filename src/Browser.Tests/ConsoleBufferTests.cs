@@ -1,4 +1,5 @@
 using System.Linq;
+using System.Text.Json;
 using KY.AI.Browser;
 using Xunit;
 
@@ -76,6 +77,41 @@ public class ConsoleBufferTests
         var log = new ConsoleEventLog(0);
         for (var i = 1; i <= 5; i++) Add(log, "log", "e" + i);
         Assert.Equal(new[] { "e4", "e5" }, log.Tail(2).Select(x => x.Text));
+    }
+
+    [Fact]
+    public void EventLog_dropTransportNoise_drops_signalr_and_vite_churn_keeps_app_logs()
+    {
+        var log = new ConsoleEventLog(0);
+        Add(log, "error", "Error: Failed to complete negotiation with the server");
+        Add(log, "info", "[vite] connected.");
+        Add(log, "warn", "WebSocket connection to 'wss://localhost/hub' failed");
+        Add(log, "log", "wire energized");                                  // genuine app log
+
+        Assert.Equal(new[] { "wire energized" }, log.Tail(0, dropTransportNoise: true).Select(x => x.Text));
+        Assert.Equal(4, log.Tail(0).Count);                                  // off by default — nothing dropped
+    }
+
+    // ── compact projection (ConsoleCollector.TailJson compact:true) ──
+
+    [Fact]
+    public void TailJson_compact_drops_args_when_text_present_and_truncates_stack()
+    {
+        var c = new ConsoleCollector(100, () => 0);
+        var stack = string.Join("\n", Enumerable.Range(0, 12).Select(i => $"  at f{i} (app.ts:{i}:1)"));
+        c.Ingest(new ConsoleIngestBatch(c.Token, "p", new[]
+        {
+            new RawConsoleEvent("error", new[] { "boom", "extra" }, "boom extra", "app.ts", 1, 1, stack, null),
+        }, null));
+
+        var json = c.TailJson("browser", true, 0, null, 0, 0, null, null, compact: true, appOnly: false);
+        using var doc = JsonDocument.Parse(json);
+        var ev = doc.RootElement.GetProperty("events")[0];
+
+        Assert.False(ev.TryGetProperty("args", out _));            // args dropped — text carries them
+        Assert.Equal("boom extra", ev.GetProperty("text").GetString());
+        Assert.Contains("+6 frames", ev.GetProperty("stack").GetString());   // 12 frames → keep 6, note the rest
+        Assert.False(ev.TryGetProperty("receivedAt", out _));      // omitted in compact
     }
 
     // ── ConsoleCollector ──

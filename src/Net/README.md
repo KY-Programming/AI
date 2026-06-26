@@ -164,9 +164,18 @@ Update to the latest release with the tool's own command:
 ky-ai-dotnet update
 ```
 
-It runs `dotnet tool update --global KY.AI.Net`. On Windows the update runs in a **new window that
-opens once `ky-ai-dotnet` exits** — a running tool can't overwrite its own files, so it waits for
-this process to close first. (You can always run the `dotnet tool update` command yourself.)
+It runs `dotnet tool update --global KY.AI.Net --no-cache` (`--no-cache` forces a fresh feed query;
+without it `dotnet` may report the tool is already up to date from a stale local cache and skip the
+update).
+
+Before updating it **stops any other running instance** (the hub, supervisors, stray one-shots) —
+they keep the installed files locked, which is the other reason an update silently does nothing. It
+lists them, gives you a chance to close them, sends a graceful shutdown, waits a few seconds, then
+hard-kills whatever is left, printing each step.
+
+On Windows the update runs in a **new window that opens once `ky-ai-dotnet` exits** — a running tool
+can't overwrite its own files, so it waits for this process to close first. (You can always run the
+`dotnet tool update` command yourself.)
 
 ## Build verdict
 
@@ -193,7 +202,7 @@ when only one backend is registered** and it resolves automatically. Allow-list 
 
 | Tool | Args | Purpose |
 |---|---|---|
-| `list` | — | running backends + each one's last build status. **Call first.** |
+| `list` | `detail?` | running backends, each a compact `{name, running, pid, build:{status, errors, warnings, building, pending}}`. **Call first.** `detail=true` (or `status` with no project) for the full payload |
 | `status` | `project?` | one backend, or all if omitted — includes `building`/`pending`, `errors`/`warnings`, `diagnostics`, `filesInLastBuild` |
 | `wait_for_build` | `project?`, `timeoutMs?` | **block until the rebuild/restart settles** (debounced), return the verdict + a noise-free `summary` — the deterministic way to verify after an edit (default 90s) |
 | `restart` | `project?` | restart, wait for it to come back up, return the verdict + `summary` |

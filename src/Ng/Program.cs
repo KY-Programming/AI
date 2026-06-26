@@ -20,6 +20,9 @@ internal static class Program
         DefaultHubPort = DefaultHubPort,
         Matcher = new NgBuildMatcher(),
         SourceExtensions = new[] { ".ts", ".html", ".scss", ".css", ".sass", ".less" },
+        // Templates/styles hot-swap in place; a .ts change can leave existing instances on old code,
+        // so a build touching .ts is flagged mayHaveStaleInstances (→ reload_page).
+        HotReloadSafeExtensions = new[] { ".html", ".scss", ".css", ".sass", ".less" },
         WatchExcludeSegments = new[] { "/node_modules/", "/.angular/", "/dist/" },
         // Prefer the `src` subtree (avoids node_modules churn); fall back to the working dir.
         WatchRoot = wd => { var src = Path.Combine(wd, "src"); return Directory.Exists(src) ? src : wd; },
@@ -55,7 +58,7 @@ internal static class Program
         if (string.Equals(args[0], "init", StringComparison.OrdinalIgnoreCase))
             return InitCommand.Run("ky-ai-ng", DefaultHubPort, args[1..]);
         if (string.Equals(args[0], "update", StringComparison.OrdinalIgnoreCase))
-            return UpdateCommand.Run("ky-ai-ng", "KY.AI.Ng", "@ky-ai/ng", args[1..]);
+            return await UpdateCommand.RunAsync("ky-ai-ng", "KY.AI.Ng", "@ky-ai/ng", DefaultHubPort, args[1..]);
         if (string.Equals(args[0], "serve", StringComparison.OrdinalIgnoreCase))
             return await RunServeAsync(args[1..]);
         if (string.Equals(args[0], "run", StringComparison.OrdinalIgnoreCase))
@@ -293,7 +296,9 @@ internal static class Program
         UPDATE — update this tool to the latest version (via the package manager it came from):
           ky-ai-ng update
           npm install -> `npm install --global @ky-ai/ng@latest`; .NET tool -> `dotnet tool update
-          --global KY.AI.Ng`. On Windows it opens a new window to update after this one exits.
+          --global KY.AI.Ng --no-cache`. Stops other running instances first (they lock the files):
+          asks you to close them, sends shutdown, then hard-kills any leftovers. On Windows it opens
+          a new window to update after this exits.
 
         SHUTDOWN — stop the hub and every frontend it supervises:
           ky-ai-ng shutdown

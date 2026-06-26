@@ -16,8 +16,17 @@ internal static class Program
     private const int DefaultPort = 5104;        // ky-ai-browser's own MCP + ingest port (ng=5101..terminal=5103)
     private const int DefaultNgHubPort = 5101;   // where ky-ai-ng's hub lives, to discover the frontend
     private const int BufferCapacity = 1000;
+    private const int EvalPollWindowMs = 25_000;  // how long an eval long-poll hangs before the page re-polls
 
     private static readonly JsonSerializerOptions IngestJson = new() { PropertyNameCaseInsensitive = true };
+    // Eval requests go out camelCase explicitly (the snippet reads req.kind/req.expression/…), so the
+    // wire shape doesn't depend on the host's ambient JSON config; null fields are dropped so a request
+    // only carries the fields its kind uses.
+    private static readonly JsonSerializerOptions EvalJson = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+    };
 
     private static async Task<int> Main(string[] args)
     {
@@ -29,6 +38,25 @@ internal static class Program
         // BrowserTools off this exe's assembly — same shared command the other tools use.
         if (args.Length > 0 && string.Equals(args[0], "init", StringComparison.OrdinalIgnoreCase))
             return InitCommand.Run("ky-ai-browser", DefaultPort, args[1..], typeof(Program).Assembly, runHint: null);
+
+        // shutdown: stop a running ky-ai-browser instance (detaches capture, restores index.html).
+        if (args.Length > 0 && string.Equals(args[0], "shutdown", StringComparison.OrdinalIgnoreCase))
+            return await ShutdownAsync(args[1..]);
+
+        // update: self-update via the shared command. ky-ai-browser is .NET-tool-only (no npm), and
+        // has no hub — its `/shutdown` lives on its own port, so DefaultPort is what gets the graceful
+        // stop before the package manager replaces the locked files.
+        if (args.Length > 0 && string.Equals(args[0], "update", StringComparison.OrdinalIgnoreCase))
+            return await UpdateCommand.RunAsync("ky-ai-browser", "KY.AI.Browser", npmPackageId: null, DefaultPort, args[1..]);
+
+        // Attach mode (no subcommand) takes only flags, so a bare-word first arg is a mistyped
+        // command — say so plainly instead of silently falling through to the "no ng" message.
+        if (args.Length > 0 && !args[0].StartsWith('-'))
+        {
+            Console.Error.WriteLine($"ky-ai-browser: unknown command '{args[0]}'. " +
+                "Run `ky-ai-browser --help`, or `ky-ai-browser` (no args) to attach.");
+            return 1;
+        }
 
         var port = DefaultPort;
         var ngHubPort = DefaultNgHubPort;
@@ -79,9 +107,18 @@ internal static class Program
         // 3) Build the capture buffer + the snippet that will post to us (cross-origin → absolute URL).
         var collector = new ConsoleCollector(BufferCapacity, () => Interlocked.Read(ref Capture.BuildSeq));
         Capture.Collector = collector;
+        // The eval return channel shares the collector's misroute token (the snippet already carries it).
+        var eval = new EvalChannel(collector.Token);
+        Capture.Eval = eval;
         var ingestUrl = $"http://127.0.0.1:{port}/__kyai/console";
         var snippet = LoadSnippet().Replace("__KYAI_TOKEN__", collector.Token).Replace("__KYAI_INGEST__", ingestUrl);
-        var scriptTag = $"<script src=\"http://127.0.0.1:{port}/__kyai/console.js\"></script>";
+        // The token doubles as a per-instance cache-buster in the src. A fresh instance has a fresh token,
+        // so re-injecting yields *different* index.html content even on the same port — the write is no
+        // longer skipped as a no-op, ng reloads the page, and it picks up the new snippet (new token).
+        // Without this, a hard restart on the same port leaves the page running the previous snippet,
+        // whose polls the new server rejects on the token mismatch → silently disconnected. (The
+        // console.js endpoint ignores the query string, so it still serves the snippet.)
+        var scriptTag = $"<script src=\"http://127.0.0.1:{port}/__kyai/console.js?t={collector.Token}\"></script>";
 
         // 4) Host MCP (console_tail/console_clear) + the snippet + ingest on one loopback port.
         var builder = WebApplication.CreateSlimBuilder();
@@ -91,6 +128,13 @@ internal static class Program
 
         app.MapMcp("/mcp");
         app.MapGet("/health", () => Results.Text("ok"));
+        // `ky-ai-browser shutdown` POSTs here. Reply first, then stop — ApplicationStopping runs the
+        // uninject so index.html is restored, exactly as a Ctrl+C would. Loopback-only like the rest.
+        app.MapPost("/shutdown", () =>
+        {
+            _ = Task.Run(async () => { try { await Task.Delay(150); } catch { } app.Lifetime.StopApplication(); });
+            return Results.Text("shutting down");
+        });
         app.MapGet("/__kyai/console.js", (HttpContext ctx) =>
         {
             ctx.Response.Headers["Cache-Control"] = "no-store";
@@ -109,6 +153,37 @@ internal static class Program
                 var batch = await JsonSerializer.DeserializeAsync<ConsoleIngestBatch>(ctx.Request.Body, IngestJson, ctx.RequestAborted);
                 var n = batch is null ? 0 : collector.Ingest(batch);
                 return Results.Json(new { ok = true, ingested = n });
+            }
+            catch { return Results.Json(new { ok = false }); }
+        });
+
+        // ── eval return channel: the capture snippet long-polls /poll for work the runtime-inspection
+        //    tools queued, runs it, and POSTs the result to /result (both cross-origin, loopback-only). ──
+        app.MapGet("/__kyai/eval/poll", async (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            if (!string.Equals(ctx.Request.Query["token"], collector.Token, StringComparison.Ordinal))
+                return Results.Json(new { requests = Array.Empty<EvalRequest>(), interactionActive = false }, EvalJson);   // foreign tab — hand it nothing
+            var reqs = await eval.PollAsync(EvalPollWindowMs, ctx.RequestAborted);
+            // interactionActive lets a (re)loaded page restore the supervision overlay on its own.
+            return Results.Json(new { requests = reqs, interactionActive = eval.InteractionActive }, EvalJson);
+        });
+        app.MapMethods("/__kyai/eval/result", new[] { "OPTIONS" }, (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            return Results.StatusCode(StatusCodes.Status204NoContent);
+        });
+        app.MapPost("/__kyai/eval/result", async (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            try
+            {
+                using var doc = await JsonDocument.ParseAsync(ctx.Request.Body, cancellationToken: ctx.RequestAborted);
+                var root = doc.RootElement;
+                var token = root.TryGetProperty("token", out var t) ? t.GetString() : null;
+                var id = root.TryGetProperty("id", out var i) ? i.GetString() : null;
+                var payload = root.TryGetProperty("payload", out var p) ? p.GetRawText() : null;
+                return Results.Json(new { ok = eval.Complete(token, id, payload) });
             }
             catch { return Results.Json(new { ok = false }); }
         });
@@ -151,7 +226,39 @@ internal static class Program
     {
         ctx.Response.Headers["Access-Control-Allow-Origin"] = "*";
         ctx.Response.Headers["Access-Control-Allow-Headers"] = "*";
-        ctx.Response.Headers["Access-Control-Allow-Methods"] = "POST, OPTIONS";
+        ctx.Response.Headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS";
+    }
+
+    // `ky-ai-browser shutdown` — stop a running instance on its port. ky-ai-browser has no hub (its
+    // lifetime is its own process), so this just asks the instance to stop; it then reverts its inject
+    // and restores index.html, the same as Ctrl+C. Useful when it was launched via `ky-ai-ng serve
+    // --after-start` and shares ng's console, so Ctrl+C there would take ng down too.
+    private static async Task<int> ShutdownAsync(string[] rest)
+    {
+        var port = DefaultPort;
+        for (var i = 0; i < rest.Length; i++)
+            if (rest[i] == "--port" && ++i < rest.Length && int.TryParse(rest[i], out var p)) port = p;
+
+        var url = $"http://127.0.0.1:{port}";
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        try
+        {
+            using var resp = await http.PostAsync(url + "/shutdown", null);
+            var body = (await resp.Content.ReadAsStringAsync()).Trim();
+            if (resp.IsSuccessStatusCode && body.Length > 0)
+                Console.WriteLine($"ky-ai-browser · {body}");
+            else
+                // Reached something on the port that didn't accept /shutdown — most likely an older
+                // ky-ai-browser predating this command. Say so rather than printing an empty line.
+                Console.WriteLine($"ky-ai-browser · an instance on :{port} didn't accept shutdown " +
+                    "(older build without the command?) — stop it with Ctrl+C in its terminal.");
+            return 0;
+        }
+        catch
+        {
+            Console.WriteLine($"ky-ai-browser · nothing running on :{port} — nothing to shut down.");
+            return 0;
+        }
     }
 
     // Look up a registered ky-ai-ng frontend via its hub's /registry. Returns the control URL to
@@ -255,6 +362,19 @@ internal static class Program
         default yes); the page reloads and console.*/errors/rejections flow to the `console_tail` MCP
         tool. On Ctrl+C the script is removed and index.html is restored. If ky-ai-browser dies without
         cleaning up, ky-ai-ng strips the leftover automatically. All HTTP is loopback-only.
+
+        SHUTDOWN — stop a running ky-ai-browser (removes the script, restores index.html):
+          ky-ai-browser shutdown [--port <N>]
+          Same effect as Ctrl+C, but from another terminal. Handy when it was launched via
+          `ky-ai-ng serve --after-start ky-ai-browser` and shares ng's console — this detaches
+          the console capture without stopping ng. --port targets a non-default instance (5104).
+
+        UPDATE — update ky-ai-browser to the latest version (.NET global tool):
+          ky-ai-browser update
+          Runs `dotnet tool update --global KY.AI.Browser --no-cache`. Stops any other running
+          ky-ai-browser first (it locks the files): lists it, gives you a chance to close it, sends
+          shutdown, then hard-kills leftovers. On Windows the update runs in a new window that opens
+          once this process exits (a running tool can't overwrite its own files).
 
         INIT — wire ky-ai-browser into a Claude Code workspace (.mcp.json + allow-list):
           ky-ai-browser init [-y] [--dir <path>]

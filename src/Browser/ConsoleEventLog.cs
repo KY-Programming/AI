@@ -60,9 +60,10 @@ internal sealed class ConsoleEventLog
     //   sinceBuildSeq— keep events tagged with BuildSeq >= this (a wait_for_build verdict's seq)
     //   grep         — case-insensitive substring over Text + Stack
     //   pageLoadId   — keep only events from this page load (segment one reload/HMR boundary)
+    //   dropTransportNoise — drop SignalR/WebSocket negotiation + [vite] HMR socket churn (see TransportNoise)
     public IReadOnlyList<ConsoleEvent> Tail(
         int count, string? minLevel = null, long sinceSeq = 0, long sinceBuildSeq = 0,
-        string? grep = null, string? pageLoadId = null)
+        string? grep = null, string? pageLoadId = null, bool dropTransportNoise = false)
     {
         lock (_sync)
         {
@@ -73,6 +74,7 @@ internal sealed class ConsoleEventLog
             if (sinceSeq > 0) q = q.Where(e => e.Seq >= sinceSeq);
             if (sinceBuildSeq > 0) q = q.Where(e => e.BuildSeq >= sinceBuildSeq);
             if (!string.IsNullOrEmpty(pageLoadId)) q = q.Where(e => e.PageLoadId == pageLoadId);
+            if (dropTransportNoise) q = q.Where(e => !TransportNoise.IsNoise(e));
             if (!string.IsNullOrEmpty(grep))
                 q = q.Where(e =>
                     (e.Text?.Contains(grep, StringComparison.OrdinalIgnoreCase) ?? false) ||
@@ -82,5 +84,36 @@ internal sealed class ConsoleEventLog
             if (count > 0 && count < list.Count) list = list.Skip(list.Count - count).ToList();
             return list;
         }
+    }
+}
+
+// Recognizes the dev-time transport churn that dominates a console buffer but says nothing about the
+// app: SignalR / WebSocket negotiation + close codes, and the [vite] HMR socket chatter. console_tail
+// appOnly=true drops these so app-level logs and errors stand out. Deliberately narrow — it matches
+// transport plumbing, not application code that merely mentions a socket.
+internal static class TransportNoise
+{
+    private static readonly string[] Needles =
+    {
+        "signalr",
+        "/negotiate",
+        "websocket connection to",                                  // Chrome's "WebSocket connection to '…' failed"
+        "websocket is closed before the connection is established",
+        "websocket closed with status",
+        "failed to start the transport",
+        "failed to complete negotiation",
+        "error: failed to start the connection",
+        "[vite]",                                                   // [vite] connecting…/connected./server connection lost
+        "ws-proxy",
+    };
+
+    public static bool IsNoise(ConsoleEvent e) => Match(e.Text) || Match(e.Stack);
+
+    private static bool Match(string? s)
+    {
+        if (string.IsNullOrEmpty(s)) return false;
+        foreach (var n in Needles)
+            if (s.Contains(n, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
     }
 }

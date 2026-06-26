@@ -127,4 +127,90 @@ public class BuildTrackerTests
         Assert.Empty(r.Diagnostics);
         Assert.Equal(0, r.Errors);
     }
+
+    // ── stale-after-build hint (mayHaveStaleInstances) ──
+
+    private static readonly string[] HotSafe = { ".html", ".scss", ".css" };
+
+    [Fact]
+    public void Stale_hint_fires_when_an_incremental_rebuild_changed_code()
+    {
+        var t = new BuildTracker(new FakeMatcher(), HotSafe);
+        t.NoteSourceChange("src/app/wire.ts");
+        t.Observe("START");           // incremental (startedBy non-null)
+        t.Observe("OK");
+
+        var r = t.Snapshot();
+        Assert.True(r.MayHaveStaleInstances);
+        Assert.NotNull(r.StaleHint);
+    }
+
+    [Fact]
+    public void Stale_hint_silent_for_template_or_style_only_changes()
+    {
+        var t = new BuildTracker(new FakeMatcher(), HotSafe);
+        t.NoteSourceChange("src/app/wire.component.html");
+        t.NoteSourceChange("src/app/wire.component.scss");
+        t.Observe("START");
+        t.Observe("OK");
+
+        var r = t.Snapshot();
+        Assert.False(r.MayHaveStaleInstances);
+        Assert.Null(r.StaleHint);
+    }
+
+    [Fact]
+    public void Stale_hint_silent_on_cold_start_even_for_code_changes()
+    {
+        var t = new BuildTracker(new FakeMatcher(), HotSafe);
+        t.NoteSourceChange("src/app/wire.ts");
+        t.MarkBuilding();             // cold start → page fully reloads, no stale instances
+        t.Observe("OK");
+
+        Assert.False(t.Snapshot().MayHaveStaleInstances);
+    }
+
+    [Fact]
+    public void Stale_hint_silent_when_the_tool_did_not_opt_in()
+    {
+        var t = new BuildTracker(new FakeMatcher());   // no hot-reload-safe extensions
+        t.NoteSourceChange("src/app/wire.ts");
+        t.Observe("START");
+        t.Observe("OK");
+
+        Assert.False(t.Snapshot().MayHaveStaleInstances);
+    }
+
+    // ── change→build attribution (closes the watcher-lag race) ──
+
+    [Fact]
+    public void A_change_event_that_lagged_into_the_build_is_still_attributed_to_it()
+    {
+        var now = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+        var t = new BuildTracker(new FakeMatcher(), clock: () => now);
+
+        t.Observe("START");                       // dev server detected the change first…
+        now = now.AddMilliseconds(500);
+        t.NoteSourceChange("src/app/late.ts");    // …our watcher event arrives 500ms into the build
+        t.Observe("OK");
+
+        Assert.Contains("src/app/late.ts", t.Snapshot().FilesInLastBuild);
+    }
+
+    [Fact]
+    public void A_change_after_the_grace_belongs_to_the_next_build_not_the_current_one()
+    {
+        var now = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+        var t = new BuildTracker(new FakeMatcher(), clock: () => now);
+
+        t.Observe("START");
+        now = now.AddSeconds(3);                  // a genuine later edit while the build was running
+        t.NoteSourceChange("src/app/next.ts");
+        t.Observe("OK");
+        Assert.DoesNotContain("src/app/next.ts", t.Snapshot().FilesInLastBuild);
+
+        t.Observe("START");                       // the next build picks it up
+        t.Observe("OK");
+        Assert.Contains("src/app/next.ts", t.Snapshot().FilesInLastBuild);
+    }
 }

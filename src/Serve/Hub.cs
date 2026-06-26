@@ -80,11 +80,14 @@ internal static class Hub
         return null;
     }
 
-    private static string Soft(string error, string project, string? detail) =>
+    private static string Soft(string error, string? project, string? detail) =>
         JsonSerializer.Serialize(new { error, project, detail }, Json);
 
     // Health-ping every registered supervisor's /status, drop the dead ones, return the rest.
-    public static async Task<string> ListAsync()
+    // detail=false (the default for the `list` tool) returns a compact entry per project — name,
+    // running, pid, and the build headline — so `list` stays cheap; detail=true embeds each full
+    // /status clone (what `status` with no project returns).
+    public static async Task<string> ListAsync(bool detail = false)
     {
         var items = new List<object>();
         foreach (var r in Registry.All())
@@ -94,7 +97,9 @@ internal static class Hub
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
                 var body = await Http.GetStringAsync(r.ControlUrl.TrimEnd('/') + "/status", cts.Token);
                 using var doc = JsonDocument.Parse(body);
-                items.Add(new { name = r.Name, controlUrl = r.ControlUrl, status = doc.RootElement.Clone() });
+                items.Add(detail
+                    ? new { name = r.Name, controlUrl = r.ControlUrl, status = doc.RootElement.Clone() }
+                    : Terse(r.Name, doc.RootElement));
             }
             catch
             {
@@ -102,6 +107,27 @@ internal static class Hub
             }
         }
         return JsonSerializer.Serialize(new Dictionary<string, object> { [NounPlural] = items }, Json);
+    }
+
+    // A compact list entry: name + whether it's up + the build's headline (status, error/warning
+    // counts, the in-flight building/pending flags). Drops the per-line diagnostic arrays, file
+    // lists, log paths and timestamps the full `status` carries — `list`'s job is to name projects
+    // and show at-a-glance health, not to dump every diagnostic.
+    private static object Terse(string name, JsonElement status)
+    {
+        var running = status.TryGetProperty("running", out var ru) && ru.ValueKind == JsonValueKind.True;
+        int? pid = status.TryGetProperty("pid", out var pe) && pe.ValueKind == JsonValueKind.Number ? pe.GetInt32() : null;
+        object? build = null;
+        if (status.TryGetProperty("build", out var b) && b.ValueKind == JsonValueKind.Object)
+            build = new
+            {
+                status = b.TryGetProperty("status", out var s) ? s.GetString() : null,
+                errors = b.TryGetProperty("errors", out var e) && e.ValueKind == JsonValueKind.Number ? e.GetInt32() : 0,
+                warnings = b.TryGetProperty("warnings", out var w) && w.ValueKind == JsonValueKind.Number ? w.GetInt32() : 0,
+                building = b.TryGetProperty("building", out var bg) && bg.ValueKind == JsonValueKind.True,
+                pending = b.TryGetProperty("pending", out var pn) && pn.ValueKind == JsonValueKind.True,
+            };
+        return new { name, running, pid, build };
     }
 
     // Remove supervisors whose /health no longer answers.

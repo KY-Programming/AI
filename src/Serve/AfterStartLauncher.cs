@@ -8,10 +8,14 @@ namespace KY.AI.Serve;
 // (e.g. `ky-ai-browser -y`) only runs after the server is actually serving.
 //
 // The launched process inherits this console (its output is visible inline) and is reaped — whole
-// tree — when the supervisor stops, so it never outlives the server it was paired with.
+// tree — when the supervisor stops, so it never outlives the server it was paired with. It's put in
+// a KILL_ON_JOB_CLOSE JobObject (like the dev-server child), so the OS terminates it whenever the
+// supervisor dies — graceful Ctrl+C / shutdown OR a hard kill (Rider Stop) that runs no handlers.
+// Without the job a hard-killed supervisor would orphan the started tool (e.g. ky-ai-browser).
 internal sealed class AfterStartLauncher : IDisposable
 {
     private readonly object _sync = new();
+    private readonly JobObject _job = new();
     private Process? _proc;
     private bool _disposed;
 
@@ -43,8 +47,12 @@ internal sealed class AfterStartLauncher : IDisposable
             var p = Process.Start(psi);
             lock (_sync)
             {
-                if (_disposed) { TryKill(p); return; }   // supervisor shut down between the await and here
+                // Bail if it didn't start, or the supervisor shut down between the await and here.
+                if (_disposed || p is null) { TryKill(p); return; }
                 _proc = p;
+                // Assign the cmd wrapper to the job before it spawns the tool, so the tool inherits the
+                // job too — the OS then reaps the whole tree on supervisor death, however it dies.
+                _job.Assign(p);
             }
         }
         catch (Exception ex)
@@ -72,8 +80,11 @@ internal sealed class AfterStartLauncher : IDisposable
     public void Dispose()
     {
         Process? p;
-        lock (_sync) { _disposed = true; p = _proc; _proc = null; }
-        TryKill(p);
+        bool already;
+        lock (_sync) { already = _disposed; _disposed = true; p = _proc; _proc = null; }
+        if (already) return;        // ApplicationStopping disposes us, then `using` would again
+        TryKill(p);                 // immediate graceful kill (and the only reaper on POSIX)
+        _job.Dispose();             // closing the job handle KILL_ON_JOB_CLOSE-reaps any survivor
     }
 
     private static void TryKill(Process? p)

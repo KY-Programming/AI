@@ -142,7 +142,14 @@ ky-ai-ng update
 ```
 
 - installed via **npm** → `npm install --global @ky-ai/ng@latest`
-- installed as a **.NET global tool** → `dotnet tool update --global KY.AI.Ng`
+- installed as a **.NET global tool** → `dotnet tool update --global KY.AI.Ng --no-cache`
+  (`--no-cache` forces a fresh feed query; without it `dotnet` may report the tool is already up to
+  date from a stale local cache and skip the update)
+
+Before updating it **stops any other running instance** (the hub, `serve` supervisors, stray
+one-shots) — they keep the installed files locked, which is the other reason an update silently does
+nothing. It lists them, gives you a chance to close them, sends a graceful shutdown, waits a few
+seconds, then hard-kills whatever is left, printing each step.
 
 On Windows the update runs in a **new window that opens once `ky-ai-ng` exits** — a running tool
 can't overwrite its own files, so it waits for this process to close first. (You can always run the
@@ -156,7 +163,7 @@ it when only one frontend is registered** and it resolves automatically. Allow-l
 
 | Tool | Args | Purpose |
 |---|---|---|
-| `list` | — | running frontends + each one's last build status. **Call first.** |
+| `list` | `detail?` | running frontends, each a compact `{name, running, pid, build:{status, errors, warnings, building, pending}}`. **Call first.** `detail=true` (or `status` with no project) for the full payload |
 | `status` | `project?` | one frontend, or all if omitted — includes `building`/`pending`, `errors`/`warnings`, `diagnostics`, `filesInLastBuild` |
 | `wait_for_build` | `project?`, `timeoutMs?` | **block until the in-flight rebuild settles** (debounced), return the verdict + a noise-free `summary` — the deterministic way to verify after an edit |
 | `restart` | `project?` | restart, **wait for the rebuild**, return the verdict + `summary` |
@@ -189,14 +196,17 @@ pick up — `angular.json` / proxy / `tsconfig` paths, new dependencies — or a
 
 ### Example `list` payload
 
+Compact by default — the headline per frontend:
+
 ```json
 { "frontends": [
-  { "name": "MyApp", "controlUrl": "http://127.0.0.1:51234",
-    "status": { "running": true, "build": {
-      "status": "success", "errors": 0, "warnings": 1, "durationMs": 2310,
-      "filesInLastBuild": ["src/app/app.component.ts"] } } }
+  { "name": "MyApp", "running": true, "pid": 4242,
+    "build": { "status": "success", "errors": 0, "warnings": 1, "building": false, "pending": false } }
 ] }
 ```
+
+With `detail=true` (or `status` with no project) each entry instead carries `controlUrl` and the
+full `/status` clone — `durationMs`, `diagnostics`, `filesInLastBuild`, log paths, timestamps.
 
 ## Running multiple Angular majors on one machine
 

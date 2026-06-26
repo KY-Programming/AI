@@ -67,19 +67,23 @@ public static class HubHost
         return 0;
     }
 
-    // Auto-started hubs exit once every supervisor has gone (and stays gone briefly), so an
-    // auto-launched hub never lingers after the last dev server is stopped. Kept short so a
-    // freed binary can be re-published promptly.
+    // Auto-started hubs self-exit whenever they sit empty for a short grace window — both after the
+    // last supervisor deregisters AND when nobody ever connects (the hub lost a startup race the dev
+    // server then won elsewhere, or the serve died before registering). Treating "never had a client"
+    // the same as "lost its last client" means an orphaned hub can't linger forever. The window also
+    // absorbs the cold-start gap: the supervisor registers within a couple of seconds of the hub
+    // binding (its register loop isn't gated on the build), so a real client is always counted before
+    // the clock elapses. Kept short so a freed binary can be re-published promptly.
     private static async Task IdleShutdownAsync(WebApplication app, string toolName)
     {
-        var everHad = false;
         DateTimeOffset? emptySince = null;
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10));
         while (await timer.WaitForNextTickAsync())
         {
             await Hub.PruneAsync();
-            if (Hub.Count > 0) { everHad = true; emptySince = null; continue; }
-            if (!everHad) continue;
+            if (Hub.Count > 0) { emptySince = null; continue; }
+            // Empty this tick — start the grace clock on the first empty observation and exit once it
+            // elapses without anyone (re)registering.
             emptySince ??= DateTimeOffset.UtcNow;
             if (DateTimeOffset.UtcNow - emptySince > TimeSpan.FromSeconds(20))
             {

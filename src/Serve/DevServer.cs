@@ -50,7 +50,7 @@ internal sealed class DevServer : IDisposable
         _defaultQuietMs = cfg.DefaultQuietMs;
         Name = opt.Name;
         _log = new RollingLog(opt.LogPath, opt.LogLines);
-        _tracker = new BuildTracker(cfg.Matcher);
+        _tracker = new BuildTracker(cfg.Matcher, cfg.HotReloadSafeExtensions);
         _resolveInjectTarget = cfg.ResolveInjectTarget;
         // Self-heal: drop any capture tag a previous ky-ai tool left behind (before the watcher
         // exists, so the strip doesn't register as a spurious pending source change).
@@ -182,11 +182,18 @@ internal sealed class DevServer : IDisposable
             {
                 IncludeSubdirectories = true,
                 NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size,
+                // Bump from the 8KB default so a burst of saves (multi-file refactor, format-on-save
+                // across a folder) doesn't overflow the buffer and silently drop change events —
+                // which would leave filesInLastBuild incomplete.
+                InternalBufferSize = 64 * 1024,
             };
             void OnFs(object _, FileSystemEventArgs e) { if (IsSource(e.FullPath)) _tracker.NoteSourceChange(Rel(e.FullPath)); }
             w.Changed += OnFs;
             w.Created += OnFs;
             w.Renamed += (_, e) => { if (IsSource(e.FullPath)) _tracker.NoteSourceChange(Rel(e.FullPath)); };
+            // On buffer overflow we can't know which files changed; surface it rather than implying
+            // a quiet build incorporated nothing.
+            w.Error += (_, e) => WriteLocal($"{Name} · file watcher overflow ({e.GetException().Message}) — some change events may be missed this burst");
             w.EnableRaisingEvents = true;
             return w;
         }

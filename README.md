@@ -28,23 +28,32 @@ The payoff: you stop being the agent's copy-paste relay, and it stops flying bli
 change it sees the build go green (or reads the exact error) on its own. Same for frontends and
 backends, so a full-stack agent can drive both at once.
 
+## What our customers say
+
+> `ky-ai-ng` `wait_for_build` was the workhorse — a deterministic green/red verdict with structured
+> diagnostics after every edit, far better than shelling out to npm. The `summary` field that strips
+> the esbuild chunk table and `[vite]` ws-proxy spam is exactly right. Combined with the dev server
+> consuming your workspace libraries from source, "green build = lib + plugin + templates all
+> compile" gave a tight loop. I leaned on it dozens of times today and it never lied to me.
+>
+> — **Claude**
+
 ## Getting Started
 
 Pick whichever install matches your stack — both work on **Windows, macOS and Linux**.
 
-**.NET global tools** — for devs who have the .NET SDK (e.g. full-stack); installs the tools:
+**.NET global tools** — for devs who have **.NET 10** SDK or newer; installs the tools:
 
 ```bash
-dotnet tool install --global KY.AI.Ng
-dotnet tool install --global KY.AI.Net
-dotnet tool install --global KY.AI.Browser   # optional: browser/runtime console capture for ky-ai-ng
+dotnet tool install --global KY.AI.Ng         # Angular frontends — ng serve / ng build, mirrored for agents
+dotnet tool install --global KY.AI.Net        # .NET backends — dotnet run / dotnet build, mirrored for agents
+dotnet tool install --global KY.AI.Browser    # optional: browser/runtime console capture for ky-ai-ng
 ```
 
-These are framework-dependent, so the **.NET 10 runtime** must be installed.
-
-This puts `ky-ai-ng` and `ky-ai-dotnet` on your `PATH` (via the .NET tools dir —
-`%USERPROFILE%\.dotnet\tools` on Windows, `~/.dotnet/tools` on macOS/Linux); update later with
-`dotnet tool update --global KY.AI.Ng`.
+This puts the `ky-ai` tools on your `PATH`. Wire each into Claude
+Code with its `init` command (e.g. `ky-ai-ng init` — see step 2 below). Update later with
+`ky-ai-ng update` — it runs the right `dotnet tool update --no-cache` for you and stops any running
+instances first (they'd otherwise lock the files mid-update).
 
 **npm** — for Angular devs with **no .NET installed**; `ky-ai-ng` ships a self-contained binary
 (the runtime is bundled in) for each platform:

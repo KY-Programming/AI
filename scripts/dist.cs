@@ -1,21 +1,43 @@
 // dist.cs — publish the KY.AI tools into the shared dist\ folder for local testing.
 //
-//   dotnet run scripts/dist.cs        (or:  scripts\dist.cmd)
+//   dotnet run scripts/dist.cs              (or:  scripts\dist.cmd)
+//   dotnet run scripts/dist.cs -- --force   (don't prompt; stop/kill running tools automatically)
 //
 // Builds a runnable, framework-dependent copy of the tools into dist\ so you
 // can put that one folder on PATH and exercise ky-ai-ng / ky-ai-dotnet /
-// ky-ai-terminal locally without installing them from NuGet. They share the
-// output folder, so the Serve DLL lands once. dist\ is cleared first (publish
-// never prunes). Needs the .NET 10 runtime to run the result.
+// ky-ai-terminal / ky-ai-browser locally without installing them from NuGet.
+// They share the output folder, so the Serve DLL lands once. dist\ is cleared
+// first (publish never prunes). Needs the .NET 10 runtime to run the result.
+//
+// A running tool locks its exe/DLLs in dist\, so before clearing we look for
+// running instances and (with consent — default yes) send each a graceful
+// shutdown, then recheck and offer to kill any survivor. --force answers yes
+// to both. Shutdown is asynchronous (the endpoint replies, then exits a beat
+// later), so we trust the OS process list, not the shutdown response.
 //
 // Shipping the suite to NuGet is a separate flow: scripts\pack.cmd then
 // scripts\publish.cmd.
 
 using System.Diagnostics;
+using System.Net.Http;
 using System.Runtime.CompilerServices;
+
+var force = args.Contains("--force", StringComparer.OrdinalIgnoreCase);
 
 var root = RepoRoot();
 var dist = Path.Combine(root, "dist");
+
+// Each tool's process name (no .exe) → the port its `shutdown` listens on: the hub port for the
+// hub-based tools (one POST tears down the hub + all its supervisors), and ky-ai-browser's own port.
+(string Proc, int Port)[] tools =
+[
+    ("ky-ai-ng", 5101),
+    ("ky-ai-dotnet", 5102),
+    ("ky-ai-terminal", 5103),
+    ("ky-ai-browser", 5104),
+];
+
+await EnsureToolsStoppedAsync(tools, force);
 
 ClearDist(dist);
 
@@ -51,7 +73,116 @@ Console.WriteLine($"Published to {dist}");
 foreach (var f in expected) Console.WriteLine($"  + {f}");
 return 0;
 
-// Delete dist\ so removed dependencies don't linger. A running hub locks its
+// Stop any running instance of the tools so they don't lock dist\. First a graceful shutdown
+// (consent, default yes), then — since shutdown is async — recheck the OS and offer to kill
+// survivors (consent, default yes). --force answers yes to both.
+static async Task EnsureToolsStoppedAsync((string Proc, int Port)[] tools, bool force)
+{
+    var running = FindRunning(tools);
+    if (running.Count == 0) return;
+
+    Console.WriteLine("Running KY.AI tools detected (they lock files in dist\\):");
+    foreach (var r in running) Console.WriteLine($"  - {r.Name} (pid {r.Pid})");
+
+    if (!Confirm("Send each a graceful shutdown?", force))
+    {
+        Console.Error.WriteLine("Skipped shutdown — publish will likely fail on locked files.");
+        return;
+    }
+
+    // POST /shutdown to each distinct port that has a process. Hub ports cascade to supervisors.
+    using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) })
+        foreach (var port in running.Select(r => r.Port).Distinct())
+        {
+            try
+            {
+                using var resp = await http.PostAsync($"http://127.0.0.1:{port}/shutdown", null);
+                // 404/405 = the listener has no /shutdown (an older build) — say so plainly.
+                var label = resp.IsSuccessStatusCode ? "accepted"
+                    : resp.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.MethodNotAllowed
+                        ? "not-supported (older build)"
+                        : $"HTTP {(int)resp.StatusCode}";
+                Console.WriteLine($"  shutdown → :{port} {label}");
+            }
+            catch (Exception ex)
+            {
+                // No listener (e.g. a --no-hub supervisor, or a custom port) — the kill step covers it.
+                Console.WriteLine($"  shutdown → :{port} no response ({ex.GetType().Name}); will rely on kill");
+            }
+        }
+
+    // Shutdown only schedules the exit, so poll the process list for the real outcome.
+    var remaining = await WaitForExitAsync(tools, TimeSpan.FromSeconds(8));
+    if (remaining.Count == 0)
+    {
+        Console.WriteLine("All tools stopped.");
+        return;
+    }
+
+    Console.WriteLine("Still running after shutdown:");
+    foreach (var r in remaining) Console.WriteLine($"  - {r.Name} (pid {r.Pid})");
+
+    if (!Confirm("Kill them (and their child trees)?", force))
+    {
+        Console.Error.WriteLine("Left running — publish will likely fail on locked files.");
+        return;
+    }
+
+    foreach (var r in remaining) TryKill(r.Pid);
+
+    var stubborn = await WaitForExitAsync(tools, TimeSpan.FromSeconds(3));
+    if (stubborn.Count > 0)
+        Console.Error.WriteLine($"warning: still running: {string.Join(", ", stubborn.Select(s => $"{s.Name}({s.Pid})"))}");
+}
+
+// Live processes matching the tool names, tagged with that tool's shutdown port.
+static List<(string Name, int Pid, int Port)> FindRunning((string Proc, int Port)[] tools)
+{
+    var list = new List<(string, int, int)>();
+    foreach (var (proc, port) in tools)
+        foreach (var p in Process.GetProcessesByName(proc))
+        {
+            try { if (!p.HasExited) list.Add((proc, p.Id, port)); }
+            catch { /* exited between enumerate and check */ }
+            finally { p.Dispose(); }
+        }
+    return list;
+}
+
+// Poll until nothing matches or the timeout elapses; return whatever is still running.
+static async Task<List<(string Name, int Pid, int Port)>> WaitForExitAsync((string Proc, int Port)[] tools, TimeSpan timeout)
+{
+    var deadline = DateTime.UtcNow + timeout;
+    while (true)
+    {
+        var running = FindRunning(tools);
+        if (running.Count == 0 || DateTime.UtcNow >= deadline) return running;
+        await Task.Delay(300);
+    }
+}
+
+static void TryKill(int pid)
+{
+    try
+    {
+        using var p = Process.GetProcessById(pid);
+        p.Kill(entireProcessTree: true);
+        p.WaitForExit(3000);
+        Console.WriteLine($"  killed pid {pid}");
+    }
+    catch (Exception ex) { Console.Error.WriteLine($"  kill pid {pid} failed: {ex.Message}"); }
+}
+
+// Yes/no prompt, default yes (empty/EOF = yes). --force answers yes without prompting.
+static bool Confirm(string question, bool force)
+{
+    if (force) { Console.WriteLine($"{question} [--force: yes]"); return true; }
+    Console.Write($"{question} [Y/n] ");
+    var ans = Console.ReadLine()?.Trim();
+    return string.IsNullOrEmpty(ans) || ans.StartsWith("y", StringComparison.OrdinalIgnoreCase);
+}
+
+// Delete dist\ so removed dependencies don't linger. A running tool locks its
 // DLL; if so, warn and continue — the publish below surfaces a clear error.
 static void ClearDist(string dist)
 {
@@ -63,8 +194,7 @@ static void ClearDist(string dist)
     catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
     {
         Console.Error.WriteLine($"warning: could not fully clear {dist}: {ex.Message}");
-        Console.Error.WriteLine("a running hub may be locking a DLL — stop it (MCP 'shutdown' or " +
-                                "POST http://127.0.0.1:<port>/shutdown) and retry.");
+        Console.Error.WriteLine("a running tool may be locking a DLL — stop it (re-run, or --force) and retry.");
     }
 }
 

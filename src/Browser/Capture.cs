@@ -7,6 +7,10 @@ internal static class Capture
 {
     public static ConsoleCollector? Collector;
 
+    // The return channel the runtime-inspection tools (evaluate_js / query_dom / reload_page) push
+    // work through; the capture snippet long-polls it. Set once at startup alongside the collector.
+    public static EvalChannel? Eval;
+
     // The ng frontend's current build seq, refreshed by ky-ai-browser's heartbeat loop. The collector
     // tags each ingested console event with it (console↔build correlation; console_tail sinceBuildSeq).
     public static long BuildSeq;

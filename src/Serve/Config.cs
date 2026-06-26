@@ -20,6 +20,12 @@ public sealed class SupervisorConfig
     // File extensions whose changes mark a build as pending (e.g. .ts/.html, .cs/.razor).
     public required IReadOnlyList<string> SourceExtensions { get; init; }
 
+    // Extensions a hot reload swaps cleanly in place (templates/styles for ng). When a build
+    // incorporates any file OUTSIDE this set (e.g. a .ts), already-created objects may still be
+    // running the old code under HMR, so the verdict carries a `mayHaveStaleInstances` hint. Empty
+    // (default) disables the hint — a tool opts in by listing its hot-swappable extensions.
+    public IReadOnlyList<string> HotReloadSafeExtensions { get; init; } = Array.Empty<string>();
+
     // Path segments (e.g. "\\node_modules\\") that exclude a file from the source watcher.
     public required IReadOnlyList<string> WatchExcludeSegments { get; init; }
 
