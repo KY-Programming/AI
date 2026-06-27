@@ -96,7 +96,9 @@ internal static class Program
         catch (Exception ex) { Console.Error.WriteLine($"ky-ai-browser: {ex.Message}"); return 1; }
 
         // 2) Confirm the (reversible) manipulation. Default yes; skip with -y or non-interactive stdin.
-        if (!yes && !Console.IsInputRedirected)
+        // Being launched by another tool (--started-by, e.g. `ky-ai-ng serve --after-start ky-ai-browser`)
+        // is itself the opt-in — the dev chose to start us — so we skip the prompt there too.
+        if (!yes && startedBy is null && !Console.IsInputRedirected)
         {
             Console.WriteLine("ky-ai-browser will ask ky-ai-ng to inject a capture <script> into your app's index.html");
             Console.WriteLine("so the agent can read the browser console. It is removed automatically on shutdown (Ctrl+C).");
@@ -373,7 +375,8 @@ internal static class Program
             --ng-hub-port <N>   ky-ai-ng hub port to discover the frontend (default: 5101)
             -y, --yes           Skip the inject confirmation (default answer is yes anyway)
             --started-by <tool> Set automatically when launched via `ky-ai-ng serve --after-start`:
-                                continues the launcher's start-up box instead of opening its own.
+                                continues the launcher's start-up box instead of opening its own, and
+                                skips the inject confirmation (being launched is itself the opt-in).
 
         On start it asks ky-ai-ng to inject a capture <script> into the app's index.html (you confirm;
         default yes); the page reloads and console.*/errors/rejections flow to the `console_tail` MCP

@@ -2,12 +2,20 @@
 //
 //   dotnet run scripts/dist.cs              (or:  scripts\dist.cmd)
 //   dotnet run scripts/dist.cs -- --force   (don't prompt; stop/kill running tools automatically)
+//   dotnet run scripts/dist.cs ky-ai-ng     (build just one tool; leave the others running)
 //
 // Builds a runnable, framework-dependent copy of the tools into dist\ so you
 // can put that one folder on PATH and exercise ky-ai-ng / ky-ai-dotnet /
 // ky-ai-terminal / ky-ai-browser locally without installing them from NuGet.
 // They share the output folder, so the Serve DLL lands once. dist\ is cleared
 // first (publish never prunes). Needs the .NET 10 runtime to run the result.
+//
+// Pass a single tool name (ky-ai-ng / ky-ai-dotnet / ky-ai-terminal /
+// ky-ai-browser) to stop and rebuild only that tool while the others keep
+// running. dist\ is NOT cleared in that mode (clearing would delete the other
+// tools and the shared Serve DLL is locked by them); publish overwrites just
+// that tool's files in place. If the shared Serve DLL changed it is locked by
+// the still-running tools and publish will fail — do a full run to rebuild all.
 //
 // A running tool locks its exe/DLLs in dist\, so before clearing we look for
 // running instances and (with consent — default yes) send each a graceful
@@ -23,33 +31,43 @@ using System.Net.Http;
 using System.Runtime.CompilerServices;
 
 var force = args.Contains("--force", StringComparer.OrdinalIgnoreCase);
+// Optional positional arg: a single tool name to stop+rebuild (everything else is an option flag).
+var only = args.FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal));
 
 var root = RepoRoot();
 var dist = Path.Combine(root, "dist");
 
-// Each tool's process name (no .exe) → the port its `shutdown` listens on: the hub port for the
-// hub-based tools (one POST tears down the hub + all its supervisors), and ky-ai-browser's own port.
-(string Proc, int Port)[] tools =
+// The tool suite: process name (no .exe) → shutdown port (the hub port for the hub-based tools, where
+// one POST tears down the hub + all its supervisors; ky-ai-browser's own port) → project → output exe.
+(string Proc, int Port, string Project, string Exe)[] allTools =
 [
-    ("ky-ai-ng", 5101),
-    ("ky-ai-dotnet", 5102),
-    ("ky-ai-terminal", 5103),
-    ("ky-ai-browser", 5104),
+    ("ky-ai-ng",       5101, Path.Combine(root, "src", "Ng",       "KY.AI.Ng.csproj"),       "ky-ai-ng.exe"),
+    ("ky-ai-dotnet",   5102, Path.Combine(root, "src", "Net",      "KY.AI.Net.csproj"),      "ky-ai-dotnet.exe"),
+    ("ky-ai-terminal", 5103, Path.Combine(root, "src", "Terminal", "KY.AI.Terminal.csproj"), "ky-ai-terminal.exe"),
+    ("ky-ai-browser",  5104, Path.Combine(root, "src", "Browser",  "KY.AI.Browser.csproj"),  "ky-ai-browser.exe"),
 ];
 
-await EnsureToolsStoppedAsync(tools, force);
+// Narrow to the requested tool, or the whole suite when none was named.
+var tools = allTools;
+if (only is not null)
+{
+    tools = allTools.Where(t => t.Proc.Equals(only, StringComparison.OrdinalIgnoreCase)).ToArray();
+    if (tools.Length == 0)
+    {
+        Console.Error.WriteLine($"unknown tool '{only}'. Valid: {string.Join(", ", allTools.Select(t => t.Proc))}");
+        return 1;
+    }
+    Console.WriteLine($"Single-tool build: {tools[0].Proc} (others keep running; dist\\ not cleared)");
+}
 
-ClearDist(dist);
+await EnsureToolsStoppedAsync(tools.Select(t => (t.Proc, t.Port)).ToArray(), force);
 
-string[] projects =
-[
-    Path.Combine(root, "src", "Ng", "KY.AI.Ng.csproj"),
-    Path.Combine(root, "src", "Net", "KY.AI.Net.csproj"),
-    Path.Combine(root, "src", "Browser", "KY.AI.Browser.csproj"),
-    Path.Combine(root, "src", "Terminal", "KY.AI.Terminal.csproj"),
-];
+// Full run wipes dist\ so removed deps don't linger; a single-tool run must NOT (it would delete the
+// other, still-running tools) — its publish overwrites just that tool's files in place.
+if (only is null)
+    ClearDist(dist);
 
-foreach (var proj in projects)
+foreach (var (_, _, proj, _) in tools)
 {
     Console.WriteLine($"==> dotnet publish {Path.GetFileName(proj)} -c Release -o dist");
     int code = Run(root, "dotnet", "publish", proj, "-c", "Release", "-o", dist, "--nologo");
@@ -60,8 +78,9 @@ foreach (var proj in projects)
     }
 }
 
-// Verify the aggregated output is what PATH expects.
-string[] expected = ["ky-ai-ng.exe", "ky-ai-dotnet.exe", "ky-ai-terminal.exe", "ky-ai-browser.exe", "KY.AI.Serve.dll"];
+// Verify the output is what PATH expects: the built exe(s), plus the shared Serve DLL on a full run
+// (a single-tool run leaves the already-present Serve DLL untouched, so don't demand a fresh one).
+var expected = tools.Select(t => t.Exe).Concat(only is null ? ["KY.AI.Serve.dll"] : Array.Empty<string>()).ToArray();
 var missing = expected.Where(f => !File.Exists(Path.Combine(dist, f))).ToArray();
 if (missing.Length > 0)
 {
