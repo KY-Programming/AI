@@ -68,7 +68,7 @@ ky-ai-ng run <script> [options] [-- <args>]  # supervise `npm run <script>` like
 
 ky-ai-ng shutdown                          # stop the hub + every frontend it supervises
 
-ky-ai-ng init [-y] [--dir <path>]          # wire it into your agent
+ky-ai-ng init [--agent claude|cursor|vscode] [-y] [--dir <path>]   # wire it into your agent (default: auto-detect)
 
 ky-ai-ng <ng args...> [--log-file f.log]   # one-shot tee (--log-file also writes a file)
 ```
@@ -109,15 +109,19 @@ One config per frontend either way; the MCP hub auto-starts, so there's no separ
 
 ## Connect your agent
 
-**`ky-ai-ng init` wires it into your agent for you** (`-y` skips the prompts,
-`--dir <path>` starts the search elsewhere). To wire it by hand instead, add the server to
-`.mcp.json` (one entry total, regardless of how many frontends):
+**`ky-ai-ng init` wires it into your agent for you** — it targets **Claude Code, Cursor, or
+VS Code**. Choose with `--agent <claude|cursor|vscode>`, or omit it to auto-detect the agent your
+workspace already uses and confirm via an interactive picker.
+
+To wire it by hand instead, the per-agent files are:
+
+**Claude Code** — `.mcp.json` (one entry total, regardless of how many frontends):
 
 ```json
 { "mcpServers": { "ky-ai-ng": { "type": "http", "url": "http://127.0.0.1:5101/mcp" } } }
 ```
 
-and allow its tools in your agent's config — for Claude Code that's `.claude/settings.local.json`:
+plus allowing its tools in `.claude/settings.local.json`:
 
 ```json
 {
@@ -128,6 +132,15 @@ and allow its tools in your agent's config — for Claude Code that's `.claude/s
   ] },
   "enabledMcpjsonServers": ["ky-ai-ng"]
 }
+```
+
+**Cursor** — `.cursor/mcp.json` (transport inferred from `url`); **VS Code** — `.vscode/mcp.json`
+(note the top-level `servers` key). Neither has a file-based allow-list — tools are toggled in the
+editor's UI:
+
+```json
+{ "mcpServers": { "ky-ai-ng": { "url": "http://127.0.0.1:5101/mcp" } } }              // .cursor/mcp.json
+{ "servers":    { "ky-ai-ng": { "type": "http", "url": "http://127.0.0.1:5101/mcp" } } } // .vscode/mcp.json
 ```
 
 ## Update

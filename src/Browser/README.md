@@ -40,7 +40,7 @@ ky-ai-browser [options]            # run alongside `ky-ai-ng serve`
   -y, --yes           Skip the inject confirmation (default answer is yes anyway)
 
 ky-ai-browser shutdown [--port <N>]      # stop a running instance (removes the script, restores index.html)
-ky-ai-browser init [-y] [--dir <path>]   # wire it into your agent
+ky-ai-browser init [--agent claude|cursor|vscode] [-y] [--dir <path>]   # wire it into your agent (default: auto-detect)
 ky-ai-browser update                     # update to the latest release
 ```
 
@@ -50,14 +50,18 @@ capture without taking ng down.
 
 ## Connect your agent
 
-`ky-ai-browser init` wires it into your agent for you (re-run it after an update to pick up new
-tools). To wire it by hand, add the server to `.mcp.json`:
+`ky-ai-browser init` wires it into your agent for you — it targets **Claude Code, Cursor, or VS
+Code** (`--agent <claude|cursor|vscode>`, default auto-detect with an interactive picker; re-run it
+after an update to pick up new tools). To wire it by hand, add the server to the agent's MCP config —
+**Claude Code** `.mcp.json` / **Cursor** `.cursor/mcp.json` (both use `mcpServers`; drop `type` for
+Cursor) / **VS Code** `.vscode/mcp.json` (top-level `servers` key):
 
 ```json
 { "mcpServers": { "ky-ai-browser": { "type": "http", "url": "http://127.0.0.1:5104/mcp" } } }
 ```
 
-and allow its tools in your agent's config — for Claude Code that's `.claude/settings.local.json`:
+For Claude Code, also allow its tools in `.claude/settings.local.json` (Cursor and VS Code have no
+file-based allow-list — tools are toggled in the editor's UI):
 
 ```json
 { "permissions": { "allow": [

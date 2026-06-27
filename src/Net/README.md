@@ -66,7 +66,7 @@ ky-ai-dotnet serve [options]                # one per backend (dotnet watch run)
 
 ky-ai-dotnet shutdown                       # stop the hub + every backend it supervises
 
-ky-ai-dotnet init [-y] [--dir <path>]       # wire it into your agent
+ky-ai-dotnet init [--agent claude|cursor|vscode] [-y] [--dir <path>]   # wire it into your agent (default: auto-detect)
 
 ky-ai-dotnet <dotnet args...> [--log-file f.log]   # one-shot tee (--log-file also writes a file)
 ```
@@ -117,15 +117,19 @@ control) and can't share the port — so it's either/or per backend, per session
 
 ## Connect your agent
 
-**`ky-ai-dotnet init` wires it into your agent for you** (`-y` skips the prompts,
-`--dir <path>` starts the search elsewhere). To wire it by hand instead, add the server to
-`.mcp.json` (one entry total, regardless of how many backends):
+**`ky-ai-dotnet init` wires it into your agent for you** — it targets **Claude Code, Cursor, or
+VS Code**. Choose with `--agent <claude|cursor|vscode>`, or omit it to auto-detect the agent your
+workspace already uses and confirm via an interactive picker.
+
+To wire it by hand instead, the per-agent files are:
+
+**Claude Code** — `.mcp.json` (one entry total, regardless of how many backends):
 
 ```json
 { "mcpServers": { "ky-ai-dotnet": { "type": "http", "url": "http://127.0.0.1:5102/mcp" } } }
 ```
 
-and allow its tools in your agent's config — for Claude Code that's `.claude/settings.local.json`:
+plus allowing its tools in `.claude/settings.local.json`:
 
 ```json
 {
@@ -136,6 +140,15 @@ and allow its tools in your agent's config — for Claude Code that's `.claude/s
   ] },
   "enabledMcpjsonServers": ["ky-ai-dotnet"]
 }
+```
+
+**Cursor** — `.cursor/mcp.json` (transport inferred from `url`); **VS Code** — `.vscode/mcp.json`
+(note the top-level `servers` key). Neither has a file-based allow-list — tools are toggled in the
+editor's UI:
+
+```json
+{ "mcpServers": { "ky-ai-dotnet": { "url": "http://127.0.0.1:5102/mcp" } } }              // .cursor/mcp.json
+{ "servers":    { "ky-ai-dotnet": { "type": "http", "url": "http://127.0.0.1:5102/mcp" } } } // .vscode/mcp.json
 ```
 
 ## Update

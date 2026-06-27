@@ -87,6 +87,90 @@ public class InitCommandTests
         Assert.Throws<InvalidDataException>(() => InitCommand.MergeMcpJson("[1,2,3]", "ky-ai-ng", 5101));
     }
 
+    // ── MergeMcpJson with non-Claude agent shapes ──
+
+    [Fact]
+    public void MergeMcpJson_cursor_shape_omits_type_under_mcpServers()
+    {
+        var res = InitCommand.MergeMcpJson(null, "ky-ai-ng", 5101, AgentTargets.Cursor.Shape);
+
+        Assert.True(res.Added);
+        var server = JsonNode.Parse(res.Json)!["mcpServers"]!["ky-ai-ng"]!.AsObject();
+        Assert.False(server.ContainsKey("type"));                              // Cursor infers from `url`
+        Assert.Equal("http://127.0.0.1:5101/mcp", server["url"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void MergeMcpJson_cursor_shape_is_idempotent()
+    {
+        var first = InitCommand.MergeMcpJson(null, "ky-ai-ng", 5101, AgentTargets.Cursor.Shape);
+        var second = InitCommand.MergeMcpJson(first.Json, "ky-ai-ng", 5101, AgentTargets.Cursor.Shape);
+
+        Assert.False(second.Changed);
+        Assert.False(second.Added);
+    }
+
+    [Fact]
+    public void MergeMcpJson_vscode_shape_uses_servers_key_with_type()
+    {
+        var res = InitCommand.MergeMcpJson(null, "ky-ai-ng", 5101, AgentTargets.VsCode.Shape);
+
+        var root = JsonNode.Parse(res.Json)!.AsObject();
+        Assert.False(root.ContainsKey("mcpServers"));                          // VS Code uses `servers`
+        var server = root["servers"]!["ky-ai-ng"]!.AsObject();
+        Assert.Equal("http", server["type"]!.GetValue<string>());
+        Assert.Equal("http://127.0.0.1:5101/mcp", server["url"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void MergeMcpJson_vscode_shape_preserves_existing_servers()
+    {
+        const string existing = """{ "servers": { "other": { "type": "http", "url": "http://127.0.0.1:9999/mcp" } } }""";
+
+        var res = InitCommand.MergeMcpJson(existing, "ky-ai-dotnet", 5102, AgentTargets.VsCode.Shape);
+
+        var servers = JsonNode.Parse(res.Json)!["servers"]!.AsObject();
+        Assert.True(servers.ContainsKey("other"));
+        Assert.True(servers.ContainsKey("ky-ai-dotnet"));
+        Assert.Equal("http://127.0.0.1:9999/mcp", servers["other"]!["url"]!.GetValue<string>());
+    }
+
+    // ── agent resolution / detection ──
+
+    [Fact]
+    public void Resolve_matches_known_ids_case_insensitively_and_rejects_unknown()
+    {
+        Assert.Same(AgentTargets.Claude, AgentTargets.Resolve("claude"));
+        Assert.Same(AgentTargets.Cursor, AgentTargets.Resolve("Cursor"));
+        Assert.Same(AgentTargets.VsCode, AgentTargets.Resolve("VSCODE"));
+        Assert.Null(AgentTargets.Resolve("windsurf"));    // no project-scoped config — unsupported
+        Assert.Null(AgentTargets.Resolve("nope"));
+    }
+
+    [Fact]
+    public void Detect_prefers_claude_when_multiple_markers_present()
+    {
+        using var temp = new TempDir();
+        Directory.CreateDirectory(Path.Combine(temp.Path, ".claude"));
+        Directory.CreateDirectory(Path.Combine(temp.Path, ".cursor"));
+
+        Assert.Same(AgentTargets.Claude, AgentTargets.Detect(temp.Path));
+    }
+
+    [Fact]
+    public void Detect_picks_cursor_when_only_cursor_marker_present_and_null_when_none()
+    {
+        using var temp = new TempDir();
+        Directory.CreateDirectory(Path.Combine(temp.Path, ".cursor"));
+        var nested = Path.Combine(temp.Path, "src", "app");
+        Directory.CreateDirectory(nested);
+
+        Assert.Same(AgentTargets.Cursor, AgentTargets.Detect(nested));   // walks up to find .cursor/
+
+        using var empty = new TempDir();
+        Assert.Null(AgentTargets.Detect(empty.Path));
+    }
+
     // ── MergeSettingsJson ──
 
     [Fact]
@@ -174,6 +258,38 @@ public class InitCommandTests
         Assert.False(paths.SettingsExists);
         Assert.Equal(Path.Combine(start, ".mcp.json"), paths.McpPath);
         Assert.Equal(Path.Combine(start, ".claude", "settings.local.json"), paths.SettingsPath);
+    }
+
+    [Fact]
+    public void Discover_cursor_places_mcp_inside_cursor_dir_and_has_no_settings()
+    {
+        using var temp = new TempDir();
+        var root = temp.Path;
+        Directory.CreateDirectory(Path.Combine(root, ".cursor"));
+        var nested = Path.Combine(root, "src", "app");
+        Directory.CreateDirectory(nested);
+
+        var paths = InitCommand.Discover(nested, AgentTargets.Cursor);
+
+        Assert.True(paths.AgentDetected);                                  // .cursor/ found walking up
+        Assert.Equal(Path.Combine(root, ".cursor", "mcp.json"), paths.McpPath);
+        Assert.False(paths.McpExists);                                     // dir exists, file does not yet
+        Assert.Null(paths.SettingsPath);                                   // no allow-list step
+        Assert.False(paths.SettingsExists);
+    }
+
+    [Fact]
+    public void Discover_vscode_plans_mcp_in_start_dir_when_no_marker_found()
+    {
+        using var temp = new TempDir();
+        var start = Path.Combine(temp.Path, "lonely");
+        Directory.CreateDirectory(start);
+
+        var paths = InitCommand.Discover(start, AgentTargets.VsCode);
+
+        Assert.False(paths.AgentDetected);
+        Assert.Equal(Path.Combine(start, ".vscode", "mcp.json"), paths.McpPath);
+        Assert.Null(paths.SettingsPath);
     }
 
     // A throwaway tool type used only to verify reflection (explicit names, snake_case fallback,

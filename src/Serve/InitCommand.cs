@@ -7,9 +7,15 @@ using ModelContextProtocol.Server;
 
 namespace KY.AI.Serve;
 
-// `<tool> init` — wire THIS tool into a Claude Code workspace in two steps:
-//   1. add the tool's MCP server to the nearest `.mcp.json` (walking up from the cwd)
-//   2. allow the tool's MCP commands (and pre-enable the server) in `.claude/settings.local.json`
+// `<tool> init` — wire THIS tool's MCP server into an AI agent's workspace. The target agent
+// (Claude Code, Cursor, or VS Code — see AgentTargets) is chosen with `--agent`, or auto-detected
+// from the workspace and confirmed via an interactive picker. Each agent differs only in where its
+// project MCP config lives and the JSON shape of a server entry; Claude Code additionally keeps an
+// allow-list. So the work is one or two steps:
+//   1. add the tool's MCP server to the agent's project MCP config (e.g. nearest `.mcp.json` for
+//      Claude, `.cursor/mcp.json` for Cursor, `.vscode/mcp.json` for VS Code)
+//   2. (Claude only) allow the tool's MCP commands (and pre-enable the server) in
+//      `.claude/settings.local.json`
 // Each step prompts ONLY when it would actually change the file; a step that is already in place
 // just reports "no change" without a question. So re-running after new commands ship (or once per
 // tool in a full-stack repo) asks about exactly what's missing and nothing else. Each step merges
@@ -29,10 +35,11 @@ public static class InitCommand
     private const string Check = "✓"; // ✓
     private const string Bullet = "·"; // ·
 
+    // SettingsPath is non-null only for an agent that keeps a second (allow-list) file — i.e. Claude.
     public sealed record InitPaths(
         string Root,
         string McpPath, bool McpExists,
-        string SettingsPath, bool SettingsExists,
+        string? SettingsPath, bool SettingsExists,
         bool AgentDetected);
 
     public sealed record McpMergeResult(string Json, bool Changed, bool Added);
@@ -48,6 +55,7 @@ public static class InitCommand
         Cli.TrySetUtf8Console();
 
         var assumeYes = false;
+        string? agentId = null;
         var startDir = Environment.CurrentDirectory;
         for (var i = 0; i < rest.Length; i++)
         {
@@ -55,6 +63,14 @@ public static class InitCommand
             {
                 case "-y" or "--yes": assumeYes = true; break;
                 case "--dir": if (++i < rest.Length) startDir = Path.GetFullPath(rest[i]); break;
+                case "--agent":
+                    if (++i >= rest.Length)
+                    {
+                        Console.Error.WriteLine($"{toolName} init: --agent needs a value ({AgentNameList()}).");
+                        return 1;
+                    }
+                    agentId = rest[i];
+                    break;
                 case "-h" or "--help": PrintHelp(toolName, hubPort); return 0;
                 default:
                     Console.Error.WriteLine($"{toolName} init: unknown option '{rest[i]}'. Try `{toolName} init --help`.");
@@ -62,19 +78,47 @@ public static class InitCommand
             }
         }
 
-        var commands = DiscoverToolNames(toolsAssembly ?? typeof(InitCommand).Assembly);
-        if (commands.Count == 0)
+        // ── pick the target agent: explicit --agent, else auto-detect (confirmed via a picker) ──
+        AgentTarget agent;
+        if (agentId is not null)
         {
-            Console.Error.WriteLine($"{toolName} init: found no MCP commands to allow (internal error).");
-            return 1;
+            var resolved = AgentTargets.Resolve(agentId);
+            if (resolved is null)
+            {
+                var hint = string.Equals(agentId, "windsurf", StringComparison.OrdinalIgnoreCase)
+                    ? " (Windsurf has no project-scoped MCP config, so init can't target it)"
+                    : "";
+                Console.Error.WriteLine($"{toolName} init: unknown agent '{agentId}'.{hint} Valid: {AgentNameList()}.");
+                return 1;
+            }
+            agent = resolved;
+        }
+        else
+        {
+            var detected = AgentTargets.Detect(startDir) ?? AgentTargets.Claude;
+            agent = (assumeYes || Console.IsInputRedirected) ? detected : SelectAgent(detected);
         }
 
-        var paths = Discover(startDir);
-        var url = $"http://127.0.0.1:{hubPort}/mcp";
+        // The allow-list step needs the tool's MCP command names; only Claude uses it.
+        IReadOnlyList<string> commands = Array.Empty<string>();
+        if (agent.HasAllowList)
+        {
+            commands = DiscoverToolNames(toolsAssembly ?? typeof(InitCommand).Assembly);
+            if (commands.Count == 0)
+            {
+                Console.Error.WriteLine($"{toolName} init: found no MCP commands to allow (internal error).");
+                return 1;
+            }
+        }
 
-        Console.WriteLine($"Agent:        Claude Code{(paths.AgentDetected ? "" : $"  (no .claude/ — will create under {paths.Root})")}");
+        var paths = Discover(startDir, agent);
+        var url = $"http://127.0.0.1:{hubPort}/mcp";
+        var mcpLabel = agent.McpInMarkerDir ? $"{agent.MarkerDir}/{agent.McpFileName}" : agent.McpFileName;
+
+        Console.WriteLine($"Agent:        {agent.DisplayName}{(paths.AgentDetected ? "" : $"  (no {agent.MarkerDir}/ — will create under {paths.Root})")}");
         Console.WriteLine($"MCP config:   {paths.McpPath}{(paths.McpExists ? "" : "  (will create)")}");
-        Console.WriteLine($"Local config: {paths.SettingsPath}{(paths.SettingsExists ? "" : "  (will create)")}");
+        if (agent.HasAllowList)
+            Console.WriteLine($"Local config: {paths.SettingsPath}{(paths.SettingsExists ? "" : "  (will create)")}");
         Console.WriteLine();
 
         var rc = 0;
@@ -84,12 +128,12 @@ public static class InitCommand
         try
         {
             var existing = paths.McpExists ? File.ReadAllText(paths.McpPath) : null;
-            var res = MergeMcpJson(existing, toolName, hubPort);
+            var res = MergeMcpJson(existing, toolName, hubPort, agent.Shape);
             if (!res.Changed)
             {
                 Console.WriteLine($"{Check} MCP server '{toolName}' already configured — no change.");
             }
-            else if (Confirm($"Add the {toolName} MCP server to .mcp.json?", assumeYes))
+            else if (Confirm($"Add the {toolName} MCP server to {mcpLabel}?", assumeYes))
             {
                 WriteFile(paths.McpPath, res.Json);
                 anyChange = true;
@@ -106,37 +150,39 @@ public static class InitCommand
             rc = 1;
         }
 
-        Console.WriteLine();
-
-        // ── step 2: the allow-list + enabled server ── (prompt only when something is missing)
-        try
+        // ── step 2: the allow-list + enabled server ── (Claude only; prompt only when something is missing)
+        if (agent.HasAllowList)
         {
-            var existing = paths.SettingsExists ? File.ReadAllText(paths.SettingsPath) : null;
-            var res = MergeSettingsJson(existing, toolName, commands);
-            if (res.CommandsAdded == 0 && !res.ServerEnabledAdded)
+            Console.WriteLine();
+            try
             {
-                Console.WriteLine($"{Check} all {commands.Count} commands already allowed — no change.");
+                var existing = paths.SettingsExists ? File.ReadAllText(paths.SettingsPath!) : null;
+                var res = MergeSettingsJson(existing, toolName, commands);
+                if (res.CommandsAdded == 0 && !res.ServerEnabledAdded)
+                {
+                    Console.WriteLine($"{Check} all {commands.Count} commands already allowed — no change.");
+                }
+                else if (Confirm($"Allow all {commands.Count} of {toolName}'s MCP commands for this project?", assumeYes))
+                {
+                    WriteFile(paths.SettingsPath!, res.Json);
+                    anyChange = true;
+                    var partial = res.CommandsAdded > 0 && res.CommandsAdded < commands.Count;
+                    var bits = new List<string>();
+                    if (res.CommandsAdded > 0)
+                        bits.Add($"{res.CommandsAdded} command{(res.CommandsAdded == 1 ? "" : "s")} allowed{(partial ? $" (of {commands.Count})" : "")}");
+                    if (res.ServerEnabledAdded) bits.Add("server enabled");
+                    Console.WriteLine($"{Check} {string.Join(", ", bits)}.");
+                }
+                else
+                {
+                    Console.WriteLine($"{Bullet} skipped allow-list.");
+                }
             }
-            else if (Confirm($"Allow all {commands.Count} of {toolName}'s MCP commands for this project?", assumeYes))
+            catch (Exception ex)
             {
-                WriteFile(paths.SettingsPath, res.Json);
-                anyChange = true;
-                var partial = res.CommandsAdded > 0 && res.CommandsAdded < commands.Count;
-                var bits = new List<string>();
-                if (res.CommandsAdded > 0)
-                    bits.Add($"{res.CommandsAdded} command{(res.CommandsAdded == 1 ? "" : "s")} allowed{(partial ? $" (of {commands.Count})" : "")}");
-                if (res.ServerEnabledAdded) bits.Add("server enabled");
-                Console.WriteLine($"{Check} {string.Join(", ", bits)}.");
+                Console.Error.WriteLine($"! could not update {paths.SettingsPath}: {ex.Message}");
+                rc = 1;
             }
-            else
-            {
-                Console.WriteLine($"{Bullet} skipped allow-list.");
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"! could not update {paths.SettingsPath}: {ex.Message}");
-            rc = 1;
         }
 
         Console.WriteLine();
@@ -150,59 +196,79 @@ public static class InitCommand
         return rc;
     }
 
-    // ── discovery: nearest `.claude/` dir and `.mcp.json`, walking up from startDir ──
-    // Missing pieces are planned next to whichever was found (the project root), else in startDir.
-    public static InitPaths Discover(string startDir)
+    private static string AgentNameList() => string.Join(" | ", AgentTargets.All.Select(a => a.Id));
+
+    // ── discovery: the agent's config folder (and, for Claude, the nearest `.mcp.json`), walking
+    // up from startDir ── Missing pieces are planned next to whichever was found (the project root),
+    // else in startDir. The 1-arg overload keeps the original Claude-only behaviour for callers/tests.
+    public static InitPaths Discover(string startDir) => Discover(startDir, AgentTargets.Claude);
+
+    public static InitPaths Discover(string startDir, AgentTarget agent)
     {
         startDir = Path.GetFullPath(startDir);
+        var stopBefore = HomeStop();
 
-        // Stop before the user's home directory: `~/.claude` is Claude Code's *global* config and
-        // `~/.mcp.json` is not project-scoped, so neither should be treated as this project's files.
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        var stopBefore = string.IsNullOrEmpty(home) ? null : Path.GetFullPath(home);
-
-        var claudeDir = FindUp(startDir, stopBefore, d =>
+        // The agent's marker/config folder (.claude / .cursor / .vscode).
+        var markerDir = FindUp(startDir, stopBefore, d =>
         {
-            var p = Path.Combine(d, ".claude");
+            var p = Path.Combine(d, agent.MarkerDir);
             return Directory.Exists(p) ? p : null;
         });
-        var mcpFile = FindUp(startDir, stopBefore, d =>
+
+        string root, mcpPath;
+        bool mcpExists;
+        if (agent.McpInMarkerDir)
         {
-            var p = Path.Combine(d, ".mcp.json");
-            return File.Exists(p) ? p : null;
-        });
-
-        var root =
-            claudeDir is not null ? Path.GetDirectoryName(claudeDir)! :
-            mcpFile is not null ? Path.GetDirectoryName(mcpFile)! :
-            startDir;
-
-        var mcpPath = mcpFile ?? Path.Combine(root, ".mcp.json");
-        var claudeOut = claudeDir ?? Path.Combine(root, ".claude");
-        var settingsPath = Path.Combine(claudeOut, "settings.local.json");
-
-        return new InitPaths(
-            root,
-            mcpPath, mcpFile is not null,
-            settingsPath, File.Exists(settingsPath),
-            claudeDir is not null);
-    }
-
-    // ── merge the tool's server into .mcp.json (preserving any other content) ──
-    public static McpMergeResult MergeMcpJson(string? existing, string toolName, int hubPort)
-    {
-        var root = ParseObjectOrNew(existing);
-        if (root["mcpServers"] is not JsonObject servers)
+            // Cursor / VS Code: the MCP config lives at <root>/<marker>/<file>.
+            root = markerDir is not null ? Path.GetDirectoryName(markerDir)! : startDir;
+            var markerOut = markerDir ?? Path.Combine(root, agent.MarkerDir);
+            mcpPath = Path.Combine(markerOut, agent.McpFileName);
+            mcpExists = File.Exists(mcpPath);
+        }
+        else
         {
-            servers = new JsonObject();
-            root["mcpServers"] = servers;
+            // Claude: `.mcp.json` sits at the project root, found independently of `.claude/`.
+            // Stop before the user's home directory: `~/.mcp.json` is not project-scoped.
+            var mcpFile = FindUp(startDir, stopBefore, d =>
+            {
+                var p = Path.Combine(d, agent.McpFileName);
+                return File.Exists(p) ? p : null;
+            });
+            root =
+                markerDir is not null ? Path.GetDirectoryName(markerDir)! :
+                mcpFile is not null ? Path.GetDirectoryName(mcpFile)! :
+                startDir;
+            mcpPath = mcpFile ?? Path.Combine(root, agent.McpFileName);
+            mcpExists = mcpFile is not null;
         }
 
-        var desired = new JsonObject
+        string? settingsPath = null;
+        var settingsExists = false;
+        if (agent.HasAllowList)
         {
-            ["type"] = "http",
-            ["url"] = $"http://127.0.0.1:{hubPort}/mcp",
-        };
+            var markerOut = markerDir ?? Path.Combine(root, agent.MarkerDir);
+            settingsPath = Path.Combine(markerOut, "settings.local.json");
+            settingsExists = File.Exists(settingsPath);
+        }
+
+        return new InitPaths(root, mcpPath, mcpExists, settingsPath, settingsExists, markerDir is not null);
+    }
+
+    // ── merge the tool's server into the agent's MCP config (preserving any other content) ──
+    // `shape` captures the per-agent JSON differences; it defaults to Claude's for back-compat.
+    public static McpMergeResult MergeMcpJson(string? existing, string toolName, int hubPort, McpShape? shape = null)
+    {
+        shape ??= McpShape.Claude;
+        var root = ParseObjectOrNew(existing);
+        if (root[shape.ServersKey] is not JsonObject servers)
+        {
+            servers = new JsonObject();
+            root[shape.ServersKey] = servers;
+        }
+
+        var desired = new JsonObject();
+        if (shape.IncludeType) desired["type"] = "http";
+        desired[shape.UrlKey] = $"http://127.0.0.1:{hubPort}/mcp";
 
         var existed = servers.ContainsKey(toolName);
         var changed = !existed || !JsonNode.DeepEquals(servers[toolName], desired);
@@ -279,6 +345,52 @@ public static class InitCommand
         File.WriteAllText(path, json + Environment.NewLine); // UTF-8 (no BOM), like the inputs
     }
 
+    // Interactive arrow-key chooser shown when `init` runs without --agent on a real terminal.
+    // ↑/↓ (or k/j) move, Enter accepts, Esc/q falls back to `preselect` (the auto-detected agent).
+    // Redraws the list in place. Callers must guard non-interactive runs; it also returns `preselect`
+    // unchanged when stdin is redirected (mirrors Confirm's EOF = default).
+    private static AgentTarget SelectAgent(AgentTarget preselect)
+    {
+        if (Console.IsInputRedirected) return preselect;
+
+        var items = AgentTargets.All;
+        var idx = Math.Max(0, IndexOfId(items, preselect.Id));
+
+        Console.WriteLine("Select the agent to configure  (↑/↓ to move, Enter to accept):");
+        DrawAgents(items, idx);
+
+        while (true)
+        {
+            var key = Console.ReadKey(intercept: true).Key;
+            switch (key)
+            {
+                case ConsoleKey.UpArrow or ConsoleKey.K: idx = (idx - 1 + items.Count) % items.Count; break;
+                case ConsoleKey.DownArrow or ConsoleKey.J: idx = (idx + 1) % items.Count; break;
+                case ConsoleKey.Enter: return items[idx];
+                case ConsoleKey.Escape or ConsoleKey.Q: return preselect;
+                default: continue;
+            }
+            // Redraw over the list (cursor sits just below it). If the console can't reposition
+            // (scrolled buffer, no real cursor), fall back to redrawing inline.
+            try { Console.SetCursorPosition(0, Console.CursorTop - items.Count); }
+            catch { /* leave the cursor where it is */ }
+            DrawAgents(items, idx);
+        }
+    }
+
+    private static void DrawAgents(IReadOnlyList<AgentTarget> items, int idx)
+    {
+        for (var i = 0; i < items.Count; i++)
+            Console.WriteLine($"  {(i == idx ? "›" : " ")} {items[i].DisplayName}");
+    }
+
+    private static int IndexOfId(IReadOnlyList<AgentTarget> items, string id)
+    {
+        for (var i = 0; i < items.Count; i++)
+            if (string.Equals(items[i].Id, id, StringComparison.Ordinal)) return i;
+        return -1;
+    }
+
     private static bool Confirm(string question, bool assumeYes)
     {
         if (assumeYes)
@@ -291,6 +403,23 @@ public static class InitCommand
         if (Console.IsInputRedirected) Console.WriteLine();
         return string.IsNullOrWhiteSpace(line) || line.TrimStart().StartsWith("y", StringComparison.OrdinalIgnoreCase);
     }
+
+    // Stop walking before the user's home directory: a project's search must never escape into the
+    // user-global config (`~/.claude`, `~/.mcp.json`, …). Null when the home dir can't be resolved.
+    private static string? HomeStop()
+    {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return string.IsNullOrEmpty(home) ? null : Path.GetFullPath(home);
+    }
+
+    // Does `markerDir` (e.g. ".cursor") exist anywhere from startDir up to (not into) the home dir?
+    // Used by AgentTargets.Detect to auto-pick the agent a workspace already uses.
+    internal static bool HasMarkerUp(string startDir, string markerDir) =>
+        FindUp(Path.GetFullPath(startDir), HomeStop(), d =>
+        {
+            var p = Path.Combine(d, markerDir);
+            return Directory.Exists(p) ? p : null;
+        }) is not null;
 
     // Walk up from `start`, returning the first probe hit. Stops *before* probing `stopBefore`
     // (the home dir) so a project's search never escapes into the user-global config.
@@ -352,20 +481,74 @@ public static class InitCommand
     private static void PrintHelp(string toolName, int hubPort)
     {
         Console.WriteLine($"""
-        {toolName} init — wire this tool into a Claude Code workspace.
+        {toolName} init — wire this tool into an AI agent's workspace (Claude Code, Cursor, or VS Code).
 
-        Walks up from the current directory to find the nearest `.mcp.json` and `.claude/`
-        folder, then adds the {toolName} MCP server (127.0.0.1:{hubPort}) to `.mcp.json` and
-        allows its MCP commands in `.claude/settings.local.json`. Each step prompts only when it
-        would change the file (an already-configured step just reports "no change"). Both steps
-        merge into existing files and are safe to re-run.
+        Walks up from the current directory to find the agent's config folder, then adds the
+        {toolName} MCP server (127.0.0.1:{hubPort}) to that agent's project MCP config:
+            claude   .mcp.json   (+ allows its commands in .claude/settings.local.json)
+            cursor   .cursor/mcp.json
+            vscode   .vscode/mcp.json
+        Each step prompts only when it would change the file (an already-configured step just reports
+        "no change"); writes merge into existing files and are safe to re-run.
 
           {toolName} init [options]
-            -y, --yes        Accept both prompts (non-interactive)
+            --agent <name>   {AgentNameList()}. Default: auto-detect from the workspace and confirm
+                             via an interactive picker (under -y / piped input the detected one is used)
+            -y, --yes        Accept all prompts (non-interactive)
             --dir <path>     Start the search from <path> instead of the current directory
             -h, --help       Show this help
 
         Run it once per tool in a full-stack repo; each merges into the same shared files.
         """);
     }
+}
+
+// ── agent targets ──
+// One supported `init` target. Agents differ only in WHERE their project MCP config lives and the
+// JSON SHAPE of a server entry (McpShape); Claude Code additionally keeps an allow-list file.
+//
+// MarkerDir is the agent's config folder, used both to detect the agent and to place its files.
+// McpInMarkerDir is true when the MCP config sits inside MarkerDir (Cursor/VS Code: `.cursor/mcp.json`);
+// it's false for Claude, whose `.mcp.json` lives at the project root beside `.claude/`.
+public sealed record AgentTarget(
+    string Id,
+    string DisplayName,
+    string MarkerDir,
+    bool McpInMarkerDir,
+    string McpFileName,
+    McpShape Shape,
+    bool HasAllowList);
+
+// The three ways an HTTP MCP server entry is written across agents:
+//   • ServersKey  — the top-level object holding servers ("mcpServers", or "servers" for VS Code)
+//   • IncludeType — whether to emit "type": "http" (Cursor infers transport from `url` and omits it)
+//   • UrlKey      — the URL property name ("url"; agents that use a different key set it here)
+public sealed record McpShape(string ServersKey, bool IncludeType, string UrlKey)
+{
+    public static readonly McpShape Claude = new("mcpServers", IncludeType: true, UrlKey: "url");
+    public static readonly McpShape Cursor = new("mcpServers", IncludeType: false, UrlKey: "url");
+    public static readonly McpShape VsCode = new("servers", IncludeType: true, UrlKey: "url");
+}
+
+public static class AgentTargets
+{
+    public static readonly AgentTarget Claude = new(
+        "claude", "Claude Code", ".claude", McpInMarkerDir: false, ".mcp.json", McpShape.Claude, HasAllowList: true);
+    public static readonly AgentTarget Cursor = new(
+        "cursor", "Cursor", ".cursor", McpInMarkerDir: true, "mcp.json", McpShape.Cursor, HasAllowList: false);
+    public static readonly AgentTarget VsCode = new(
+        "vscode", "VS Code", ".vscode", McpInMarkerDir: true, "mcp.json", McpShape.VsCode, HasAllowList: false);
+
+    // Claude-first order: detection priority (a workspace with `.claude/` stays on Claude) and the
+    // order shown in the picker.
+    public static readonly IReadOnlyList<AgentTarget> All = new[] { Claude, Cursor, VsCode };
+
+    // Resolve a --agent id (case-insensitive); null for an unknown id so the caller can report it.
+    public static AgentTarget? Resolve(string id) =>
+        All.FirstOrDefault(a => string.Equals(a.Id, id, StringComparison.OrdinalIgnoreCase));
+
+    // Auto-pick the agent a workspace already uses by walking up for each agent's marker dir, in
+    // `All` (Claude-first) order. Null when none is found.
+    public static AgentTarget? Detect(string startDir) =>
+        All.FirstOrDefault(a => InitCommand.HasMarkerUp(startDir, a.MarkerDir));
 }

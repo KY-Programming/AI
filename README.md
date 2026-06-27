@@ -93,7 +93,8 @@ instances first.
 
 Run each tool's `init` command once, from anywhere in your workspace — it registers the tool's MCP
 server with your agent and allows its tools, detecting your agent and writing the right config for it
-(Claude Code, Cursor, VS Code, …). It merges into existing files and is safe to re-run:
+(Claude Code, Cursor, or VS Code). It auto-detects from the workspace (override with
+`--agent <claude|cursor|vscode>`), merges into existing files, and is safe to re-run:
 
 ```powershell
 ky-ai-ng init
