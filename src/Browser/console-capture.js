@@ -269,7 +269,13 @@
 
   // JSON-safe deep copy of a value (caps depth/breadth, tags functions/DOM/Errors, breaks cycles) so
   // evaluate_js can return real structured JSON (asJson:true) instead of a one-line string rendering.
-  function jsonSafe(v) {
+  // opts.maxDepth / opts.maxBreadth tune the caps (default 6 / 500 — the eval-channel defaults);
+  // read_component passes tighter caps so a component holding a big object graph can't blow the token
+  // budget. Both depth and breadth overflow are MARKED (not silently dropped) so the reader can tell a
+  // value was elided and widen if needed.
+  function jsonSafe(v, opts) {
+    var maxDepth = (opts && typeof opts.maxDepth === "number") ? opts.maxDepth : 6;
+    var maxBreadth = (opts && typeof opts.maxBreadth === "number") ? opts.maxBreadth : 500;
     var seen = (typeof WeakSet === "function") ? new WeakSet() : null;
     function clean(val, depth) {
       if (val === null) return null;
@@ -281,11 +287,17 @@
       if (t === "function") return "[Function: " + (val.name || "anonymous") + "]";
       if (val instanceof Error) return val.name + ": " + val.message;
       if (typeof Node !== "undefined" && val instanceof Node) return "[" + (val.nodeName || "Node") + (val.id ? "#" + val.id : "") + "]";
-      if (depth >= 6) return "[…]";
+      if (depth >= maxDepth) return Array.isArray(val) ? "[Array(" + val.length + ")]" : "[Object …]";
       if (seen) { if (seen.has(val)) return "[Circular]"; seen.add(val); }
-      if (Array.isArray(val)) { var a = []; for (var i = 0; i < val.length && i < 500; i++) a.push(clean(val[i], depth + 1)); return a; }
-      var out = {}, keys = Object.keys(val).slice(0, 500);
+      if (Array.isArray(val)) {
+        var a = [], n = Math.min(val.length, maxBreadth);
+        for (var i = 0; i < n; i++) a.push(clean(val[i], depth + 1));
+        if (val.length > n) a.push("…+" + (val.length - n) + " more");
+        return a;
+      }
+      var out = {}, allKeys = Object.keys(val), keys = allKeys.slice(0, maxBreadth);
       for (var j = 0; j < keys.length; j++) { try { out[keys[j]] = clean(val[keys[j]], depth + 1); } catch (e) { out[keys[j]] = "[unreadable]"; } }
+      if (allKeys.length > keys.length) out["…"] = "+" + (allKeys.length - keys.length) + " more keys";
       return out;
     }
     try { return clean(v, 0); } catch (e) { return "[unserializable]"; }
@@ -376,10 +388,44 @@
     return !!v && typeof v === "object" && typeof v.setValue === "function" && ("value" in v) && ("valid" in v);
   }
 
+  // read_component is lean BY KIND, then capped by SIZE. The default payload expands only the things
+  // you usually want — signals (resolved), FormControls (unwrapped) and plain scalars — and collapses
+  // every complex/framework object (injected services, RxJS Subjects, ElementRef/DestroyRef,
+  // errorHandler, _lView graphs) to a one-line type tag, listing its name under `objects` so you know
+  // it's there. That alone kills ~90% of the noise. On top of that, an expanded value over the
+  // per-field cap (or once the running total is spent) is summarized too. Both are escape-hatched:
+  // pass `fields:["options","foo"]` to expand exactly those (returned in full, only depth-limited), or
+  // raise `depth`.
+  var COMP_DEFAULT_DEPTH = 3;     // signals usually nest shallowly; deep graphs are the blow-up case
+  var COMP_MAX_BREADTH = 50;
+  var COMP_FIELD_CHARS = 2000;    // a single expanded value over this is summarized (unless requested)
+  var COMP_TOTAL_CHARS = 16000;   // running budget across all auto-expanded values
+
+  function compSummary(v) {
+    if (Array.isArray(v)) return "[Array(" + v.length + ")]";
+    if (v && typeof v === "object") {
+      var ctor = (v.constructor && v.constructor.name) || "Object";
+      if (ctor !== "Object") return "[" + ctor + "]";                  // Subject, ElementRef, DestroyRef, …
+      var n = 0; try { n = Object.keys(v).length; } catch (e) {}
+      return "[Object(" + n + " keys)]";
+    }
+    return "[" + (typeof v) + "]";
+  }
+
+  // A scalar is cheap to include verbatim; complex objects/arrays are the blow-up risk.
+  function compIsScalar(v) {
+    var t = typeof v;
+    return v === null || t === "string" || t === "number" || t === "boolean" || t === "bigint" || t === "undefined" || t === "symbol";
+  }
+
   // Read the bound state of the Angular component on (or above) `target` (an element or selector).
-  // Returns { ok, component, state, signals, formControls?, methods }, where `state` is a JSON-safe
-  // snapshot with signals already resolved (called) and FormControls unwrapped to their value, and
-  // `methods` are the callable members you can drive (e.g. selectIndex, setValue).
+  // Returns { ok, component, state, signals, formControls?, methods, note? }, where `state` is a
+  // JSON-safe snapshot with signals already resolved (called) and FormControls unwrapped to their
+  // value, and `methods` are the callable members you can drive (e.g. selectIndex, setValue).
+  // By default `state` expands signals + FormControls + scalars and collapses complex objects to type
+  // tags; opts.fields:["name",…] expands exactly those instead (in full, depth-limited); opts.depth
+  // overrides the nesting cap. `signals`/`formControls`/`methods`/`objects` always list ALL names
+  // (cheap), so the discovery surface stays complete — anything in `objects` is expandable via fields.
   function readComponent(target, opts) {
     opts = opts || {};
     var el = (typeof target === "string") ? document.querySelector(target) : target;
@@ -391,18 +437,48 @@
     while (node && !cmp && hops < 50) { try { cmp = ng.getComponent(node); } catch (e) {} node = node.parentElement; hops++; }
     if (!cmp) return { ok: false, error: "no Angular component found on or above the element" };
 
+    var fields = Array.isArray(opts.fields) && opts.fields.length ? opts.fields : null;
+    var depth = (typeof opts.depth === "number" && opts.depth >= 0) ? Math.min(opts.depth, 6) : COMP_DEFAULT_DEPTH;
+    var total = 0, trimmed = false, collapsed = false;
+
+    function isRequested(k) { return fields && fields.indexOf(k) >= 0; }
+
+    // Expand a value into `state[k]`, depth-limited. When the caller named `k` in `fields` it's
+    // returned in full; otherwise it's size-budgeted — a value over the per-field cap (or once the
+    // running total is spent) is replaced with a one-line summary pointing at the fields escape hatch.
+    function expand(k, value) {
+      var safe = jsonSafe(value, { maxDepth: depth, maxBreadth: COMP_MAX_BREADTH });
+      if (isRequested(k)) { state[k] = safe; return; }
+      var len = 0; try { len = JSON.stringify(safe).length; } catch (e) { len = 0; }
+      if (len > COMP_FIELD_CHARS || total > COMP_TOTAL_CHARS) {
+        state[k] = compSummary(value) + " — " + len + " chars elided; read via fields:[\"" + k + "\"]";
+        trimmed = true;
+        return;
+      }
+      state[k] = safe; total += len;
+    }
+
     var name = (cmp.constructor && cmp.constructor.name) || "Component";
-    var state = {}, signals = [], controls = [], methods = [];
+    var state = {}, signals = [], controls = [], methods = [], objects = [];
     var keys = [];
     try { keys = Object.keys(cmp); } catch (e) {}
     for (var i = 0; i < keys.length && i < 200; i++) {
       var k = keys[i], raw;
       try { raw = cmp[k]; } catch (e) { state[k] = "[unreadable]"; continue; }
       try {
-        if (isAngularSignal(raw)) { state[k] = jsonSafe(raw()); signals.push(k); }
-        else if (isFormControl(raw)) { state[k] = jsonSafe(raw.value); controls.push(k); }
+        // Always classify (names are cheap and complete the discovery surface); only EXPAND a value
+        // when it's primary (signal/FormControl), a plain scalar, or the caller asked for it by name.
+        if (isAngularSignal(raw)) { signals.push(k); if (!fields || isRequested(k)) expand(k, raw()); }
+        else if (isFormControl(raw)) { controls.push(k); if (!fields || isRequested(k)) expand(k, raw.value); }
         else if (typeof raw === "function") { methods.push(k); }
-        else state[k] = jsonSafe(raw);
+        else if (compIsScalar(raw)) { if (!fields || isRequested(k)) expand(k, raw); }
+        else {
+          // complex object / array — framework plumbing or large data. Default: collapse to a tag.
+          // Under a `fields` filter, list the name only (like signals/scalars) unless it was requested.
+          objects.push(k);
+          if (isRequested(k)) expand(k, raw);
+          else if (!fields) { state[k] = compSummary(raw); collapsed = true; }
+        }
       } catch (e) { state[k] = "[unreadable]"; }
     }
     // The component class's own methods live on the prototype (Angular components extend Object
@@ -423,6 +499,12 @@
 
     var out = { ok: true, component: name, state: state, signals: signals, methods: methods };
     if (controls.length) out.formControls = controls;
+    if (objects.length) out.objects = objects;
+    if (collapsed || trimmed) {
+      out.note = collapsed
+        ? "complex/framework fields are collapsed to type tags by default — expand the ones you need with fields:[…] (raise depth to nest deeper)"
+        : "some expanded values were summarized to stay under the token cap — re-read with fields:[…] or raise depth";
+    }
     return out;
   }
 

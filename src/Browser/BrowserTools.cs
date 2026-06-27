@@ -115,20 +115,30 @@ internal static class BrowserTools
         "trap that bites a hand-written ng.getComponent(el).value: modern Angular values are SIGNALS (cmp.value " +
         "is a getter FUNCTION — you must CALL it), so reading the field comes back empty. This walks the " +
         "component, CALLS signal getters, unwraps FormControls to their value, and lists drivable methods. " +
-        "Returns {ok, component, state, signals, formControls?, methods} — `state` is a JSON-safe snapshot " +
-        "with signals already resolved; `methods` are members you can drive via evaluate_js (e.g. selectIndex, " +
-        "setValue) when a synthetic click won't commit. Generic Angular (not specific to any component library). " +
+        "Returns {ok, component, state, signals, formControls?, methods, objects?, note?} — `methods` are members " +
+        "you can drive via evaluate_js (e.g. selectIndex, setValue) when a synthetic click won't commit. Generic " +
+        "Angular (not specific to any component library). " +
+        "The default `state` is LEAN BY DESIGN so a component isn't a token landmine: it expands only what you " +
+        "usually want — signals (resolved/called), FormControls (unwrapped) and plain scalars — and COLLAPSES every " +
+        "complex/framework object (injected services, RxJS Subjects, ElementRef/DestroyRef, errorHandler, internal " +
+        "view graphs) to a one-line type tag, listing its name in `objects`. To expand specific collapsed fields, " +
+        "pass `fields` with just the names you want (e.g. fields:[\"options\",\"value\"]); those are returned in full " +
+        "(only depth-limited). Expanded values are still size-capped (depth 3; a value over the budget is summarized) " +
+        "and `note` flags when anything was collapsed or trimmed. Raise `depth` to nest deeper. " +
+        "signals/formControls/methods/objects always list ALL names, so the discovery surface stays complete. " +
         "Needs a dev / non-production build (window.ng); returns ok:false explaining so otherwise. The same " +
-        "logic is callable inline as __kyai.readComponent(elOrSelector) from evaluate_js.")]
+        "logic is callable inline as __kyai.readComponent(elOrSelector, {fields, depth}) from evaluate_js.")]
     public static Task<string> ReadComponent(
         [Description("CSS selector of an element on/under the Angular component to read")] string selector,
+        [Description("Only serialize these state fields (by name) in full; omit for all (large values summarized)")] string[]? fields = null,
+        [Description("Max nesting depth for serialized values (default 3, max 6)")] int depth = 3,
         [Description("Max ms to wait for the page to return a result (default 5000)")] int timeoutMs = 5000)
     {
         if (Capture.Eval is not { } ch) return Task.FromResult(NotRunning());
         if (string.IsNullOrWhiteSpace(selector)) return Task.FromResult(Bad("selector is required"));
         var budget = Clamp(timeoutMs);
         return ch.RequestAsync(
-            id => new EvalRequest { Id = id, Kind = "component", Selector = selector, TimeoutMs = budget },
+            id => new EvalRequest { Id = id, Kind = "component", Selector = selector, Fields = fields, Depth = depth, TimeoutMs = budget },
             budget + 1500, CancellationToken.None);
     }
 
@@ -359,8 +369,11 @@ internal static class BrowserTools
         "Reload the attached page (location.reload()). Use after a build that changed code rather than just " +
         "templates/styles: a hot reload may keep already-created objects (services, singletons, model " +
         "instances) on the previous version, so a green build can still be running stale logic — a reload " +
-        "re-instantiates everything. Returns {ok, dispatched} once the page picks up the reload; capture " +
-        "re-attaches automatically on the fresh load (a new pageLoadId). Returns pageConnected:false if no page is open.")]
+        "re-instantiates everything. This is a FULL reload, not navigation: there is deliberately no navigate " +
+        "tool — to change an SPA route, click a nav link (synthetic `click` on the <a>/routerLink) or drive the " +
+        "router via evaluate_js, then `wait_for` location.pathname to settle. Returns {ok, dispatched} once the " +
+        "page picks up the reload; capture re-attaches automatically on the fresh load (a new pageLoadId). " +
+        "Returns pageConnected:false if no page is open.")]
     public static Task<string> ReloadPage(
         [Description("Max ms to wait for the page to pick up the reload (default 3000)")] int timeoutMs = 3000)
     {

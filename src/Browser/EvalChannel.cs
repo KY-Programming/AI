@@ -241,6 +241,10 @@ internal sealed record EvalRequest
     // styles — computed-style property names (kebab-case); empty ⇒ a default set
     public IReadOnlyList<string>? Props { get; init; }
 
+    // component — restrict serialized state to these field names (others list name only); nesting cap
+    public IReadOnlyList<string>? Fields { get; init; }
+    public int? Depth { get; init; }
+
     // advisory page-side budget (wait uses it as its poll deadline)
     public int TimeoutMs { get; init; } = 5000;
 }
@@ -283,6 +287,8 @@ public sealed record BatchStep
     public bool AsJson { get; init; }
     public int? PollMs { get; init; }
     public IReadOnlyList<string>? Props { get; init; }
+    public IReadOnlyList<string>? Fields { get; init; }   // component: serialize only these state fields in full
+    public int? Depth { get; init; }                      // component: nesting cap for serialized values
     public int? TimeoutMs { get; init; }
 
     // Manipulation steps are gated behind start_interaction; reads (wait/query/styles/eval) are not.

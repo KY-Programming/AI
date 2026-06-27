@@ -128,6 +128,15 @@ public class BrowserToolsTests
     }
 
     [Fact]
+    public async Task Read_component_carries_fields_and_depth()
+    {
+        var r = await Enqueued(() => BrowserTools.ReadComponent(selector: "m-dropdown", fields: new[] { "value", "text" }, depth: 5));
+        Assert.Equal("component", r.Kind);
+        Assert.Equal(new[] { "value", "text" }, r.Fields);
+        Assert.Equal(5, r.Depth);
+    }
+
+    [Fact]
     public async Task Evaluate_js_json_flag_sets_asJson()
     {
         var r = await Enqueued(() => BrowserTools.EvaluateJs("1+1", json: true));
