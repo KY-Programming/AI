@@ -72,13 +72,13 @@ public static class InitCommand
         var paths = Discover(startDir);
         var url = $"http://127.0.0.1:{hubPort}/mcp";
 
-        Console.WriteLine($"{toolName} init");
-        Console.WriteLine($"  Agent:        Claude Code  {(paths.AgentDetected ? "(found .claude/)" : $"(no .claude/ — will create under {paths.Root})")}");
-        Console.WriteLine($"  MCP config:   {paths.McpPath}{(paths.McpExists ? "" : "  (will create)")}");
-        Console.WriteLine($"  Local config: {paths.SettingsPath}{(paths.SettingsExists ? "" : "  (will create)")}");
+        Console.WriteLine($"Agent:        Claude Code{(paths.AgentDetected ? "" : $"  (no .claude/ — will create under {paths.Root})")}");
+        Console.WriteLine($"MCP config:   {paths.McpPath}{(paths.McpExists ? "" : "  (will create)")}");
+        Console.WriteLine($"Local config: {paths.SettingsPath}{(paths.SettingsExists ? "" : "  (will create)")}");
         Console.WriteLine();
 
         var rc = 0;
+        var anyChange = false;
 
         // ── step 1: the MCP server entry ── (prompt only when it would actually change the file)
         try
@@ -87,21 +87,22 @@ public static class InitCommand
             var res = MergeMcpJson(existing, toolName, hubPort);
             if (!res.Changed)
             {
-                Console.WriteLine($"  {Check} MCP server '{toolName}' already configured — no change.");
+                Console.WriteLine($"{Check} MCP server '{toolName}' already configured — no change.");
             }
             else if (Confirm($"Add the {toolName} MCP server to .mcp.json?", assumeYes))
             {
                 WriteFile(paths.McpPath, res.Json);
-                Console.WriteLine($"  {Check} {(res.Added ? "added" : "updated")} MCP server '{toolName}' → {url}");
+                anyChange = true;
+                Console.WriteLine($"{Check} {(res.Added ? "added" : "updated")} MCP server '{toolName}' → {url}");
             }
             else
             {
-                Console.WriteLine($"  {Bullet} skipped MCP server.");
+                Console.WriteLine($"{Bullet} skipped MCP server.");
             }
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"  ! could not update {paths.McpPath}: {ex.Message}");
+            Console.Error.WriteLine($"! could not update {paths.McpPath}: {ex.Message}");
             rc = 1;
         }
 
@@ -114,34 +115,38 @@ public static class InitCommand
             var res = MergeSettingsJson(existing, toolName, commands);
             if (res.CommandsAdded == 0 && !res.ServerEnabledAdded)
             {
-                Console.WriteLine($"  {Check} all {commands.Count} commands already allowed — no change.");
+                Console.WriteLine($"{Check} all {commands.Count} commands already allowed — no change.");
             }
             else if (Confirm($"Allow all {commands.Count} of {toolName}'s MCP commands for this project?", assumeYes))
             {
                 WriteFile(paths.SettingsPath, res.Json);
+                anyChange = true;
                 var partial = res.CommandsAdded > 0 && res.CommandsAdded < commands.Count;
                 var bits = new List<string>();
                 if (res.CommandsAdded > 0)
                     bits.Add($"{res.CommandsAdded} command{(res.CommandsAdded == 1 ? "" : "s")} allowed{(partial ? $" (of {commands.Count})" : "")}");
                 if (res.ServerEnabledAdded) bits.Add("server enabled");
-                Console.WriteLine($"  {Check} {string.Join(", ", bits)}.");
+                Console.WriteLine($"{Check} {string.Join(", ", bits)}.");
             }
             else
             {
-                Console.WriteLine($"  {Bullet} skipped allow-list.");
+                Console.WriteLine($"{Bullet} skipped allow-list.");
             }
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"  ! could not update {paths.SettingsPath}: {ex.Message}");
+            Console.Error.WriteLine($"! could not update {paths.SettingsPath}: {ex.Message}");
             rc = 1;
         }
 
         Console.WriteLine();
-        var runPart = string.IsNullOrEmpty(runHint) ? "" : $", then run `{toolName} {runHint}`";
-        Console.WriteLine(rc == 0
-            ? $"Done. Reload your MCP client (restart Claude Code) to pick up '{toolName}'{runPart}."
-            : "Finished with errors — see the messages above.");
+        var runHintPart = string.IsNullOrEmpty(runHint) ? "" : $" Run `{toolName} {runHint}` to start.";
+        if (rc != 0)
+            Console.WriteLine("Finished with errors — see the messages above.");
+        else if (anyChange)
+            Console.WriteLine($"Done. Reload your MCP client to pick up the new config.{runHintPart}");
+        else
+            Console.WriteLine($"Already configured — nothing to do.{runHintPart}");
         return rc;
     }
 
