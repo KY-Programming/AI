@@ -85,31 +85,46 @@ public static class SupervisorHost
 
         var controlUrl = GetBoundUrl(app) ?? $"http://127.0.0.1:{opt.ControlPort}";
         server.ControlUrl = controlUrl;
-        server.Start();
 
+        // Frame the start-up status as one box (printed before the child is teed, so the dev server's
+        // own "Building…" output lands cleanly below it). Build the lines first, deciding the hub
+        // action, then fire the side-effects (launch hub / register / after-start) and start the child.
         var logDesc = opt.LogPath is null ? $"buffer-only ({opt.LogLines} lines, via MCP)" : $"{opt.LogPath} ({opt.LogLines} lines)";
-        Console.WriteLine($"{cfg.ToolName} · {cfg.Noun} '{opt.Name}' · control {controlUrl} · log {logDesc}");
+        var lines = new List<string>
+        {
+            $"{cfg.Noun} '{opt.Name}'",
+            BannerBox.Row("control", controlUrl),
+            BannerBox.Row("log", logDesc),
+        };
+
+        int? launchHubPort = null;
         if (opt.UseHub)
         {
             var hubPort = TryGetLoopbackPort(opt.HubUrl);
             if (opt.AutostartHub && hubPort is int hp && !await HubReachableAsync(opt.HubUrl))
             {
-                Console.WriteLine($"{cfg.ToolName} · hub not reachable — auto-starting it on port {hp}");
-                TryLaunchHub(cfg.ToolName, hp);
+                lines.Add(BannerBox.Row("hub", $"not reachable — auto-starting on port {hp}"));
+                launchHubPort = hp;
             }
-            Console.WriteLine($"{cfg.ToolName} · registering with hub {opt.HubUrl}");
-            _ = RegisterLoopAsync(opt.HubUrl, opt.Name, controlUrl, stopping.Token);
+            lines.Add(BannerBox.Row("hub", $"registering with {opt.HubUrl}"));
         }
         else
         {
-            Console.WriteLine($"{cfg.ToolName} · standalone (--no-hub); not registered with a hub");
+            lines.Add(BannerBox.Row("hub", "standalone (--no-hub) — not registered"));
         }
         if (afterStart is not null && opt.AfterStart is { Count: > 0 } afterCmd)
-        {
-            Console.WriteLine($"{cfg.ToolName} · --after-start queued (runs after first build): {string.Join(' ', afterCmd)}");
-            _ = afterStart.LaunchAfterBuildAsync(cfg, server, afterCmd, stopping.Token);
-        }
-        Console.WriteLine($"{cfg.ToolName} · Ctrl+C to stop");
+            lines.Add(BannerBox.Row("after-start", $"{string.Join(' ', afterCmd)}  ·  runs after first build"));
+        lines.Add("");
+        lines.Add("Ctrl+C to stop");
+
+        BannerBox.Render(cfg.ToolName, lines);
+
+        if (launchHubPort is int port) TryLaunchHub(cfg.ToolName, port);
+        if (opt.UseHub) _ = RegisterLoopAsync(opt.HubUrl, opt.Name, controlUrl, stopping.Token);
+        if (afterStart is not null && opt.AfterStart is { Count: > 0 } afterCmd2)
+            _ = afterStart.LaunchAfterBuildAsync(cfg, server, afterCmd2, stopping.Token);
+
+        server.Start();   // tee the child last, so "Building…" prints below the box
 
         await app.WaitForShutdownAsync();
         return 0;

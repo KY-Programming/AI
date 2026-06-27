@@ -31,11 +31,30 @@ internal sealed class AfterStartLauncher : IDisposable
         lock (_sync) if (_disposed) return;
 
         var status = build.TimedOut ? "first build did not settle in time" : $"first build {build.Status}";
-        Console.WriteLine($"{cfg.ToolName} · --after-start: {status} — launching: {string.Join(' ', command)}");
+
+        // When handing off to another ky-ai tool that shares this console, frame the launch as the top
+        // of a box left open for the launched tool to continue (it draws the ├── … ┤ divider + bottom),
+        // and tell it who started it so it joins the frame instead of opening its own — and drops its
+        // "Ctrl+C to detach" line (here Ctrl+C kills the whole tree, it doesn't just detach).
+        var handoff = IsHandoffAware(command[0]);
+        var launchCommand = command;
+        if (handoff)
+        {
+            BannerBox.RenderOpen(cfg.ToolName, new[]
+            {
+                BannerBox.Row("after-start", status),
+                BannerBox.Row("launching", string.Join(' ', command)),
+            });
+            launchCommand = new List<string>(command) { "--started-by", cfg.ToolName };
+        }
+        else
+        {
+            Console.WriteLine($"{cfg.ToolName} · --after-start: {status} — launching: {string.Join(' ', command)}");
+        }
 
         try
         {
-            var (fileName, args) = BuildCommand(command);
+            var (fileName, args) = BuildCommand(launchCommand);
             var psi = new ProcessStartInfo
             {
                 FileName = fileName,
@@ -60,6 +79,11 @@ internal sealed class AfterStartLauncher : IDisposable
             Console.Error.WriteLine($"{cfg.ToolName} · --after-start failed to launch '{string.Join(' ', command)}': {ex.Message}");
         }
     }
+
+    // Tools that understand --started-by and continue the launcher's open box (drawing the ├── … ┤
+    // divider). Only these get the handoff treatment; any other command keeps the plain one-line launch.
+    private static bool IsHandoffAware(string exe) =>
+        string.Equals(Path.GetFileNameWithoutExtension(exe), "ky-ai-browser", StringComparison.OrdinalIgnoreCase);
 
     // Resolve the command cross-platform. On Windows route through cmd so PATH lookup finds the
     // `.cmd`/`.exe` shims that npm- and dotnet-tool-installed commands (ky-ai-browser, ...) use —

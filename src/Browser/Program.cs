@@ -62,6 +62,7 @@ internal static class Program
         var ngHubPort = DefaultNgHubPort;
         string? project = null;
         var yes = false;
+        string? startedBy = null;
         for (var i = 0; i < args.Length; i++)
         {
             switch (args[i])
@@ -70,6 +71,10 @@ internal static class Program
                 case "--ng-hub-port": if (++i < args.Length && int.TryParse(args[i], out var hp)) ngHubPort = hp; break;
                 case "--project": if (++i < args.Length) project = args[i]; break;
                 case "-y": case "--yes": yes = true; break;
+                // Set by a launching tool (ky-ai-ng serve --after-start): we share its console, so we
+                // continue its open box instead of opening our own, and skip "Ctrl+C to detach" (Ctrl+C
+                // here kills the whole tree). The value is the launcher's name, for the message only.
+                case "--started-by": if (++i < args.Length) startedBy = args[i]; break;
             }
         }
 
@@ -216,8 +221,18 @@ internal static class Program
         // Keep the inject alive (and pull ng's build seq for correlation) until we shut down.
         _ = HeartbeatLoopAsync(controlUrl, hbCts.Token);
 
-        Console.WriteLine($"ky-ai-browser · attached to {controlUrl} · MCP http://127.0.0.1:{port}/mcp · Ctrl+C to detach");
-        Console.WriteLine("The app's page will reload to load the capture script; console output now flows to console_tail.");
+        var rows = new[]
+        {
+            BannerBox.Row("attached", controlUrl),
+            BannerBox.Row("MCP", $"http://127.0.0.1:{port}/mcp"),
+            BannerBox.Row("capture", "page reloads; console now flows to console_tail"),
+        };
+        if (startedBy is null)
+            // Standalone: a complete box; Ctrl+C here detaches just this tool (restores index.html).
+            BannerBox.Render("ky-ai-browser", rows.Append("").Append(BannerBox.Row("stop", "Ctrl+C to detach")).ToArray());
+        else
+            // Launched by another tool — continue its open box; no "Ctrl+C to detach" (Ctrl+C kills the tree).
+            BannerBox.RenderContinuation("ky-ai-browser", rows);
         await app.WaitForShutdownAsync();
         return 0;
     }
@@ -357,6 +372,8 @@ internal static class Program
             --port <N>          ky-ai-browser's own MCP + ingest port (default: 5104)
             --ng-hub-port <N>   ky-ai-ng hub port to discover the frontend (default: 5101)
             -y, --yes           Skip the inject confirmation (default answer is yes anyway)
+            --started-by <tool> Set automatically when launched via `ky-ai-ng serve --after-start`:
+                                continues the launcher's start-up box instead of opening its own.
 
         On start it asks ky-ai-ng to inject a capture <script> into the app's index.html (you confirm;
         default yes); the page reloads and console.*/errors/rejections flow to the `console_tail` MCP
