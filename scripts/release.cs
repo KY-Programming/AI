@@ -6,7 +6,7 @@
 //
 // Ties into the bump/tag workflow: each project's release uses its <prefix>-v<version> tag, which
 // must already exist on origin (run scripts\tag.cmd first). Titles are "<Framework> v<version>"
-// (.NET / Angular / Browser / Serve), and only the Angular release is marked GitHub's "Latest". Release notes
+// (.NET / Angular / Browser / Terminal / Serve), and only the Angular release is marked GitHub's "Latest". Release notes
 // are every feat:/fix: line since the project's previous tag (src\<Project> only), checked per line
 // so mixed commits keep just their feat:/fix: lines, one per line with no blanks or dashes/hashes.
 // Before publishing, all releases' notes open together in an inline editor — Up/Down move across every
@@ -15,8 +15,8 @@
 // (https://cli.github.com), authenticated via `gh auth login`.
 //
 // Mapping (project -> tag):  KY.AI.Ng -> ng-v<version> · KY.AI.Net -> dotnet-v<version> ·
-//                            KY.AI.Browser -> browser-v<version> · KY.AI.Serve -> serve-v<version>
-//                            (must match scripts/tag.cs)
+//                            KY.AI.Browser -> browser-v<version> · KY.AI.Terminal -> terminal-v<version> ·
+//                            KY.AI.Serve -> serve-v<version>   (must match scripts/tag.cs)
 
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -25,10 +25,11 @@ using System.Xml.Linq;
 
 var projects = new (string Csproj, string Prefix)[]
 {
-    ("src/Ng/KY.AI.Ng.csproj",           "ng"),
-    ("src/Net/KY.AI.Net.csproj",         "dotnet"),
-    ("src/Browser/KY.AI.Browser.csproj", "browser"),
-    ("src/Serve/KY.AI.Serve.csproj",     "serve"),
+    ("src/Ng/KY.AI.Ng.csproj",             "ng"),
+    ("src/Net/KY.AI.Net.csproj",           "dotnet"),
+    ("src/Browser/KY.AI.Browser.csproj",   "browser"),
+    ("src/Terminal/KY.AI.Terminal.csproj", "terminal"),
+    ("src/Serve/KY.AI.Serve.csproj",       "serve"),
 };
 
 bool dryRun = false, draft = false;
@@ -164,12 +165,13 @@ static string? ReadVersion(string csprojPath)
         .FirstOrDefault(e => e.Name.LocalName == "Version")?.Value.Trim();
 
 // Release title name per product: KY.AI.Ng -> "Angular", KY.AI.Net -> ".NET",
-// KY.AI.Browser -> "Browser", KY.AI.Serve -> "Serve".
+// KY.AI.Browser -> "Browser", KY.AI.Terminal -> "Terminal", KY.AI.Serve -> "Serve".
 static string DisplayName(string prefix) => prefix switch
 {
     "ng" => "Angular",
     "dotnet" => ".NET",
     "browser" => "Browser",
+    "terminal" => "Terminal",
     "serve" => "Serve",
     _ => prefix,
 };
@@ -403,12 +405,13 @@ static void PrintUsage()
           dotnet run scripts/release.cs -- [options]      (or: scripts\release.cmd [options])
 
         Creates a GitHub release per project from its <Version> tag (via the gh CLI):
-          KY.AI.Ng      -> ng-v<version>
-          KY.AI.Net     -> dotnet-v<version>
-          KY.AI.Browser -> browser-v<version>
-          KY.AI.Serve   -> serve-v<version>
+          KY.AI.Ng       -> ng-v<version>
+          KY.AI.Net      -> dotnet-v<version>
+          KY.AI.Browser  -> browser-v<version>
+          KY.AI.Terminal -> terminal-v<version>
+          KY.AI.Serve    -> serve-v<version>
 
-        Title: "<Framework> v<version>" (.NET / Angular / Browser / Serve); only Angular is marked "Latest".
+        Title: "<Framework> v<version>" (.NET / Angular / Browser / Terminal / Serve); only Angular is marked "Latest".
         Notes: every feat:/fix: line since the project's previous tag (src\<Project> only),
         checked per line, one per line, no blank lines or dashes/hashes. Before publishing, all
         releases open together in an inline editor (Up/Down move across every line and between

@@ -14,19 +14,21 @@
 // Mapping (project -> tag):  KY.AI.Ng 22.1.0 -> ng-v22.1.0
 //                            KY.AI.Net 10.1.0 -> dotnet-v10.1.0
 //                            KY.AI.Browser 1.0.0 -> browser-v1.0.0
+//                            KY.AI.Terminal 1.0.0 -> terminal-v1.0.0
 //                            KY.AI.Serve 1.1.0 -> serve-v1.1.0
 
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Xml.Linq;
 
-// csproj (relative to repo root) -> tag prefix. Add Terminal here when it ships.
+// csproj (relative to repo root) -> tag prefix.
 var projects = new (string Csproj, string Prefix)[]
 {
-    ("src/Ng/KY.AI.Ng.csproj",           "ng"),       // ky-ai-ng
-    ("src/Net/KY.AI.Net.csproj",         "dotnet"),   // ky-ai-dotnet
-    ("src/Browser/KY.AI.Browser.csproj", "browser"),  // ky-ai-browser
-    ("src/Serve/KY.AI.Serve.csproj",     "serve"),    // KY.AI.Serve — the shared engine
+    ("src/Ng/KY.AI.Ng.csproj",             "ng"),        // ky-ai-ng
+    ("src/Net/KY.AI.Net.csproj",           "dotnet"),    // ky-ai-dotnet
+    ("src/Browser/KY.AI.Browser.csproj",   "browser"),   // ky-ai-browser
+    ("src/Terminal/KY.AI.Terminal.csproj", "terminal"),  // ky-ai-terminal
+    ("src/Serve/KY.AI.Serve.csproj",       "serve"),     // KY.AI.Serve — the shared engine
 };
 
 bool dryRun = false, push = false, force = false;
@@ -172,10 +174,11 @@ static void PrintUsage()
           dotnet run scripts/tag.cs -- [options]      (or: scripts\tag.cmd [options])
 
         Creates an annotated git tag at HEAD for each project, from its csproj <Version>:
-          KY.AI.Ng      -> ng-v<version>
-          KY.AI.Net     -> dotnet-v<version>
-          KY.AI.Browser -> browser-v<version>
-          KY.AI.Serve   -> serve-v<version>
+          KY.AI.Ng       -> ng-v<version>
+          KY.AI.Net      -> dotnet-v<version>
+          KY.AI.Browser  -> browser-v<version>
+          KY.AI.Terminal -> terminal-v<version>
+          KY.AI.Serve    -> serve-v<version>
 
         Options:
           --dry-run, -n   show what would be pushed/tagged; change nothing
