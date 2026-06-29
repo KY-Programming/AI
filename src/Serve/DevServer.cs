@@ -51,7 +51,7 @@ internal sealed class DevServer : IDisposable
         Name = opt.Name;
         _log = new RollingLog(opt.LogPath, opt.LogLines);
         _tracker = new BuildTracker(cfg.Matcher, cfg.HotReloadSafeExtensions);
-        _resolveInjectTarget = cfg.ResolveInjectTarget;
+        _resolveInjectTarget = opt.ResolveInjectTarget ?? cfg.ResolveInjectTarget;
         // Self-heal: drop any capture tag a previous ky-ai tool left behind (before the watcher
         // exists, so the strip doesn't register as a spurious pending source change).
         RevertInject();

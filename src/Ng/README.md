@@ -41,6 +41,8 @@ left orphaned.
   agent, and tracks the build's green/red state. Start order doesn't matter and it survives a restart.
 - **`run <script>`** — supervise an **npm script** (`npm run <script>`) just like `serve`. Use it for
   `package.json` scripts that wrap `ng serve` (e.g. `start:debug`).
+- **`nx <target>`** — supervise an **nx target** (`nx run app:serve:dev`) just like `serve`. For nx
+  monorepos; the project name defaults to the target's project (`dashboard:serve:development` → `dashboard`).
 - **`init`** — wire ky-ai-ng into your agent (see [Connect your agent](#connect-your-agent)).
 - **`update`** — update to the latest release (see [Update](#update)).
 - **`shutdown`** — stop everything ky-ai-ng is running.
@@ -65,6 +67,12 @@ ky-ai-ng serve [options]                   # one per frontend
 ky-ai-ng run <script> [options] [-- <args>]  # supervise `npm run <script>` like serve
   (same options as serve; runs in the nearest package.json dir, then ./ClientApp)
   e.g. ky-ai-ng run start:debug
+
+ky-ai-ng nx <target...> [options]            # supervise an nx target like serve
+  (everything after `nx` is forwarded to the local nx CLI; same options as serve;
+   name defaults to the target's project, e.g. dashboard:serve:development → dashboard;
+   runs in the nearest nx workspace — node_modules\nx searching up, then ./ClientApp)
+  e.g. ky-ai-ng nx run dashboard:serve:development
 
 ky-ai-ng shutdown                          # stop the hub + every frontend it supervises
 
@@ -237,9 +245,9 @@ full `/status` clone — `durationMs`, `diagnostics`, `filesInLastBuild`, log pa
 This project is the thin **Angular seam**; the hub, supervisor, rolling log, build tracker and MCP
 tool surface all live in the shared **[`KY.AI.Serve`](../Serve)** library.
 
-- `Program.cs` — arg parsing (`serve` / `run` / `shutdown` / `init` / `update` / one-shot) and the
-  Angular `SupervisorConfig` / `HubConfig`: CLI resolution (`node_modules\@angular\cli`), the
-  npm-script runner, watched extensions, port and names.
+- `Program.cs` — arg parsing (`serve` / `run` / `nx` / `shutdown` / `init` / `update` / one-shot) and
+  the Angular `SupervisorConfig` / `HubConfig`: CLI resolution (`node_modules\@angular\cli`,
+  `node_modules\nx`), the npm-script and nx-target runners, watched extensions, port and names.
 - `NgBuildMatcher.cs` — maps ng/esbuild output lines to build-start / settle / error / warning
   verdicts and parses esbuild's two-line diagnostics into `{severity, file, line, col, message}`.
 - `NgIndexResolver.cs` — resolves the app's `index.html` (incl. `angular.json` custom-index) for the

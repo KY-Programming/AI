@@ -4,6 +4,8 @@ namespace KY.AI.Ng;
 
 // ky-ai-ng — run the Angular CLI with output mirrored for agents.
 //   serve    : a frontend's dev-server supervisor (rolling log + REST control + auto-register)
+//   run      : supervise an npm script (`npm run <script>`) the same way as serve
+//   nx       : supervise an nx target (`nx <target>`, e.g. `nx run app:serve:dev`) the same way
 //   shutdown : stop the hub and every supervisor it manages
 //   hub      : the control plane (auto-managed — started on demand, not run by hand)
 //   other    : one-shot tee of any `ng` command (build, version, ...)
@@ -63,6 +65,8 @@ internal static class Program
             return await RunServeAsync(args[1..]);
         if (string.Equals(args[0], "run", StringComparison.OrdinalIgnoreCase))
             return await RunNpmScriptAsync(args[1..]);
+        if (string.Equals(args[0], "nx", StringComparison.OrdinalIgnoreCase))
+            return await RunNxAsync(args[1..]);
         return RunOneShot(args);
     }
 
@@ -141,6 +145,65 @@ internal static class Program
             AfterStart = o.AfterStart.Count > 0 ? o.AfterStart : null,
         };
         return await SupervisorHost.RunAsync(options, Supervisor);
+    }
+
+    // ── nx: supervise an nx target (`nx <target>`) exactly like `serve` ──
+    // Same supervisor machinery as serve/run, but the child is `nx <args>` (e.g.
+    // `nx run dashboard:serve:development`). nx targets backed by the Angular builder emit the
+    // same esbuild output, so the agent watches builds via NgBuildMatcher just as it does for serve.
+    private static async Task<int> RunNxAsync(string[] rest)
+    {
+        var o = ServeCommandLine.Parse(rest, DefaultHubPort);
+        if (o.Extra.Count == 0)
+        {
+            Console.Error.WriteLine("ky-ai-ng: `nx` needs a target (e.g. `ky-ai-ng nx run dashboard:serve:development`). Use --help.");
+            return 1;
+        }
+
+        string fileName;
+        IReadOnlyList<string> prefix;
+        string workDir;
+        try { (fileName, prefix, workDir) = ResolveNxCli(Environment.CurrentDirectory); }
+        catch (Exception ex) { Console.Error.WriteLine($"ky-ai-ng: {ex.Message}"); return 1; }
+
+        var childArgs = new List<string>(prefix);
+        childArgs.AddRange(o.Extra);   // forwarded verbatim to nx (e.g. run dashboard:serve:development)
+
+        // The nx project (e.g. "dashboard") drives both the default hub name and — since an nx repo
+        // keeps each app's index.html under its own folder — the inject target resolution.
+        var project = DeriveNxName(o.Extra);
+
+        var options = new SupervisorOptions
+        {
+            Name = o.Name ?? project ?? DeriveName(workDir),
+            WorkingDir = workDir,
+            ChildFileName = fileName,
+            ChildArgs = childArgs,
+            BannerCommand = "nx " + string.Join(' ', o.Extra),
+            LogPath = o.LogArg is null ? null : Path.GetFullPath(o.LogArg),
+            LogLines = o.LogLines,
+            ControlPort = o.ControlPort,
+            HubUrl = o.HubUrl,
+            UseHub = o.UseHub,
+            AutostartHub = o.AutostartHub,
+            AfterStart = o.AfterStart.Count > 0 ? o.AfterStart : null,
+            // Resolve index.html under the nx project, not the workspace root (where NgIndexResolver looks).
+            ResolveInjectTarget = wd => NxIndexResolver.Resolve(wd, project),
+        };
+        return await SupervisorHost.RunAsync(options, Supervisor);
+    }
+
+    // Default name for an nx invocation: the project from the target id (the first token containing
+    // a colon), e.g. `dashboard:serve:development` → "dashboard". Null if no such token (e.g.
+    // `nx serve dashboard`), so the caller falls back to the folder-based DeriveName.
+    private static string? DeriveNxName(IReadOnlyList<string> extra)
+    {
+        foreach (var a in extra)
+        {
+            var i = a.IndexOf(':');
+            if (i > 0) return a[..i];
+        }
+        return null;
     }
 
     // Build the child command for `npm run <script> [-- <forwarded>]`, cross-platform.
@@ -254,6 +317,35 @@ internal static class Program
             "its parent (with a ClientApp subfolder), and make sure dependencies are installed (npm install).");
     }
 
+    // Resolve the project-local nx CLI (its nx.js, run via node) and the workspace root to run it in.
+    // Mirrors ResolveNgCli: walk up from cwd for node_modules\nx\bin\nx.js (the dir holding it is the
+    // workspace root, where nx.json lives), then fall back to a ./ClientApp subfolder. Running node
+    // against nx.js sidesteps the Windows nx.cmd batch-file (which CreateProcess can't exec directly).
+    // Throws if neither yields nx — no silent global-`nx` fallback.
+    private static (string FileName, IReadOnlyList<string> PrefixArgs, string WorkingDir) ResolveNxCli(string cwd)
+    {
+        static string NxJs(string root) => Path.Combine(root, "node_modules", "nx", "bin", "nx.js");
+
+        // 1) the nearest nx walking up from cwd — its directory is the workspace root.
+        var dir = cwd;
+        while (true)
+        {
+            if (File.Exists(NxJs(dir))) return ("node", new[] { NxJs(dir) }, dir);
+            var parent = Path.GetDirectoryName(dir);
+            if (string.IsNullOrEmpty(parent) || parent == dir) break;
+            dir = parent;
+        }
+
+        // 2) a `ClientApp` workspace one level down — run nx there, where nx.json lives.
+        var clientApp = Path.Combine(cwd, "ClientApp");
+        if (File.Exists(NxJs(clientApp))) return ("node", new[] { NxJs(clientApp) }, clientApp);
+
+        throw new InvalidOperationException(
+            $"no nx CLI found. Looked for node_modules\\nx in '{cwd}' and its parents, and in " +
+            $"'{clientApp}'. Run `ky-ai-ng nx` from your nx workspace (where nx.json is) or its parent " +
+            "(with a ClientApp subfolder), and make sure dependencies are installed (npm install).");
+    }
+
     private static void PrintHelp()
     {
         Console.WriteLine("""
@@ -287,6 +379,20 @@ internal static class Program
             ky-ai-ng run start -- --port 4201
             ky-ai-ng run start:dev --after-start ky-ai-browser -y
           Note: `run` is reserved for npm scripts here, so a raw `ng run <target>` is not proxied.
+
+        NX — supervise an nx target (nx workspace) the same way as serve:
+          ky-ai-ng nx <target...> [options]
+            Runs `nx <target...>` under the supervisor — same rolling log, REST control, hub
+            registration and build tracking as serve (nx's Angular builder emits the same esbuild
+            output). Everything after `nx` is forwarded verbatim to the local nx CLI. The default
+            project name is parsed from the target id (the part before the first colon), e.g.
+            `dashboard:serve:development` → "dashboard"; override with --name. Other options are the
+            same as serve (--log-lines, --log-file, --rest-port, --hub-port, --no-hub, --after-start).
+            nx runs in the nearest nx workspace (node_modules\nx searching up, then ./ClientApp).
+          Examples:
+            ky-ai-ng nx run dashboard:serve:development
+            ky-ai-ng nx serve dashboard --port 4201
+            ky-ai-ng nx run dashboard:serve --after-start ky-ai-browser -y
 
         INIT — wire ky-ai-ng into a Claude Code workspace (.mcp.json + allow-list):
           ky-ai-ng init [-y] [--dir <path>]

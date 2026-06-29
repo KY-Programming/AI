@@ -61,6 +61,12 @@ public sealed class SupervisorOptions
     public bool UseHub { get; init; } = true;
     public bool AutostartHub { get; init; } = true;
     public IReadOnlyList<string>? AfterStart { get; init; }         // command to launch once up (null/empty → none)
+
+    // Per-invocation inject-target resolver, preferred over the tool's SupervisorConfig.ResolveInjectTarget
+    // when set. Lets a subcommand that knows extra context the static config can't (e.g. `nx`, which
+    // knows the project whose index.html to target) override resolution for this run only. Null → use
+    // the config's resolver. Receives the working dir, same as the config resolver.
+    public Func<string, string?>? ResolveInjectTarget { get; init; }
 }
 
 // Tool-specific identity for the hub control plane.

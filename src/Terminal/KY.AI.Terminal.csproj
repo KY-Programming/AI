@@ -7,12 +7,39 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>KY.AI.Terminal</RootNamespace>
     <AssemblyName>ky-ai-terminal</AssemblyName>
+    <Version>1.0.0</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <SelfContained>false</SelfContained>
     <!-- ConPTY interop: allocate/marshal the proc-thread attribute list. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- Packed and published as a .NET global tool: dotnet tool install KY.AI.Terminal.
+         Portable (no RuntimeIdentifier) so the tool shim runs wherever the .NET 10 runtime is
+         installed; Serve ships bundled inside the package. Windows-only at runtime (ConPTY).
+         The Web SDK disables packaging by default, so opt back in. -->
+    <IsPackable>true</IsPackable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>ky-ai-terminal</ToolCommandName>
+    <PackageId>KY.AI.Terminal</PackageId>
+    <Authors>KY-Programming</Authors>
+    <Company>KY-Programming</Company>
+    <Product>KY.AI</Product>
+    <Copyright>2026 - KY-Programming</Copyright>
+    <Description>Shared interactive terminal for AI agents: you drive a real shell (cmd/powershell/ssh/…) while an agent joins the same live session over MCP (read-only / suggest / auto). Windows-only (ConPTY).</Description>
+    <PackageTags>terminal;shell;conpty;mcp;ai;cli</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/KY-Programming/AI</PackageProjectUrl>
+    <PackageIcon>icon.png</PackageIcon>
+    <RepositoryUrl>https://github.com/KY-Programming/AI</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
   </PropertyGroup>
+
+  <!-- Ship this README as the package readme (rendered on nuget.org). Use Update,
+       not Include: the SDK already globs README.md as a None item. -->
+  <ItemGroup>
+    <None Update="README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\assets\icon.png" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
   <ItemGroup>
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.4.0" />
   </ItemGroup>
