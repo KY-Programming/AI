@@ -122,7 +122,7 @@ public static class SupervisorHost
         if (launchHubPort is int port) TryLaunchHub(cfg.ToolName, port);
         if (opt.UseHub) _ = RegisterLoopAsync(opt.HubUrl, opt.Name, controlUrl, stopping.Token);
         if (afterStart is not null && opt.AfterStart is { Count: > 0 } afterCmd2)
-            _ = afterStart.LaunchAfterBuildAsync(cfg, server, afterCmd2, stopping.Token);
+            _ = afterStart.LaunchAfterBuildAsync(cfg, server, afterCmd2, opt.Name, stopping.Token);
 
         server.Start();   // tee the child last, so "Building…" prints below the box
 

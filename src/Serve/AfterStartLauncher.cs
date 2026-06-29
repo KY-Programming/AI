@@ -19,7 +19,7 @@ internal sealed class AfterStartLauncher : IDisposable
     private Process? _proc;
     private bool _disposed;
 
-    public async Task LaunchAfterBuildAsync(SupervisorConfig cfg, DevServer server, IReadOnlyList<string> command, CancellationToken ct)
+    public async Task LaunchAfterBuildAsync(SupervisorConfig cfg, DevServer server, IReadOnlyList<string> command, string projectName, CancellationToken ct)
     {
         // Wait for the first build to settle — success or failure both mean the dev server is up and
         // serving (it keeps the page served even with compile errors). A timeout still launches: the
@@ -40,12 +40,24 @@ internal sealed class AfterStartLauncher : IDisposable
         var launchCommand = command;
         if (handoff)
         {
+            // Tell ky-ai-browser which frontend to attach to: the hub may have several registered
+            // (it would otherwise error "multiple frontends registered; pass --project <name>"), and
+            // this supervisor's own name is the right one. Don't override a --project the dev passed.
+            var augmented = new List<string>(command);
+            if (projectName is { Length: > 0 } && !command.Contains("--project"))
+            {
+                augmented.Add("--project");
+                augmented.Add(projectName);
+            }
+
             BannerBox.RenderOpen(cfg.ToolName, new[]
             {
                 BannerBox.Row("after-start", status),
-                BannerBox.Row("launching", string.Join(' ', command)),
+                BannerBox.Row("launching", string.Join(' ', augmented)),
             });
-            launchCommand = new List<string>(command) { "--started-by", cfg.ToolName };
+            augmented.Add("--started-by");
+            augmented.Add(cfg.ToolName);
+            launchCommand = augmented;
         }
         else
         {
