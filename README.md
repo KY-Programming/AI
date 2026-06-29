@@ -12,6 +12,7 @@ poke the live page.
 | [`KY.AI.Net`](src/Net/README.md)     | `ky-ai-dotnet`   | the .NET CLI (`dotnet watch run` / `build`) — **backends** |
 | [`KY.AI.Terminal`](src/Terminal/README.md) | `ky-ai-terminal` | a **shared interactive shell** you drive while the agent rides along |
 | [`KY.AI.Browser`](src/Browser/README.md)   | `ky-ai-browser`  | a served app's **browser console + live runtime** (attaches to `ky-ai-ng`) |
+| [`KY.AI.Updater`](src/Updater/README.md)   | `ky-ai-updater`  | **updates the whole suite** — itself first, then every other installed tool |
 | [`KY.AI.Serve`](src/Serve/README.md) | —                | the shared hub / supervisor / MCP engine the tools build on |
 
 ## The idea
@@ -71,11 +72,13 @@ dotnet tool install --global KY.AI.Ng         # Angular frontends — ng serve /
 dotnet tool install --global KY.AI.Net        # .NET backends — dotnet watch run / build, mirrored for agents
 dotnet tool install --global KY.AI.Terminal   # shared interactive shell — you drive it, the agent rides along
 dotnet tool install --global KY.AI.Browser    # browser/runtime console capture for ky-ai-ng
+dotnet tool install --global KY.AI.Updater    # one command to update the whole suite — itself, then the rest
 ```
 
 This puts the `ky-ai-*` tools on your `PATH`. Wire each into your agent (see
-[Wire your agent](#wire-your-agent) below). Update later with `ky-ai-ng update` — it runs the right
-`dotnet tool update --no-cache` for you and stops any running instances first.
+[Wire your agent](#wire-your-agent) below). Update everything at once with `ky-ai-updater` (it updates
+itself first, then every other installed tool), or update a single tool with its own `ky-ai-ng update`
+— either way it runs the right `dotnet tool update --no-cache` and stops any running instances first.
 
 ### Using npm
 
@@ -134,6 +137,7 @@ product version.
 | `KY.AI.Net`      | 10.x | .NET 10 SDK | major **=** the .NET **SDK** major whose build output it parses (not its own TFM) |
 | `KY.AI.Browser`  | 1.x  | —           | console-capture add-on for `ky-ai-ng` |
 | `KY.AI.Terminal` | 1.x  | —           | shared interactive shell you and the agent both drive |
+| `KY.AI.Updater`  | 1.x  | —           | suite updater; own product version |
 | `KY.AI.Serve`    | 1.x  | —           | shared engine; own product version |
 
 ### Running an older major alongside the latest
@@ -167,7 +171,7 @@ A `dotnet tool install --tool-path <dir>` install (or the copy in the NuGet glob
 ## Repository Layout
 
 ```
-src/        tool projects: Serve (shared engine) · Ng · Net · Browser · Terminal (+ *.Tests)
+src/        tool projects: Serve (shared engine) · Ng · Net · Browser · Terminal · Updater (+ *.Tests)
 scripts/    pack / publish / dist / version automation (dependency-free C# scripts)
 artifacts/  packed NuGet + npm packages — scripts\pack.cmd output (git-ignored)
 dist/       runnable local build for testing — scripts\dist.cmd output (git-ignored; put on PATH)

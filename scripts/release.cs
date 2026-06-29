@@ -16,7 +16,7 @@
 //
 // Mapping (project -> tag):  KY.AI.Ng -> ng-v<version> · KY.AI.Net -> dotnet-v<version> ·
 //                            KY.AI.Browser -> browser-v<version> · KY.AI.Terminal -> terminal-v<version> ·
-//                            KY.AI.Serve -> serve-v<version>   (must match scripts/tag.cs)
+//                            KY.AI.Updater -> updater-v<version> · KY.AI.Serve -> serve-v<version>   (must match scripts/tag.cs)
 
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -29,6 +29,7 @@ var projects = new (string Csproj, string Prefix)[]
     ("src/Net/KY.AI.Net.csproj",           "dotnet"),
     ("src/Browser/KY.AI.Browser.csproj",   "browser"),
     ("src/Terminal/KY.AI.Terminal.csproj", "terminal"),
+    ("src/Updater/KY.AI.Updater.csproj",   "updater"),
     ("src/Serve/KY.AI.Serve.csproj",       "serve"),
 };
 
@@ -165,13 +166,15 @@ static string? ReadVersion(string csprojPath)
         .FirstOrDefault(e => e.Name.LocalName == "Version")?.Value.Trim();
 
 // Release title name per product: KY.AI.Ng -> "Angular", KY.AI.Net -> ".NET",
-// KY.AI.Browser -> "Browser", KY.AI.Terminal -> "Terminal", KY.AI.Serve -> "Serve".
+// KY.AI.Browser -> "Browser", KY.AI.Terminal -> "Terminal", KY.AI.Updater -> "Updater",
+// KY.AI.Serve -> "Serve".
 static string DisplayName(string prefix) => prefix switch
 {
     "ng" => "Angular",
     "dotnet" => ".NET",
     "browser" => "Browser",
     "terminal" => "Terminal",
+    "updater" => "Updater",
     "serve" => "Serve",
     _ => prefix,
 };
@@ -409,6 +412,7 @@ static void PrintUsage()
           KY.AI.Net      -> dotnet-v<version>
           KY.AI.Browser  -> browser-v<version>
           KY.AI.Terminal -> terminal-v<version>
+          KY.AI.Updater  -> updater-v<version>
           KY.AI.Serve    -> serve-v<version>
 
         Title: "<Framework> v<version>" (.NET / Angular / Browser / Terminal / Serve); only Angular is marked "Latest".

@@ -45,6 +45,7 @@ var dist = Path.Combine(root, "dist");
     ("ky-ai-dotnet",   5102, Path.Combine(root, "src", "Net",      "KY.AI.Net.csproj"),      "ky-ai-dotnet.exe"),
     ("ky-ai-terminal", 5103, Path.Combine(root, "src", "Terminal", "KY.AI.Terminal.csproj"), "ky-ai-terminal.exe"),
     ("ky-ai-browser",  5104, Path.Combine(root, "src", "Browser",  "KY.AI.Browser.csproj"),  "ky-ai-browser.exe"),
+    ("ky-ai-updater",  5105, Path.Combine(root, "src", "Updater",  "KY.AI.Updater.csproj"),  "ky-ai-updater.exe"),
 ];
 
 // Narrow to the requested tool, or the whole suite when none was named.

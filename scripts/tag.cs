@@ -15,6 +15,7 @@
 //                            KY.AI.Net 10.1.0 -> dotnet-v10.1.0
 //                            KY.AI.Browser 1.0.0 -> browser-v1.0.0
 //                            KY.AI.Terminal 1.0.0 -> terminal-v1.0.0
+//                            KY.AI.Updater 1.0.0 -> updater-v1.0.0
 //                            KY.AI.Serve 1.1.0 -> serve-v1.1.0
 
 using System.Diagnostics;
@@ -28,6 +29,7 @@ var projects = new (string Csproj, string Prefix)[]
     ("src/Net/KY.AI.Net.csproj",           "dotnet"),    // ky-ai-dotnet
     ("src/Browser/KY.AI.Browser.csproj",   "browser"),   // ky-ai-browser
     ("src/Terminal/KY.AI.Terminal.csproj", "terminal"),  // ky-ai-terminal
+    ("src/Updater/KY.AI.Updater.csproj",   "updater"),   // ky-ai-updater
     ("src/Serve/KY.AI.Serve.csproj",       "serve"),     // KY.AI.Serve — the shared engine
 };
 
@@ -178,6 +180,7 @@ static void PrintUsage()
           KY.AI.Net      -> dotnet-v<version>
           KY.AI.Browser  -> browser-v<version>
           KY.AI.Terminal -> terminal-v<version>
+          KY.AI.Updater  -> updater-v<version>
           KY.AI.Serve    -> serve-v<version>
 
         Options:
