@@ -25,7 +25,7 @@
     <Product>KY.AI</Product>
     <Copyright>2026 - KY-Programming</Copyright>
     <Description>Shared interactive terminal for AI agents: you drive a real shell (cmd/powershell/ssh/…) while an agent joins the same live session over MCP (read-only / suggest / auto). Windows-only (ConPTY).</Description>
-    <PackageTags>terminal;shell;conpty;mcp;ai;cli</PackageTags>
+    <PackageTags>KY-AI;terminal;shell;conpty;mcp;ai;cli</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageProjectUrl>https://github.com/KY-Programming/AI</PackageProjectUrl>

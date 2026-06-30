@@ -16,7 +16,7 @@
     <Product>KY.AI</Product>
     <Copyright>2026 - KY-Programming</Copyright>
     <Description>Shared hub, supervisor and MCP engine behind the KY.AI dev-loop tools.</Description>
-    <PackageTags>mcp;ai;dev-server</PackageTags>
+    <PackageTags>KY-AI;mcp;ai;dev-server</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageProjectUrl>https://github.com/KY-Programming/AI</PackageProjectUrl>

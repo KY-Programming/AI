@@ -23,7 +23,7 @@
     <Product>KY.AI</Product>
     <Copyright>2026 - KY-Programming</Copyright>
     <Description>.NET CLI dev-loop runner for AI agents: runs dotnet run/build with build state and logs exposed over MCP.</Description>
-    <PackageTags>dotnet;mcp;ai;dev-server;cli</PackageTags>
+    <PackageTags>KY-AI;dotnet;mcp;ai;dev-server;cli</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageProjectUrl>https://github.com/KY-Programming/AI</PackageProjectUrl>

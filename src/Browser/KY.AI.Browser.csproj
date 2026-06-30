@@ -21,7 +21,7 @@
     <Product>KY.AI</Product>
     <Copyright>2026 - KY-Programming</Copyright>
     <Description>Browser/runtime console capture for AI agents: attaches to a running ky-ai-ng and exposes the served app's console over MCP.</Description>
-    <PackageTags>browser;console;mcp;ai;dev-server</PackageTags>
+    <PackageTags>KY-AI;browser;console;mcp;ai;dev-server</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageProjectUrl>https://github.com/KY-Programming/AI</PackageProjectUrl>
