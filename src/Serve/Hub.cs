@@ -17,13 +17,18 @@ internal static class Hub
     public static string NounPlural = "servers"; // plural list-payload key, e.g. "frontends"
     public static Action? ShutdownHook;          // stops the hosting WebApplication
 
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(125) };
+    // Ceiling is generous (the per-call CancellationTokenSource below bounds each forward to its own
+    // timeoutSec); browser interaction batches can legitimately run a few minutes, so the client
+    // timeout must sit above the longest per-call budget the tools pass.
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(320) };
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
     // Forward a request to a named supervisor and return its raw response body. A transient
     // blip is retried; persistent failure is reported as a soft error (left registered so a
     // heartbeat can re-confirm a live app and list/prune removes a genuinely dead one).
-    public static async Task<string> ForwardAsync(string? project, HttpMethod method, string path, int timeoutSec)
+    // jsonBody, when given, is sent as the request's application/json content (e.g. ky-ai-browser
+    // forwards an EvalRequest to a capture instance's /eval).
+    public static async Task<string> ForwardAsync(string? project, HttpMethod method, string path, int timeoutSec, string? jsonBody = null)
     {
         var reg = Resolve(project, out var resolveError);
         if (reg is null) return resolveError!;
@@ -35,6 +40,8 @@ internal static class Hub
             {
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSec));
                 using var req = new HttpRequestMessage(method, url);
+                if (jsonBody is not null)
+                    req.Content = new StringContent(jsonBody, System.Text.Encoding.UTF8, "application/json");
                 using var resp = await Http.SendAsync(req, cts.Token);
                 return await resp.Content.ReadAsStringAsync();
             }

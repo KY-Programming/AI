@@ -5,6 +5,10 @@ using System.Runtime.CompilerServices;
 // of Serve's public surface. Keep this in sync with the exe's AssemblyName.
 [assembly: InternalsVisibleTo("ky-ai-terminal")]
 
+// The browser tool (ky-ai-browser) likewise runs a hub: its MCP tools forward to the right capture
+// instance via the same internal Hub registry/forwarder.
+[assembly: InternalsVisibleTo("ky-ai-browser")]
+
 // The test project exercises the internal build-verdict core (BuildTracker, RollingLog,
 // BuildResult) directly.
 [assembly: InternalsVisibleTo("KY.AI.Serve.Tests")]

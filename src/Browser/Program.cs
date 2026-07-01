@@ -1,27 +1,45 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using KY.AI.Serve;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
 
 namespace KY.AI.Browser;
 
-// ky-ai-browser — read a served app's BROWSER console from an AI agent over MCP.
+// ky-ai-browser — read a served app's BROWSER console (and drive it) from an AI agent over MCP.
 //
-// The dev runs it next to a running `ky-ai-ng serve`. On start it (with the dev's confirmation)
-// asks ky-ai-ng to reversibly inject a tiny capture <script> into the app's index.html; the page
-// reloads, the snippet patches console.* + error handlers and POSTs events back here; the agent
-// reads them via the console_tail MCP tool. On Ctrl+C it asks ky-ai-ng to remove the script again.
-// Its lifetime IS the on/off switch — nothing is left behind.
+// Like ky-ai-ng and ky-ai-terminal it is a hub + instances:
+//   hub  : control plane — one MCP server (/mcp on a fixed port) + a registry of capture instances.
+//          The MCP tools (BrowserTools) forward each call to the right instance by name.
+//   (default, no subcommand) : ONE capture instance. The dev runs it next to a running `ky-ai-ng
+//          serve`; it (with the dev's confirmation) asks ky-ai-ng to reversibly inject a tiny capture
+//          <script> into the app's index.html, the page reloads, the snippet patches console.* + error
+//          handlers and POSTs events back here, and the agent reads/drives them via MCP. On Ctrl+C it
+//          asks ky-ai-ng to remove the script again. Its lifetime IS the on/off switch.
+//
+// Because instances bind an OS-assigned loopback port (not a fixed one) and register with the hub,
+// you can run several at once — one ky-ai-browser per ky-ai-ng frontend — and the agent still talks
+// to the one stable hub URL, routing by `project` (the attached frontend's name).
 internal static class Program
 {
-    private const int DefaultPort = 5104;        // ky-ai-browser's own MCP + ingest port (ng=5101..terminal=5103)
+    private const int DefaultHubPort = 5104;     // ky-ai-browser's MCP hub port (ng=5101..terminal=5103)
     private const int DefaultNgHubPort = 5101;   // where ky-ai-ng's hub lives, to discover the frontend
     private const int BufferCapacity = 1000;
     private const int EvalPollWindowMs = 25_000;  // how long an eval long-poll hangs before the page re-polls
 
+    private static readonly HubConfig BrowserHubCfg = new()
+    {
+        ToolName = "ky-ai-browser",
+        Noun = "capture",
+        NounPlural = "captures",
+        DefaultPort = DefaultHubPort,
+    };
+
     private static readonly JsonSerializerOptions IngestJson = new() { PropertyNameCaseInsensitive = true };
     // Eval requests go out camelCase explicitly (the snippet reads req.kind/req.expression/…), so the
     // wire shape doesn't depend on the host's ambient JSON config; null fields are dropped so a request
-    // only carries the fields its kind uses.
+    // only carries the fields its kind uses. Also used for the instance's own JSON responses.
     private static readonly JsonSerializerOptions EvalJson = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -34,20 +52,26 @@ internal static class Program
 
         if (args.Any(a => a is "-h" or "--help" or "/?")) { PrintHelp(); return 0; }
 
+        // hub: the MCP control plane. Scan THIS exe's assembly so the hub exposes only the browser
+        // tools (BrowserTools), not the ng/net build tools that also live in the Serve assembly.
+        if (args.Length > 0 && string.Equals(args[0], "hub", StringComparison.OrdinalIgnoreCase))
+            return await HubHost.RunAsync(BrowserHubCfg, args[1..], typeof(Program).Assembly);
+
         // init: wire ky-ai-browser into a Claude Code workspace (.mcp.json + allow-list), reflecting
         // BrowserTools off this exe's assembly — same shared command the other tools use.
         if (args.Length > 0 && string.Equals(args[0], "init", StringComparison.OrdinalIgnoreCase))
-            return InitCommand.Run("ky-ai-browser", DefaultPort, args[1..], typeof(Program).Assembly, runHint: null);
+            return InitCommand.Run("ky-ai-browser", DefaultHubPort, args[1..], typeof(Program).Assembly, runHint: null);
 
-        // shutdown: stop a running ky-ai-browser instance (detaches capture, restores index.html).
+        // shutdown: tear down the whole stack — the hub plus every capture instance it supervises
+        // (each detaches and restores its app's index.html).
         if (args.Length > 0 && string.Equals(args[0], "shutdown", StringComparison.OrdinalIgnoreCase))
-            return await ShutdownAsync(args[1..]);
+            return await ShutdownCommand.RunAsync("ky-ai-browser", DefaultHubPort, args[1..]);
 
-        // update: self-update via the shared command. ky-ai-browser is .NET-tool-only (no npm), and
-        // has no hub — its `/shutdown` lives on its own port, so DefaultPort is what gets the graceful
-        // stop before the package manager replaces the locked files.
+        // update: self-update via the shared command. ky-ai-browser is .NET-tool-only (no npm). The
+        // hub's /shutdown (on DefaultHubPort) gracefully stops the whole stack before the package
+        // manager replaces the locked files.
         if (args.Length > 0 && string.Equals(args[0], "update", StringComparison.OrdinalIgnoreCase))
-            return await UpdateCommand.RunAsync("ky-ai-browser", "KY.AI.Browser", npmPackageId: null, DefaultPort, args[1..]);
+            return await UpdateCommand.RunAsync("ky-ai-browser", "KY.AI.Browser", npmPackageId: null, DefaultHubPort, args[1..]);
 
         // Attach mode (no subcommand) takes only flags, so a bare-word first arg is a mistyped
         // command — say so plainly instead of silently falling through to the "no ng" message.
@@ -58,18 +82,33 @@ internal static class Program
             return 1;
         }
 
-        var port = DefaultPort;
+        return await RunInstanceAsync(args);
+    }
+
+    // One capture instance: discover the ng frontend, host the page-capture + control API on an
+    // OS-assigned loopback port, register with the browser hub by the frontend's name, inject the
+    // snippet, and keep it alive until Ctrl+C / shutdown.
+    private static async Task<int> RunInstanceAsync(string[] args)
+    {
+        var hubPort = DefaultHubPort;
         var ngHubPort = DefaultNgHubPort;
+        var restPort = 0;            // 0 → OS-assigned loopback port
         string? project = null;
+        string? name = null;
+        var useHub = true;
         var yes = false;
         string? startedBy = null;
         for (var i = 0; i < args.Length; i++)
         {
             switch (args[i])
             {
-                case "--port": if (++i < args.Length && int.TryParse(args[i], out var p)) port = p; break;
-                case "--ng-hub-port": if (++i < args.Length && int.TryParse(args[i], out var hp)) ngHubPort = hp; break;
+                case "--hub-port": if (++i < args.Length && int.TryParse(args[i], out var hp)) hubPort = hp; break;
+                case "--ng-hub-port": if (++i < args.Length && int.TryParse(args[i], out var nhp)) ngHubPort = nhp; break;
+                // The instance's own control/ingest port. --port is kept as a back-compat alias.
+                case "--rest-port": case "--port": if (++i < args.Length && int.TryParse(args[i], out var rp)) restPort = rp; break;
                 case "--project": if (++i < args.Length) project = args[i]; break;
+                case "--name": if (++i < args.Length) name = args[i]; break;
+                case "--no-hub": useHub = false; break;
                 case "-y": case "--yes": yes = true; break;
                 // Set by a launching tool (ky-ai-ng serve --after-start): we share its console, so we
                 // continue its open box instead of opening our own, and skip "Ctrl+C to detach" (Ctrl+C
@@ -77,9 +116,11 @@ internal static class Program
                 case "--started-by": if (++i < args.Length) startedBy = args[i]; break;
             }
         }
+        var hubUrl = $"http://127.0.0.1:{hubPort}";
 
-        // 1) Find the running ky-ai-ng frontend to attach to.
-        string controlUrl;
+        // 1) Find the running ky-ai-ng frontend to attach to (returns its name + control URL).
+        string ngControlUrl;
+        string ngName;
         try
         {
             var found = await DiscoverNgAsync(ngHubPort, project);
@@ -91,9 +132,13 @@ internal static class Program
                     " Start `ky-ai-ng serve` first.");
                 return 1;
             }
-            controlUrl = found;
+            (ngName, ngControlUrl) = found.Value;
         }
         catch (Exception ex) { Console.Error.WriteLine($"ky-ai-browser: {ex.Message}"); return 1; }
+
+        // The instance registers under the attached frontend's name (or an explicit --name), so the
+        // agent routes `project` to a ky-ai-browser the same way it does for ky-ai-ng.
+        var instanceName = name ?? ngName;
 
         // 2) Confirm the (reversible) manipulation. Default yes; skip with -y or non-interactive stdin.
         // Being launched by another tool (--started-by, e.g. `ky-ai-ng serve --after-start ky-ai-browser`)
@@ -111,37 +156,64 @@ internal static class Program
             }
         }
 
-        // 3) Build the capture buffer + the snippet that will post to us (cross-origin → absolute URL).
+        // 3) Build the capture buffer + the eval channel. The snippet (which carries the absolute URL
+        // back to us) is templated AFTER we bind, since the port is OS-assigned.
         var collector = new ConsoleCollector(BufferCapacity, () => Interlocked.Read(ref Capture.BuildSeq));
         Capture.Collector = collector;
-        // The eval return channel shares the collector's misroute token (the snippet already carries it).
         var eval = new EvalChannel(collector.Token);
         Capture.Eval = eval;
-        var ingestUrl = $"http://127.0.0.1:{port}/__kyai/console";
-        var snippet = LoadSnippet().Replace("__KYAI_TOKEN__", collector.Token).Replace("__KYAI_INGEST__", ingestUrl);
-        // The token doubles as a per-instance cache-buster in the src. A fresh instance has a fresh token,
-        // so re-injecting yields *different* index.html content even on the same port — the write is no
-        // longer skipped as a no-op, ng reloads the page, and it picks up the new snippet (new token).
-        // Without this, a hard restart on the same port leaves the page running the previous snippet,
-        // whose polls the new server rejects on the token mismatch → silently disconnected. (The
-        // console.js endpoint ignores the query string, so it still serves the snippet.)
-        var scriptTag = $"<script src=\"http://127.0.0.1:{port}/__kyai/console.js?t={collector.Token}\"></script>";
+        var snippet = "";   // assigned after bind, before inject (no request can arrive until then)
 
-        // 4) Host MCP (console_tail/console_clear) + the snippet + ingest on one loopback port.
+        // 4) Host the page-facing capture endpoints AND a small control API the hub forwards to, on one
+        // OS-assigned loopback port.
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
-        builder.Services.AddMcpServer().WithHttpTransport().WithToolsFromAssembly(typeof(Program).Assembly);
         var app = builder.Build();
 
-        app.MapMcp("/mcp");
         app.MapGet("/health", () => Results.Text("ok"));
-        // `ky-ai-browser shutdown` POSTs here. Reply first, then stop — ApplicationStopping runs the
-        // uninject so index.html is restored, exactly as a Ctrl+C would. Loopback-only like the rest.
+        // `ky-ai-browser shutdown` cascades here from the hub. Reply first, then stop — ApplicationStopping
+        // runs the uninject so index.html is restored, exactly as a Ctrl+C would. Loopback-only like the rest.
         app.MapPost("/shutdown", () =>
         {
             _ = Task.Run(async () => { try { await Task.Delay(150); } catch { } app.Lifetime.StopApplication(); });
-            return Results.Text("shutting down");
+            return Results.Content("{\"ok\":true,\"action\":\"shutdown\"}", "application/json");
         });
+
+        // ── control API: what the hub's BrowserTools forward to (loopback-only) ──
+        app.MapGet("/status", () => Results.Content(JsonSerializer.Serialize(new
+        {
+            name = instanceName,
+            attachedTo = ngName,
+            running = true,
+            pageConnected = eval.PageConnected,
+            interactionActive = eval.InteractionActive,
+            buildSeq = Interlocked.Read(ref Capture.BuildSeq),
+        }, EvalJson), "application/json"));
+        app.MapGet("/console/tail", (int? lines, string? level, long? sinceSeq, string? grep, string? pageLoad, bool? compact, bool? appOnly) =>
+            Results.Content(collector.TailJson("browser", enabled: true,
+                lines is null or <= 0 ? 200 : lines.Value, level, sinceSeq ?? 0, sinceBuildSeq: 0,
+                grep, pageLoad, compact ?? false, appOnly ?? false), "application/json"));
+        app.MapPost("/console/clear", () =>
+        {
+            collector.Clear();
+            return Results.Content(JsonSerializer.Serialize(new { ok = true, action = "console_clear" }, EvalJson), "application/json");
+        });
+        // Every page action arrives here as an EvalRequest the hub already built from the MCP args.
+        // InstanceEval owns the interaction gate (its flag lives on the channel), then queues + awaits.
+        app.MapPost("/eval", async (HttpContext ctx, int? waitMs) =>
+        {
+            EvalRequest? req;
+            try { req = await JsonSerializer.DeserializeAsync<EvalRequest>(ctx.Request.Body, IngestJson, ctx.RequestAborted); }
+            catch { req = null; }
+            if (req is null || string.IsNullOrEmpty(req.Kind))
+                return Results.Content(JsonSerializer.Serialize(new { ok = false, error = "eval requires a request body" }, EvalJson), "application/json");
+
+            var budget = waitMs ?? (req.TimeoutMs + 1500);
+            var result = await InstanceEval.DispatchAsync(eval, req, budget);
+            return Results.Content(result, "application/json");
+        });
+
+        // ── page-facing endpoints (cross-origin from ng's origin; loopback-only) ──
         app.MapGet("/__kyai/console.js", (HttpContext ctx) =>
         {
             ctx.Response.Headers["Cache-Control"] = "no-store";
@@ -194,26 +266,45 @@ internal static class Program
             }
             catch { return Results.Json(new { ok = false }); }
         });
-        app.Urls.Add($"http://127.0.0.1:{port}");
+        app.Urls.Add($"http://127.0.0.1:{restPort}");
 
         // The heartbeat keeps ky-ai-ng from auto-reverting our inject; cancel it before we uninject so
-        // there's no race. On shutdown always revert — Ctrl+C or a crash mid-run leaves index.html clean.
-        var hbCts = new CancellationTokenSource();
+        // there's no race. On shutdown always revert and deregister — Ctrl+C or a crash mid-run leaves
+        // index.html clean and the hub's registry tidy.
+        var stopping = new CancellationTokenSource();
         app.Lifetime.ApplicationStopping.Register(() =>
         {
-            hbCts.Cancel();
-            try { UninjectAsync(controlUrl).GetAwaiter().GetResult(); } catch { /* ng gone — it self-heals on next start */ }
+            stopping.Cancel();
+            try { if (useHub) DeregisterAsync(hubUrl, instanceName).GetAwaiter().GetResult(); } catch { /* hub gone */ }
+            try { UninjectAsync(ngControlUrl).GetAwaiter().GetResult(); } catch { /* ng gone — it self-heals on next start */ }
         });
 
         try { await app.StartAsync(); }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"ky-ai-browser: cannot bind port {port} ({ex.Message}). Pass --port <N> for another.");
+            Console.Error.WriteLine($"ky-ai-browser: cannot bind control port {restPort} ({ex.Message}). Pass --rest-port <N> for another.");
             return 1;
         }
 
-        // 5) Inject (after our port is bound, so the script URL resolves).
-        if (!await InjectAsync(controlUrl, scriptTag))
+        // Now that we're bound, learn our actual port and template the snippet to point the page back at us.
+        var selfUrl = GetBoundUrl(app) ?? $"http://127.0.0.1:{restPort}";
+        var ingestUrl = $"{selfUrl}/__kyai/console";
+        snippet = LoadSnippet().Replace("__KYAI_TOKEN__", collector.Token).Replace("__KYAI_INGEST__", ingestUrl);
+        // The token doubles as a per-instance cache-buster in the src. A fresh instance has a fresh token,
+        // so re-injecting yields *different* index.html content — the write isn't skipped as a no-op, ng
+        // reloads the page, and it picks up the new snippet. (The console.js endpoint ignores the query
+        // string, so it still serves the snippet.)
+        var scriptTag = $"<script src=\"{selfUrl}/__kyai/console.js?t={collector.Token}\"></script>";
+
+        // 5) Register with the browser hub (auto-starting it if needed), then inject.
+        if (useHub)
+        {
+            if (!await HubReachableAsync(hubUrl))
+                TryLaunchHub(hubPort);
+            _ = RegisterLoopAsync(hubUrl, instanceName, selfUrl, stopping.Token);
+        }
+
+        if (!await InjectAsync(ngControlUrl, scriptTag))
         {
             Console.Error.WriteLine($"ky-ai-browser: ky-ai-ng could not inject into the app's index.html (is it present?). Detaching.");
             await app.StopAsync();
@@ -221,20 +312,21 @@ internal static class Program
         }
 
         // Keep the inject alive (and pull ng's build seq for correlation) until we shut down.
-        _ = HeartbeatLoopAsync(controlUrl, hbCts.Token);
+        _ = HeartbeatLoopAsync(ngControlUrl, stopping.Token);
 
-        var rows = new[]
+        var rows = new List<string>
         {
-            BannerBox.Row("attached", controlUrl),
-            BannerBox.Row("MCP", $"http://127.0.0.1:{port}/mcp"),
-            BannerBox.Row("capture", "page reloads; console now flows to console_tail"),
+            BannerBox.Row("capture", $"'{instanceName}' → {ngControlUrl}"),
+            BannerBox.Row("serving", selfUrl),
+            BannerBox.Row("MCP", useHub ? $"{hubUrl}/mcp  ·  project '{instanceName}'" : "standalone (--no-hub) — no agent access"),
+            BannerBox.Row("page", "reloads; console now flows to console_tail"),
         };
         if (startedBy is null)
             // Standalone: a complete box; Ctrl+C here detaches just this tool (restores index.html).
             BannerBox.Render("ky-ai-browser", rows.Append("").Append(BannerBox.Row("stop", "Ctrl+C to detach")).ToArray());
         else
             // Launched by another tool — continue its open box; no "Ctrl+C to detach" (Ctrl+C kills the tree).
-            BannerBox.RenderContinuation("ky-ai-browser", rows);
+            BannerBox.RenderContinuation("ky-ai-browser", rows.ToArray());
         await app.WaitForShutdownAsync();
         return 0;
     }
@@ -246,41 +338,15 @@ internal static class Program
         ctx.Response.Headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS";
     }
 
-    // `ky-ai-browser shutdown` — stop a running instance on its port. ky-ai-browser has no hub (its
-    // lifetime is its own process), so this just asks the instance to stop; it then reverts its inject
-    // and restores index.html, the same as Ctrl+C. Useful when it was launched via `ky-ai-ng serve
-    // --after-start` and shares ng's console, so Ctrl+C there would take ng down too.
-    private static async Task<int> ShutdownAsync(string[] rest)
+    private static string? GetBoundUrl(WebApplication app)
     {
-        var port = DefaultPort;
-        for (var i = 0; i < rest.Length; i++)
-            if (rest[i] == "--port" && ++i < rest.Length && int.TryParse(rest[i], out var p)) port = p;
-
-        var url = $"http://127.0.0.1:{port}";
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-        try
-        {
-            using var resp = await http.PostAsync(url + "/shutdown", null);
-            var body = (await resp.Content.ReadAsStringAsync()).Trim();
-            if (resp.IsSuccessStatusCode && body.Length > 0)
-                Console.WriteLine($"ky-ai-browser · {body}");
-            else
-                // Reached something on the port that didn't accept /shutdown — most likely an older
-                // ky-ai-browser predating this command. Say so rather than printing an empty line.
-                Console.WriteLine($"ky-ai-browser · an instance on :{port} didn't accept shutdown " +
-                    "(older build without the command?) — stop it with Ctrl+C in its terminal.");
-            return 0;
-        }
-        catch
-        {
-            Console.WriteLine($"ky-ai-browser · nothing running on :{port} — nothing to shut down.");
-            return 0;
-        }
+        var addr = app.Services.GetService<IServer>()?.Features.Get<IServerAddressesFeature>()?.Addresses.FirstOrDefault();
+        return addr?.Replace("[::]", "127.0.0.1").Replace("0.0.0.0", "127.0.0.1");
     }
 
-    // Look up a registered ky-ai-ng frontend via its hub's /registry. Returns the control URL to
-    // inject into, or null if none is registered. Throws (with names) if several match and no --project.
-    private static async Task<string?> DiscoverNgAsync(int hubPort, string? project)
+    // Look up a registered ky-ai-ng frontend via its hub's /registry. Returns the frontend's (name,
+    // control URL), or null if none is registered. Throws (with names) if several match and no --project.
+    private static async Task<(string Name, string Url)?> DiscoverNgAsync(int hubPort, string? project)
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
         string body;
@@ -292,15 +358,90 @@ internal static class Program
             .Select(e => (
                 name: e.TryGetProperty("name", out var n) ? n.GetString() : null,
                 url: e.TryGetProperty("controlUrl", out var u) ? u.GetString() : null))
-            .Where(r => !string.IsNullOrEmpty(r.url))
+            .Where(r => !string.IsNullOrEmpty(r.url) && !string.IsNullOrEmpty(r.name))
             .ToList();
 
         if (regs.Count == 0) return null;
         if (project is not null)
-            return regs.FirstOrDefault(r => string.Equals(r.name, project, StringComparison.OrdinalIgnoreCase)).url;
-        if (regs.Count == 1) return regs[0].url;
+        {
+            var match = regs.FirstOrDefault(r => string.Equals(r.name, project, StringComparison.OrdinalIgnoreCase));
+            return match.url is null ? null : (match.name!, match.url!);
+        }
+        if (regs.Count == 1) return (regs[0].name!, regs[0].url!);
         throw new InvalidOperationException(
             $"multiple frontends registered ({string.Join(", ", regs.Select(r => r.name))}); pass --project <name>.");
+    }
+
+    // ── browser-hub registration (mirrors SupervisorHost/TerminalHost) ──
+
+    private static async Task RegisterLoopAsync(string hubUrl, string name, string controlUrl, CancellationToken ct)
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(4) };
+        var body = JsonSerializer.Serialize(new { name, controlUrl });
+        var url = hubUrl.TrimEnd('/') + "/register";
+        while (!ct.IsCancellationRequested)
+        {
+            var ok = false;
+            try
+            {
+                using var content = new StringContent(body, Encoding.UTF8, "application/json");
+                using var resp = await http.PostAsync(url, content, ct);
+                ok = resp.IsSuccessStatusCode;
+            }
+            catch { /* hub not up yet */ }
+            try { await Task.Delay(TimeSpan.FromSeconds(ok ? 15 : 2), ct); }
+            catch { break; }
+        }
+    }
+
+    private static async Task DeregisterAsync(string hubUrl, string name)
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+        var body = JsonSerializer.Serialize(new { name, controlUrl = "" });
+        using var content = new StringContent(body, Encoding.UTF8, "application/json");
+        await http.PostAsync(hubUrl.TrimEnd('/') + "/deregister", content);
+    }
+
+    private static async Task<bool> HubReachableAsync(string hubUrl)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+            using var resp = await http.GetAsync(hubUrl.TrimEnd('/') + "/health");
+            return resp.IsSuccessStatusCode;
+        }
+        catch { return false; }
+    }
+
+    // Launch `ky-ai-browser hub` from this same exe, detached and hidden, so it outlives this instance
+    // and isn't tied to this console's Ctrl+C. Auto-started hubs self-exit when idle.
+    private static void TryLaunchHub(int port)
+    {
+        try
+        {
+            var self = Environment.ProcessPath;
+            if (self is null) return;
+            var psi = new ProcessStartInfo { FileName = self };
+            if (OperatingSystem.IsWindows())
+            {
+                psi.UseShellExecute = true;
+                psi.WindowStyle = ProcessWindowStyle.Hidden;
+            }
+            else
+            {
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+            }
+            psi.ArgumentList.Add("hub");
+            psi.ArgumentList.Add("--port");
+            psi.ArgumentList.Add(port.ToString());
+            psi.ArgumentList.Add("--exit-when-idle");
+            Process.Start(psi);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"ky-ai-browser: could not auto-start hub: {ex.Message}");
+        }
     }
 
     private static async Task<bool> InjectAsync(string controlUrl, string scriptTag)
@@ -366,41 +507,50 @@ internal static class Program
     private static void PrintHelp()
     {
         Console.WriteLine("""
-        ky-ai-browser — read a served app's browser console from an AI agent over MCP.
+        ky-ai-browser — read a served app's browser console (and drive it) from an AI agent over MCP.
 
         Run it next to a running `ky-ai-ng serve`:
           ky-ai-browser [options]
-            --project <id>      Which ky-ai-ng frontend to attach to (default: the only one registered)
-            --port <N>          ky-ai-browser's own MCP + ingest port (default: 5104)
+            --project <id>      Which ky-ai-ng frontend to attach to (default: the only one registered).
+                                Also the name this capture registers under in the hub.
+            --name <id>         Override the hub registry name (default: the attached frontend's name)
+            --hub-port <N>      ky-ai-browser hub port to register with (default: 5104; auto-started)
             --ng-hub-port <N>   ky-ai-ng hub port to discover the frontend (default: 5101)
+            --rest-port <N>     This instance's own control/ingest port (default: OS-assigned)
+            --no-hub            Standalone: host capture locally only; no hub, no agent access
             -y, --yes           Skip the inject confirmation (default answer is yes anyway)
             --started-by <tool> Set automatically when launched via `ky-ai-ng serve --after-start`:
                                 continues the launcher's start-up box instead of opening its own, and
                                 skips the inject confirmation (being launched is itself the opt-in).
+
+        You can run several at once — one ky-ai-browser per ky-ai-ng frontend. Each binds its own
+        OS-assigned port and registers with the shared hub; the agent talks to the one hub URL
+        (127.0.0.1:5104/mcp) and routes by `project`. An MCP hub auto-starts on demand and self-exits
+        when idle — you never run it yourself.
 
         On start it asks ky-ai-ng to inject a capture <script> into the app's index.html (you confirm;
         default yes); the page reloads and console.*/errors/rejections flow to the `console_tail` MCP
         tool. On Ctrl+C the script is removed and index.html is restored. If ky-ai-browser dies without
         cleaning up, ky-ai-ng strips the leftover automatically. All HTTP is loopback-only.
 
-        SHUTDOWN — stop a running ky-ai-browser (removes the script, restores index.html):
-          ky-ai-browser shutdown [--port <N>]
-          Same effect as Ctrl+C, but from another terminal. Handy when it was launched via
-          `ky-ai-ng serve --after-start ky-ai-browser` and shares ng's console — this detaches
-          the console capture without stopping ng. --port targets a non-default instance (5104).
+        HUB — the MCP control plane (auto-started; rarely run by hand):
+          ky-ai-browser hub [--port <N>] [--exit-when-idle]
+
+        SHUTDOWN — tear down the whole stack: the hub plus every capture instance (each removes its
+        script and restores index.html):
+          ky-ai-browser shutdown [--hub-port <N>]
 
         UPDATE — update ky-ai-browser to the latest version (.NET global tool):
           ky-ai-browser update
-          Runs `dotnet tool update --global KY.AI.Browser --no-cache`. Stops any other running
-          ky-ai-browser first (it locks the files): lists it, gives you a chance to close it, sends
-          shutdown, then hard-kills leftovers. On Windows the update runs in a new window that opens
-          once this process exits (a running tool can't overwrite its own files).
+          Runs `dotnet tool update --global KY.AI.Browser --no-cache`. Stops the running stack first
+          (it locks the files), then on Windows the update runs in a new window that opens once this
+          process exits (a running tool can't overwrite its own files).
 
         INIT — wire ky-ai-browser into a Claude Code workspace (.mcp.json + allow-list):
           ky-ai-browser init [-y] [--dir <path>]
           Finds the nearest .mcp.json and .claude/, then (each step confirmed) adds the MCP server
-          (127.0.0.1:5104) and allows console_tail / console_clear. Merges into existing files; safe
-          to re-run. Or wire it by hand:
+          (127.0.0.1:5104) and allows its commands. Merges into existing files; safe to re-run. Or
+          wire it by hand:
             { "mcpServers": { "ky-ai-browser": { "type": "http", "url": "http://127.0.0.1:5104/mcp" } } }
         """);
     }

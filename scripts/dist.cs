@@ -37,8 +37,8 @@ var only = args.FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal
 var root = RepoRoot();
 var dist = Path.Combine(root, "dist");
 
-// The tool suite: process name (no .exe) → shutdown port (the hub port for the hub-based tools, where
-// one POST tears down the hub + all its supervisors; ky-ai-browser's own port) → project → output exe.
+// The tool suite: process name (no .exe) → shutdown port (the hub port, where one POST tears down the
+// hub + all its supervisors/instances) → project → output exe.
 (string Proc, int Port, string Project, string Exe)[] allTools =
 [
     ("ky-ai-ng",       5101, Path.Combine(root, "src", "Ng",       "KY.AI.Ng.csproj"),       "ky-ai-ng.exe"),

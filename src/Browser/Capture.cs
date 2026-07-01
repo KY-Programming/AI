@@ -1,8 +1,8 @@
 namespace KY.AI.Browser;
 
-// Process-wide handle to the live capture buffer, set once at startup. The MCP tools (BrowserTools)
-// are static and read it directly — ky-ai-browser hosts the collector and its MCP surface in one
-// process, so there's nothing to forward.
+// Process-wide handle to the live capture buffer, set once at startup of a capture INSTANCE. The
+// instance's loopback control routes (/console/*, /eval) read it directly; the hub process (which
+// hosts the MCP surface) never touches it — it forwards each call to the owning instance over HTTP.
 internal static class Capture
 {
     public static ConsoleCollector? Collector;

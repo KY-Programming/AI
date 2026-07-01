@@ -17,6 +17,12 @@ confirms behaviour instead of guessing from source.
 `ky-ai-browser` is a **process you run** next to a running `ky-ai-ng serve` — its lifetime is the
 on/off switch, so *you* control the manipulation.
 
+Like `ky-ai-ng` it's a **hub + instances**: a small MCP hub (auto-started on `127.0.0.1:5104`, self-
+exits when idle) holds the tool surface, and each `ky-ai-browser` you run is a capture **instance**
+that binds its own OS-assigned port and registers with the hub under the frontend's name. So you can
+run **several at once** — one per `ky-ai-ng` frontend — while the agent talks to the single hub URL
+and routes by `project`. You never start the hub yourself.
+
 Usually you launch it together with the dev server — let `ky-ai-ng serve` start `ky-ai-browser` once
 the first build settles:
 
@@ -34,19 +40,24 @@ ky-ai-ng serve --after-start ky-ai-browser -y
 
 ```
 ky-ai-browser [options]            # run alongside `ky-ai-ng serve`
-  --project <id>      Which ky-ai-ng frontend to attach to (default: the only one registered)
-  --port <N>          ky-ai-browser's own MCP + ingest port (default: 5104)
+  --project <id>      Which ky-ai-ng frontend to attach to (default: the only one registered);
+                      also the name this capture registers under in the hub
+  --name <id>         Override the hub registry name (default: the attached frontend's name)
+  --hub-port <N>      ky-ai-browser hub port to register with (default: 5104; auto-started)
   --ng-hub-port <N>   ky-ai-ng hub port to discover the frontend (default: 5101)
+  --rest-port <N>     this instance's own control/ingest port (default: OS-assigned)
+  --no-hub            standalone: capture locally only; no hub, no agent access
   -y, --yes           Skip the inject confirmation (default answer is yes anyway)
 
-ky-ai-browser shutdown [--port <N>]      # stop a running instance (removes the script, restores index.html)
+ky-ai-browser shutdown [--hub-port <N>]  # tear down the whole stack (every instance removes its script, restores index.html)
 ky-ai-browser init [--agent claude|cursor|vscode] [-y] [--dir <path>]   # wire it into your agent (default: auto-detect)
 ky-ai-browser update                     # update to the latest release
 ```
 
-`shutdown` does the same as **Ctrl+C** but from another terminal — useful when it was launched via
-`ky-ai-ng serve --after-start ky-ai-browser` (sharing ng's console), so you can detach the console
-capture without taking ng down.
+`shutdown` tears down the hub and **every** capture instance it supervises — each detaches like a
+**Ctrl+C** would. Handy when an instance was launched via `ky-ai-ng serve --after-start ky-ai-browser`
+(sharing ng's console), so you can detach the console capture without taking ng down. To stop just one
+instance, Ctrl+C it in its own terminal.
 
 ## Connect your agent
 
@@ -241,8 +252,13 @@ The capture buffer, event types and the in-page snippet live in this project; th
 mechanism it drives is a generic `POST /inject { file?, path, content }` (+ `/uninject`) on the
 `ky-ai-ng` supervisor's control API.
 
-- `Program.cs` — arg parsing, frontend discovery via the ng hub, inject/uninject lifecycle.
-- `BrowserTools.cs` — the MCP tool surface (read / inspect / interact / batch).
+- `Program.cs` — the `hub` subcommand (MCP control plane via the shared `HubHost`) and the capture
+  **instance**: frontend discovery via the ng hub, the OS-assigned control/ingest host, hub
+  registration, and the inject/uninject lifecycle.
+- `BrowserTools.cs` — the MCP tool surface (read / inspect / interact / batch), running in the hub and
+  forwarding each call to the right instance by `project`.
+- `InstanceEval.cs` — instance-side dispatch for a forwarded `EvalRequest`: the supervised-interaction
+  gate, then enqueue on the channel.
 - `Capture.cs` · `ConsoleCollector.cs` · `ConsoleEvent.cs` · `ConsoleEventLog.cs` — the cross-origin
   ingest endpoint and the rolling console-event buffer.
 - `EvalChannel.cs` — the half-duplex long-poll return channel (inspect/interact requests → results),

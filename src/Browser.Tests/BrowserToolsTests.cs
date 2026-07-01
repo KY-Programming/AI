@@ -6,24 +6,31 @@ using Xunit;
 
 namespace KY.AI.Browser.Tests;
 
-// The MCP interaction tools map to EvalRequests on the channel: each test enqueues via a tool call,
-// pulls the request the snippet would receive, and asserts kind + fields. Capture.Eval is process
-// static, so these live in one class (xUnit runs a class's tests sequentially) and no other test
-// class touches it.
+// The MCP tools run in the HUB and forward each call to a capture instance; the instance (InstanceEval)
+// gates supervised interaction and enqueues the EvalRequest on its channel. These tests wire the hub's
+// forward seam (BrowserTools.ForwardHook) straight into a real EvalChannel via InstanceEval — modelling
+// hub→instance without HTTP — then pull the request the snippet would receive and assert kind + fields.
+// BrowserTools.ForwardHook is process static, so these live in one class (xUnit runs a class's tests
+// sequentially) and each test restores the hook.
 public class BrowserToolsTests
 {
-    // Invoke a tool, return the EvalRequest it enqueued (completing the call so it doesn't dangle).
-    // Interaction is opened first so the gated manipulation tools are allowed through.
+    // Route the tool's forward through InstanceEval onto `ch`, invoke it, return the EvalRequest the
+    // channel handed the snippet (completing the call so it doesn't dangle). The channel is interaction-
+    // open so the gated manipulation tools are allowed through.
     private static async Task<EvalRequest> Enqueued(Func<Task<string>> call)
     {
         var ch = new EvalChannel("t");
         ch.SetInteraction(true);
-        Capture.Eval = ch;
-        var task = call();
-        var req = Assert.Single(await ch.PollAsync(1000, default));
-        ch.Complete("t", req.Id, "{\"ok\":true}");
-        await task;
-        return req;
+        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        try
+        {
+            var task = call();
+            var req = Assert.Single(await ch.PollAsync(1000, default));
+            ch.Complete("t", req.Id, "{\"ok\":true}");
+            await task;
+            return req;
+        }
+        finally { BrowserTools.ForwardHook = null; }
     }
 
     [Fact]
@@ -165,79 +172,102 @@ public class BrowserToolsTests
     [Fact]
     public async Task Batch_with_a_manipulation_step_is_gated()
     {
-        var ch = new EvalChannel("t");
-        Capture.Eval = ch;   // interaction NOT opened
-        var blocked = await BrowserTools.Batch(new[] { new BatchStep { Action = "click", Selector = "x" } });
-        Assert.Contains("needsInteraction", blocked);
-        Assert.Empty(await ch.PollAsync(50, default));
+        var ch = new EvalChannel("t");   // interaction NOT opened
+        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        try
+        {
+            var blocked = await BrowserTools.Batch(new[] { new BatchStep { Action = "click", Selector = "x" } });
+            Assert.Contains("needsInteraction", blocked);
+            Assert.Empty(await ch.PollAsync(50, default));
+        }
+        finally { BrowserTools.ForwardHook = null; }
     }
 
     [Fact]
     public async Task Batch_of_reads_only_runs_without_interaction()
     {
-        var ch = new EvalChannel("t");
-        Capture.Eval = ch;   // interaction NOT opened
-        var task = BrowserTools.Batch(new[] { new BatchStep { Action = "query", Selector = "a" } });
-        var req = Assert.Single(await ch.PollAsync(1000, default));
-        Assert.Equal("batch", req.Kind);
-        ch.Complete("t", req.Id, "{\"ok\":true}");
-        await task;
+        var ch = new EvalChannel("t");   // interaction NOT opened
+        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        try
+        {
+            var task = BrowserTools.Batch(new[] { new BatchStep { Action = "query", Selector = "a" } });
+            var req = Assert.Single(await ch.PollAsync(1000, default));
+            Assert.Equal("batch", req.Kind);
+            ch.Complete("t", req.Id, "{\"ok\":true}");
+            await task;
+        }
+        finally { BrowserTools.ForwardHook = null; }
     }
 
     [Fact]
-    public async Task Click_without_a_target_is_rejected_without_enqueueing()
+    public async Task Click_without_a_target_is_rejected_without_forwarding()
     {
         var ch = new EvalChannel("t");
         ch.SetInteraction(true);
-        Capture.Eval = ch;
-        var json = await BrowserTools.Click();   // no selector, text, or coordinates
-        Assert.Contains("requires a selector", json);
-        Assert.Empty(await ch.PollAsync(50, default));   // nothing was queued
+        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        try
+        {
+            var json = await BrowserTools.Click();   // no selector, text, or coordinates
+            Assert.Contains("requires a selector", json);
+            Assert.Empty(await ch.PollAsync(50, default));   // nothing was forwarded/queued
+        }
+        finally { BrowserTools.ForwardHook = null; }
     }
 
     [Fact]
     public async Task Tools_report_not_running_when_capture_is_off()
     {
-        Capture.Eval = null;
-        Assert.Contains("\"enabled\":false", await BrowserTools.Click(selector: "x"));
-        Assert.Contains("\"enabled\":false", await BrowserTools.WaitFor(selector: "x"));
+        // No capture instance behind the hub → the instance dispatcher reports capture off.
+        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(null, req, waitMs);
+        try
+        {
+            Assert.Contains("\"enabled\":false", await BrowserTools.Click(selector: "x"));
+            Assert.Contains("\"enabled\":false", await BrowserTools.WaitFor(selector: "x"));
+        }
+        finally { BrowserTools.ForwardHook = null; }
     }
 
-    // ── supervised-interaction gate ──
+    // ── supervised-interaction gate (enforced instance-side by InstanceEval) ──
 
     [Fact]
     public async Task Manipulation_is_blocked_until_start_interaction()
     {
-        var ch = new EvalChannel("t");
-        Capture.Eval = ch;   // interaction NOT opened
-
-        var blocked = await BrowserTools.Click(selector: "button.go");
-        Assert.Contains("needsInteraction", blocked);
-        Assert.Contains("start_interaction", blocked);
-        Assert.Empty(await ch.PollAsync(50, default));   // nothing was queued
+        var ch = new EvalChannel("t");   // interaction NOT opened
+        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        try
+        {
+            var blocked = await BrowserTools.Click(selector: "button.go");
+            Assert.Contains("needsInteraction", blocked);
+            Assert.Contains("start_interaction", blocked);
+            Assert.Empty(await ch.PollAsync(50, default));   // nothing was queued
+        }
+        finally { BrowserTools.ForwardHook = null; }
     }
 
     [Fact]
     public async Task Start_interaction_opens_the_gate_and_shows_the_overlay()
     {
         var ch = new EvalChannel("t");
-        Capture.Eval = ch;
+        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        try
+        {
+            var task = BrowserTools.StartInteraction();
+            var req = Assert.Single(await ch.PollAsync(1000, default));
+            Assert.Equal("overlay", req.Kind);
+            Assert.True(req.Show);
+            ch.Complete("t", req.Id, "{\"ok\":true,\"shown\":true}");
+            await task;
 
-        var task = BrowserTools.StartInteraction();
-        var req = Assert.Single(await ch.PollAsync(1000, default));
-        Assert.Equal("overlay", req.Kind);
-        Assert.True(req.Show);
-        ch.Complete("t", req.Id, "{\"ok\":true,\"shown\":true}");
-        await task;
+            Assert.True(ch.InteractionActive);   // gate is now open
 
-        Assert.True(ch.InteractionActive);   // gate is now open
-
-        // and a click now goes through
-        var clickTask = BrowserTools.Click(selector: "button.go");
-        var click = Assert.Single(await ch.PollAsync(1000, default));
-        Assert.Equal("click", click.Kind);
-        ch.Complete("t", click.Id, "{\"ok\":true}");
-        await clickTask;
+            // and a click now goes through
+            var clickTask = BrowserTools.Click(selector: "button.go");
+            var click = Assert.Single(await ch.PollAsync(1000, default));
+            Assert.Equal("click", click.Kind);
+            ch.Complete("t", click.Id, "{\"ok\":true}");
+            await clickTask;
+        }
+        finally { BrowserTools.ForwardHook = null; }
     }
 
     [Fact]
@@ -245,16 +275,19 @@ public class BrowserToolsTests
     {
         var ch = new EvalChannel("t");
         ch.SetInteraction(true);
-        Capture.Eval = ch;
+        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        try
+        {
+            var task = BrowserTools.StopInteraction();
+            var req = Assert.Single(await ch.PollAsync(1000, default));
+            Assert.Equal("overlay", req.Kind);
+            Assert.False(req.Show);
+            ch.Complete("t", req.Id, "{\"ok\":true,\"shown\":false}");
+            await task;
 
-        var task = BrowserTools.StopInteraction();
-        var req = Assert.Single(await ch.PollAsync(1000, default));
-        Assert.Equal("overlay", req.Kind);
-        Assert.False(req.Show);
-        ch.Complete("t", req.Id, "{\"ok\":true,\"shown\":false}");
-        await task;
-
-        Assert.False(ch.InteractionActive);
-        Assert.Contains("needsInteraction", await BrowserTools.Click(selector: "x"));   // blocked again
+            Assert.False(ch.InteractionActive);
+            Assert.Contains("needsInteraction", await BrowserTools.Click(selector: "x"));   // blocked again
+        }
+        finally { BrowserTools.ForwardHook = null; }
     }
 }
