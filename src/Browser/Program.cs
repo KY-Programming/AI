@@ -90,33 +90,31 @@ internal static class Program
     // snippet, and keep it alive until Ctrl+C / shutdown.
     private static async Task<int> RunInstanceAsync(string[] args)
     {
-        var hubPort = DefaultHubPort;
+        // Shared serve flags (--rest-port, --hub-port, --name, --no-hub, …) come from the common parser,
+        // exactly like ky-ai-ng / ky-ai-terminal; the browser-specific flags are peeled from Extra.
+        var o = ServeCommandLine.Parse(args, DefaultHubPort);
+        var restPort = o.ControlPort;          // 0 → OS-assigned loopback port
+        var hubUrl = o.HubUrl;
+        var hubPort = Uri.TryCreate(hubUrl, UriKind.Absolute, out var hu) ? hu.Port : DefaultHubPort;
+        var useHub = o.UseHub;
+
         var ngHubPort = DefaultNgHubPort;
-        var restPort = 0;            // 0 → OS-assigned loopback port
         string? project = null;
-        string? name = null;
-        var useHub = true;
         var yes = false;
         string? startedBy = null;
-        for (var i = 0; i < args.Length; i++)
+        for (var i = 0; i < o.Extra.Count; i++)
         {
-            switch (args[i])
+            switch (o.Extra[i])
             {
-                case "--hub-port": if (++i < args.Length && int.TryParse(args[i], out var hp)) hubPort = hp; break;
-                case "--ng-hub-port": if (++i < args.Length && int.TryParse(args[i], out var nhp)) ngHubPort = nhp; break;
-                // The instance's own control/ingest port. --port is kept as a back-compat alias.
-                case "--rest-port": case "--port": if (++i < args.Length && int.TryParse(args[i], out var rp)) restPort = rp; break;
-                case "--project": if (++i < args.Length) project = args[i]; break;
-                case "--name": if (++i < args.Length) name = args[i]; break;
-                case "--no-hub": useHub = false; break;
+                case "--ng-hub-port": if (++i < o.Extra.Count && int.TryParse(o.Extra[i], out var nhp)) ngHubPort = nhp; break;
+                case "--project": if (++i < o.Extra.Count) project = o.Extra[i]; break;
                 case "-y": case "--yes": yes = true; break;
                 // Set by a launching tool (ky-ai-ng serve --after-start): we share its console, so we
                 // continue its open box instead of opening our own, and skip "Ctrl+C to detach" (Ctrl+C
                 // here kills the whole tree). The value is the launcher's name, for the message only.
-                case "--started-by": if (++i < args.Length) startedBy = args[i]; break;
+                case "--started-by": if (++i < o.Extra.Count) startedBy = o.Extra[i]; break;
             }
         }
-        var hubUrl = $"http://127.0.0.1:{hubPort}";
 
         // 1) Find the running ky-ai-ng frontend to attach to (returns its name + control URL).
         string ngControlUrl;
@@ -138,7 +136,7 @@ internal static class Program
 
         // The instance registers under the attached frontend's name (or an explicit --name), so the
         // agent routes `project` to a ky-ai-browser the same way it does for ky-ai-ng.
-        var instanceName = name ?? ngName;
+        var instanceName = o.Name ?? ngName;
 
         // 2) Confirm the (reversible) manipulation. Default yes; skip with -y or non-interactive stdin.
         // Being launched by another tool (--started-by, e.g. `ky-ai-ng serve --after-start ky-ai-browser`)
