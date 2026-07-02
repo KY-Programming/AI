@@ -47,22 +47,28 @@ internal static class BrowserTools
         "Return recent BROWSER/runtime console events from the app ky-ai-browser is attached to " +
         "(console.log/info/warn/error, uncaught exceptions, unhandled promise rejections). Each event is " +
         "{seq, level, args, text, source, line, col, stack, timestamp, pageLoadId}; the response also " +
-        "carries `dropped` (events lost to a flood) and `enabled` (false when ky-ai-browser isn't running " +
-        "— start it next to your `ky-ai-ng serve`). Filters compose: level keeps that severity and above " +
+        "carries `dropped` (events lost to a flood), `enabled` (false when ky-ai-browser isn't running " +
+        "— start it next to your `ky-ai-ng serve`) and `currentPageLoadId` (the live page load, so you can " +
+        "tell fresh from stale without a second call). Filters compose: level keeps that severity and above " +
         "(debug<log<info<warn<error<exception); sinceSeq returns events after a prior tail's max seq; grep " +
-        "is a case-insensitive substring over text+stack; pageLoad isolates one page load (reload boundary). " +
-        "compact=true drops `args` when `text` already carries them and truncates each stack to a few frames " +
-        "(far smaller payloads — prefer it). appOnly=true drops transport churn (SignalR/WebSocket " +
-        "negotiation, [vite] HMR socket noise) so app-level logs and errors stand out. " +
-        "Omit project when only one capture is registered.")]
+        "is a case-insensitive substring over text+stack; pageLoad isolates one page load (reload boundary); " +
+        "currentPageOnly=true scopes to the current/most-recent page load — the one-call 'did my reload clear " +
+        "it?' check (an explicit pageLoad wins). compact=true drops `args` when `text` already carries them " +
+        "and truncates each stack to a few frames (far smaller payloads — prefer it). appOnly=true drops " +
+        "transport churn (SignalR/WebSocket negotiation, [vite] HMR socket noise). dropFrameworkNoise=true " +
+        "SEPARATELY drops known-benign framework banners (DevExtreme/Inferno production-build notice, the " +
+        "Angular dev-mode banner, a dev-only router 'Transition was aborted') — set both for a fully clean " +
+        "channel so app-level logs and errors stand out. Omit project when only one capture is registered.")]
     public static Task<string> ConsoleTail(
         [Description("Trailing events; 0 = whole buffer (default 200)")] int lines = 0,
         [Description("Min severity: debug|log|info|warn|error|exception")] string? level = null,
         [Description("Only events with seq at/after this; 0 = all")] long sinceSeq = 0,
         [Description("Keep only events whose text/stack contains this substring (case-insensitive)")] string? grep = null,
         [Description("Only events from this pageLoadId (one reload boundary)")] string? pageLoad = null,
+        [Description("Scope to the current/most-recent page load (one-call 'did my reload clear it?'); explicit pageLoad wins")] bool currentPageOnly = false,
         [Description("Slim payload: drop args when text exists, truncate stacks to a few frames")] bool compact = false,
         [Description("Drop transport churn (SignalR/WebSocket negotiation, [vite] HMR socket noise)")] bool appOnly = false,
+        [Description("Drop known-benign framework banners (Inferno/Angular/router noise); separate from appOnly")] bool dropFrameworkNoise = false,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         var q = $"/console/tail?lines={(lines <= 0 ? 200 : lines)}";
@@ -70,8 +76,10 @@ internal static class BrowserTools
         if (sinceSeq > 0) q += $"&sinceSeq={sinceSeq}";
         if (!string.IsNullOrEmpty(grep)) q += $"&grep={Uri.EscapeDataString(grep)}";
         if (!string.IsNullOrEmpty(pageLoad)) q += $"&pageLoad={Uri.EscapeDataString(pageLoad)}";
+        if (currentPageOnly) q += "&currentPageOnly=true";
         if (compact) q += "&compact=true";
         if (appOnly) q += "&appOnly=true";
+        if (dropFrameworkNoise) q += "&dropFrameworkNoise=true";
         return Hub.ForwardAsync(project, HttpMethod.Get, q, 5);
     }
 
@@ -382,9 +390,8 @@ internal static class BrowserTools
         "Reload the attached page (location.reload()). Use after a build that changed code rather than just " +
         "templates/styles: a hot reload may keep already-created objects (services, singletons, model " +
         "instances) on the previous version, so a green build can still be running stale logic — a reload " +
-        "re-instantiates everything. This is a FULL reload, not navigation: there is deliberately no navigate " +
-        "tool — to change an SPA route, click a nav link (synthetic `click` on the <a>/routerLink) or drive the " +
-        "router via evaluate_js, then `wait_for` location.pathname to settle. Returns {ok, dispatched} once the " +
+        "re-instantiates everything. This is a FULL reload, not navigation — to change an SPA route WITHOUT " +
+        "re-instantiating everything, use `navigate` instead. Returns {ok, dispatched} once the " +
         "page picks up the reload; capture re-attaches automatically on the fresh load (a new pageLoadId). " +
         "Returns pageConnected:false if no page is open. Omit project when only one capture is registered.")]
     public static Task<string> ReloadPage(
@@ -393,6 +400,28 @@ internal static class BrowserTools
     {
         var budget = Math.Clamp(timeoutMs, 250, 30_000);
         return Eval(project, budget, new EvalRequest { Id = "", Kind = "reload", TimeoutMs = budget });
+    }
+
+    [McpServerTool(Name = "navigate"), Description(
+        "Change the SPA route WITHOUT a hard reload — the router-aware alternative to reload_page and to the " +
+        "click-a-nav-link / evaluate_js-the-router dance. On a dev build it finds the Angular Router and calls " +
+        "router.navigateByUrl(path); if the Router can't be resolved (production build, etc.) it falls back to " +
+        "the History API (pushState + a synthetic popstate the default PathLocationStrategy picks up). Because " +
+        "it does not reload, already-created services/singletons stay live (use reload_page when you need those " +
+        "re-instantiated). Returns {ok, from, to, navigated, method:'router'|'history'}; `to` is the settled " +
+        "location.href so you can confirm the destination even if a route guard redirected. Not gated behind " +
+        "start_interaction. If the route resolves async, follow with `wait_for` on a destination selector or " +
+        "location.pathname. Omit project when only one capture is registered.")]
+    public static Task<string> Navigate(
+        [Description("Target route/URL to navigate to, e.g. \"/orders/42\" (router path or same-origin URL)")] string path,
+        [Description("Use replaceState instead of pushState in the History fallback (no new history entry)")] bool replace = false,
+        [Description("Max ms to wait for the navigation to settle (default 5000)")] int timeoutMs = 5000,
+        [Description("Project name; omit when only one capture is registered")] string? project = null)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return Task.FromResult(Bad("path is required"));
+        var budget = Clamp(timeoutMs);
+        return Eval(project, budget + 1500, new EvalRequest
+        { Id = "", Kind = "navigate", Path = path, Replace = replace, TimeoutMs = budget });
     }
 
     [McpServerTool(Name = "batch"), Description(

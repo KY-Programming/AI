@@ -92,6 +92,32 @@ public class ConsoleBufferTests
         Assert.Equal(4, log.Tail(0).Count);                                  // off by default — nothing dropped
     }
 
+    [Fact]
+    public void EventLog_dropFrameworkNoise_drops_benign_banners_keeps_app_logs()
+    {
+        var log = new ConsoleEventLog(0);
+        Add(log, "warn", "You are using a production build of Inferno while in dev mode");
+        Add(log, "error", "InvalidStateError: Transition was aborted");
+        Add(log, "log", "Angular is running in development mode");
+        Add(log, "warn", "wire de-energized");                               // genuine app warning
+
+        Assert.Equal(new[] { "wire de-energized" }, log.Tail(0, dropFrameworkNoise: true).Select(x => x.Text));
+        Assert.Equal(4, log.Tail(0).Count);                                  // off by default — nothing dropped
+        Assert.Equal(4, log.Tail(0, dropTransportNoise: true).Count);        // separate flag — transport-only leaves these
+    }
+
+    [Fact]
+    public void EventLog_transport_and_framework_noise_compose()
+    {
+        var log = new ConsoleEventLog(0);
+        Add(log, "info", "[vite] connected.");                              // transport
+        Add(log, "log", "Angular is running in development mode");           // framework
+        Add(log, "log", "wire energized");                                  // app
+
+        Assert.Equal(new[] { "wire energized" },
+            log.Tail(0, dropTransportNoise: true, dropFrameworkNoise: true).Select(x => x.Text));
+    }
+
     // ── compact projection (ConsoleCollector.TailJson compact:true) ──
 
     [Fact]
@@ -189,5 +215,52 @@ public class ConsoleBufferTests
 
         c.Ingest(Batch(c.Token, "p", null, Raw("log", "c")));
         Assert.True(c.Tail(0).Single().Seq > 2); // seq does not reset across a clear
+    }
+
+    [Fact]
+    public void Collector_currentPageLoadId_tracks_latest_ingested_page()
+    {
+        var c = new ConsoleCollector(100, () => 0);
+        Assert.Null(c.CurrentPageLoadId);                                    // null until the first event
+
+        c.Ingest(Batch(c.Token, "page-A", null, Raw("log", "a")));
+        Assert.Equal("page-A", c.CurrentPageLoadId);
+
+        c.Ingest(Batch(c.Token, "page-B", null, Raw("log", "b")));           // a reload → new page
+        Assert.Equal("page-B", c.CurrentPageLoadId);
+    }
+
+    [Fact]
+    public void TailJson_currentPageOnly_scopes_to_latest_page_and_explicit_pageLoad_wins()
+    {
+        var c = new ConsoleCollector(100, () => 0);
+        c.Ingest(Batch(c.Token, "page-A", null, Raw("log", "old")));
+        c.Ingest(Batch(c.Token, "page-B", null, Raw("log", "fresh")));
+
+        var current = Texts(c.TailJson("browser", true, 0, null, 0, 0, null, null, currentPageOnly: true));
+        Assert.Equal(new[] { "fresh" }, current);                           // scoped to the live page
+
+        var pinned = Texts(c.TailJson("browser", true, 0, null, 0, 0, null, "page-A", currentPageOnly: true));
+        Assert.Equal(new[] { "old" }, pinned);                              // explicit pageLoad overrides
+    }
+
+    [Fact]
+    public void TailJson_surfaces_currentPageLoadId_in_full_and_compact()
+    {
+        var c = new ConsoleCollector(100, () => 0);
+        c.Ingest(Batch(c.Token, "page-A", null, Raw("log", "a")));
+
+        foreach (var compact in new[] { false, true })
+        {
+            using var doc = JsonDocument.Parse(c.TailJson("browser", true, 0, null, 0, 0, null, null, compact: compact));
+            Assert.Equal("page-A", doc.RootElement.GetProperty("currentPageLoadId").GetString());
+        }
+    }
+
+    private static string[] Texts(string tailJson)
+    {
+        using var doc = JsonDocument.Parse(tailJson);
+        return doc.RootElement.GetProperty("events").EnumerateArray()
+            .Select(e => e.GetProperty("text").GetString()!).ToArray();
     }
 }

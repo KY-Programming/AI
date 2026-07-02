@@ -187,10 +187,10 @@ internal static class Program
             interactionActive = eval.InteractionActive,
             buildSeq = Interlocked.Read(ref Capture.BuildSeq),
         }, EvalJson), "application/json"));
-        app.MapGet("/console/tail", (int? lines, string? level, long? sinceSeq, string? grep, string? pageLoad, bool? compact, bool? appOnly) =>
+        app.MapGet("/console/tail", (int? lines, string? level, long? sinceSeq, string? grep, string? pageLoad, bool? compact, bool? appOnly, bool? dropFrameworkNoise, bool? currentPageOnly) =>
             Results.Content(collector.TailJson("browser", enabled: true,
                 lines is null or <= 0 ? 200 : lines.Value, level, sinceSeq ?? 0, sinceBuildSeq: 0,
-                grep, pageLoad, compact ?? false, appOnly ?? false), "application/json"));
+                grep, pageLoad, compact ?? false, appOnly ?? false, dropFrameworkNoise ?? false, currentPageOnly ?? false), "application/json"));
         app.MapPost("/console/clear", () =>
         {
             collector.Clear();

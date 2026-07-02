@@ -902,11 +902,76 @@
     Promise.resolve(valueOrPromise).then(function (p) { postResult(req.id, p); }, function (e) { postResult(req.id, errPayload(e)); });
   }
 
+  // Best-effort locate the Angular Router on a dev build (window.ng). Walks the components on the
+  // usual routing anchors and duck-types each instance's own properties for the Router (TS-private
+  // fields are still enumerable own props): a value exposing navigateByUrl + createUrlTree. Returns
+  // the Router instance or null (production build / not found → caller falls back to the History API).
+  function findRouter() {
+    var ng = window.ng;
+    if (!ng || typeof ng.getComponent !== "function") return null;
+    var els = document.querySelectorAll("router-outlet, app-root, [ng-version]");
+    for (var i = 0; i < els.length; i++) {
+      var cmp = null;
+      try { cmp = ng.getComponent(els[i]); } catch (e) {}
+      if (!cmp) continue;
+      var keys;
+      try { keys = Object.keys(cmp); } catch (e) { continue; }
+      for (var j = 0; j < keys.length; j++) {
+        var v;
+        try { v = cmp[keys[j]]; } catch (e) { continue; }
+        if (v && typeof v.navigateByUrl === "function" && typeof v.createUrlTree === "function") return v;
+      }
+    }
+    return null;
+  }
+
+  // navigate: change the SPA route without a full reload. Prefer the real Router (router.navigateByUrl,
+  // strategy-agnostic); fall back to the History API (pushState/replaceState + a synthetic popstate the
+  // default PathLocationStrategy picks up, or the hash when the app is already on a hash route). Returns
+  // a Promise<payload> with the settled location so the agent can confirm the destination (even a guard
+  // redirect). Reports which `method` drove it.
+  function doNavigate(req) {
+    var path = req && req.path;
+    var from = location.href;
+    if (!path) return { ok: false, error: "path is required" };
+
+    var router = null;
+    try { router = findRouter(); } catch (e) { router = null; }
+    if (router) {
+      return Promise.resolve()
+        .then(function () { return router.navigateByUrl(path); })
+        .then(
+          function (navigated) { return { ok: true, from: from, to: location.href, navigated: navigated !== false, method: "router" }; },
+          function (e) { return { ok: false, from: from, to: location.href, method: "router", error: String((e && e.message) || e) }; }
+        );
+    }
+
+    // Fallback: History API. Use the hash when the app is already on a hash route (hashchange fires on
+    // its own); otherwise pushState/replaceState and dispatch popstate for the router to react to.
+    try {
+      var hashMode = /^#\/?/.test(location.hash || "");
+      if (hashMode) {
+        location.hash = path.charAt(0) === "#" ? path : "#" + (path.charAt(0) === "/" ? path : "/" + path);
+      } else {
+        history[req.replace ? "replaceState" : "pushState"](null, "", path);
+        window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+      }
+    } catch (e) {
+      return { ok: false, from: from, to: location.href, method: "history", error: String((e && e.message) || e) };
+    }
+    return new Promise(function (resolve) {
+      setTimeout(function () {
+        resolve({ ok: true, from: from, to: location.href, navigated: location.href !== from, method: "history" });
+      }, 150);
+    });
+  }
+
   function dispatchEval(req) {
     try {
       if (!req || !req.kind) return;
       switch (req.kind) {
         case "reload": setTimeout(function () { try { location.reload(); } catch (e) {} }, 0); return;
+        case "navigate": postDo(req, doNavigate(req)); return;
         case "overlay": postResult(req.id, doOverlay(req)); return;
         case "batch": postDo(req, doBatch(req)); return;
         case "query": postDo(req, doQuery(req)); return;

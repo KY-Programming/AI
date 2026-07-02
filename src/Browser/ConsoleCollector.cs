@@ -53,6 +53,12 @@ public sealed class ConsoleCollector
     public int Count => _log.Count;
     public long Dropped => _log.Dropped;
 
+    // The page-load id of the most recently ingested batch — i.e. the live page. Reliable because the
+    // snippet posts an "[kyai] console capture attached" event on every page load, so the newest event
+    // is always from the current page. Null until the first event. Powers console_tail currentPageOnly
+    // (scope to the page you're looking at now) and is surfaced in every TailJson response.
+    public string? CurrentPageLoadId { get; private set; }
+
     // Ingest a posted batch. Returns the number of events stored. A token mismatch rejects the
     // whole batch (foreign data, not ours — not counted as a drop). Overflow past the per-batch
     // cap is dropped and counted.
@@ -84,13 +90,15 @@ public sealed class ConsoleCollector
             _log.Append(seq => Enrich(seq, raw, pageLoadId, buildSeq, receivedAt));
             stored++;
         }
+        if (stored > 0) CurrentPageLoadId = pageLoadId;
         return stored;
     }
 
     public IReadOnlyList<ConsoleEvent> Tail(
         int count, string? minLevel = null, long sinceSeq = 0, long sinceBuildSeq = 0,
-        string? grep = null, string? pageLoadId = null, bool dropTransportNoise = false) =>
-        _log.Tail(count, minLevel, sinceSeq, sinceBuildSeq, grep, pageLoadId, dropTransportNoise);
+        string? grep = null, string? pageLoadId = null, bool dropTransportNoise = false,
+        bool dropFrameworkNoise = false) =>
+        _log.Tail(count, minLevel, sinceSeq, sinceBuildSeq, grep, pageLoadId, dropTransportNoise, dropFrameworkNoise);
 
     public void Clear() => _log.Clear();
 
@@ -132,13 +140,17 @@ public sealed class ConsoleCollector
     }
 
     // JSON the MCP console_tail tool returns. `dropped` is surfaced inline so the agent sees a flood
-    // without a second call. compact slims each event (drops args when text carries them, truncates
-    // stacks, omits null fields); appOnly drops dev-transport churn (SignalR/WebSocket/[vite]).
+    // without a second call, and `currentPageLoadId` so it can tell which page load is live without a
+    // second call. compact slims each event (drops args when text carries them, truncates stacks, omits
+    // null fields); appOnly drops dev-transport churn (SignalR/WebSocket/[vite]); frameworkNoise drops
+    // known-benign framework banners; currentPageOnly scopes to the live page load (the one-call "did my
+    // reload clear it?" check) unless an explicit pageLoadId was given (that wins).
     public string TailJson(string name, bool enabled,
         int count, string? minLevel, long sinceSeq, long sinceBuildSeq, string? grep, string? pageLoadId,
-        bool compact = false, bool appOnly = false)
+        bool compact = false, bool appOnly = false, bool frameworkNoise = false, bool currentPageOnly = false)
     {
-        var events = Tail(count, minLevel, sinceSeq, sinceBuildSeq, grep, pageLoadId, appOnly);
+        if (string.IsNullOrEmpty(pageLoadId) && currentPageOnly) pageLoadId = CurrentPageLoadId;
+        var events = Tail(count, minLevel, sinceSeq, sinceBuildSeq, grep, pageLoadId, appOnly, frameworkNoise);
         if (compact)
             return JsonSerializer.Serialize(new
             {
@@ -148,6 +160,7 @@ public sealed class ConsoleCollector
                 returned = events.Count,
                 total = Count,
                 dropped = Dropped,
+                currentPageLoadId = CurrentPageLoadId,
                 events = events.Select(ToCompact),
             }, CompactJson);
 
@@ -158,6 +171,7 @@ public sealed class ConsoleCollector
             returned = events.Count,
             total = Count,
             dropped = Dropped,
+            currentPageLoadId = CurrentPageLoadId,
             events,
         }, Json);
     }

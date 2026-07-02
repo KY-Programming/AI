@@ -82,7 +82,8 @@ file-based allow-list — tools are toggled in the editor's UI):
   "mcp__ky-ai-browser__start_interaction", "mcp__ky-ai-browser__stop_interaction",
   "mcp__ky-ai-browser__click", "mcp__ky-ai-browser__move", "mcp__ky-ai-browser__send_key",
   "mcp__ky-ai-browser__type_text", "mcp__ky-ai-browser__scroll", "mcp__ky-ai-browser__focus",
-  "mcp__ky-ai-browser__wait_for", "mcp__ky-ai-browser__reload_page", "mcp__ky-ai-browser__batch"
+  "mcp__ky-ai-browser__wait_for", "mcp__ky-ai-browser__reload_page", "mcp__ky-ai-browser__navigate",
+  "mcp__ky-ai-browser__batch"
 ] } }
 ```
 
@@ -116,7 +117,7 @@ browser has the app open.
 
 | Tool | Args | Purpose |
 |---|---|---|
-| `console_tail` | `lines?`, `level?`, `sinceSeq?`, `grep?`, `pageLoad?`, `compact?`, `appOnly?` | recent browser console events: `{seq, level, args, text, source, line, col, stack, timestamp, pageLoadId}` + `dropped` + `enabled`. `compact` drops `args` when `text` carries them and clips stacks (much smaller payloads); `appOnly` drops transport churn (SignalR/WebSocket negotiation, `[vite]` HMR socket noise) |
+| `console_tail` | `lines?`, `level?`, `sinceSeq?`, `grep?`, `pageLoad?`, `currentPageOnly?`, `compact?`, `appOnly?`, `dropFrameworkNoise?` | recent browser console events: `{seq, level, args, text, source, line, col, stack, timestamp, pageLoadId}` + `dropped` + `enabled` + `currentPageLoadId` (the live page load — tell fresh from stale without a second call). `currentPageOnly` scopes to that page (the one-call "did my reload clear it?" check; an explicit `pageLoad` wins). `compact` drops `args` when `text` carries them and clips stacks (much smaller payloads); `appOnly` drops transport churn (SignalR/WebSocket negotiation, `[vite]` HMR socket noise); `dropFrameworkNoise` **separately** drops known-benign framework banners (DevExtreme/Inferno production-build notice, the Angular dev-mode banner, a dev-only router "Transition was aborted") — set both for a fully clean channel |
 | `console_clear` | — | clear the buffer (e.g. before reproducing an issue) |
 
 ## Inspect (ungated)
@@ -144,7 +145,8 @@ user a fixed red overlay with an animated cursor so they can see the agent drivi
 | `scroll` | `selector?`, `x?`, `y?` | scrollIntoView, scroll within an element, or window.scrollTo |
 | `focus` | `selector?`, `blur?` | focus (or blur) an element |
 | `wait_for` | `selector?` \| `expression?`, `timeoutMs?`, `pollMs?` | poll in-page until an element appears / an expression is truthy — avoid acting before render |
-| `reload_page` | `timeoutMs?` | **full** reload — re-instantiate everything after a build that changed code (HMR may keep stale instances). Not navigation (see note below the table) |
+| `reload_page` | `timeoutMs?` | **full** reload — re-instantiate everything after a build that changed code (HMR may keep stale instances). Not navigation — use `navigate` to change route without a reload |
+| `navigate` (ungated) | `path`, `replace?`, `timeoutMs?` | change the SPA route **without** a hard reload — finds the Angular `Router` on a dev build and calls `navigateByUrl(path)`, falling back to the History API (pushState + synthetic popstate) otherwise. Returns `{ok, from, to, navigated, method:'router'\|'history'}`; `to` is the settled URL (confirm even a guard redirect). Services/singletons stay live — reach for `reload_page` when you need those re-instantiated |
 | `batch` | `steps[]`, `timeoutMs?` | run an ordered sequence of actions in **one** page round-trip — much faster for multi-step flows. Each step is `{action, …that action's fields}`, `action ∈ click \| move \| key \| type \| wait \| scroll \| focus \| styles \| query \| component \| eval`; steps run in order and **stop at the first failure**. Returns `{ok, count, results:[…], failedAt?}`. Manipulation steps still require `start_interaction` first |
 
 Every interaction returns the element it actually targeted so you can confirm you hit the right
@@ -152,10 +154,12 @@ thing. That `target` is **minimal by default** (`{tag, id?, text}`) — enough t
 cheap on multi-step flows; pass **`detail:true`** on any interaction tool for the full element
 (classes, attributes, rect, clipped `outerHTML`).
 
-> **There is no `navigate` tool — by design.** This drives a *live, already-loaded* SPA, so to change
-> route you do what a user does: `click` a nav link / `routerLink` (then `wait_for` `location.pathname`
-> to settle, as in the recipe below), or drive the router from `evaluate_js`. `reload_page` is a *full*
-> page reload, not client-side navigation — reach for it only after a code change, not to move around.
+> **`navigate` vs `reload_page`.** `navigate` changes route *client-side* — it drives the Angular
+> `Router` (History-API fallback) without tearing down the app, so already-created services/singletons
+> stay live; follow with `wait_for` `location.pathname` (or a destination selector) if the route
+> resolves async. You can still route the user's way — `click` a nav link / `routerLink` — when you
+> want the real DOM path. `reload_page` is a *full* page reload (a new `pageLoadId`); reach for it only
+> after a code change that needs everything re-instantiated, not to move around.
 
 > **Synthetic-event caveat.** Interaction events are dispatched in-page, so `isTrusted` is `false`:
 > they fire JS handlers but do **not** drive CSS `:hover`, nor user-activation-gated APIs
@@ -192,6 +196,11 @@ wait_for({ expression: 'location.pathname==="/elements/dropdown"' })   // don't 
 // …read state to confirm…
 stop_interaction()
 ```
+
+To *just change route* (no reload, no overlay needed) skip the click: `navigate({ path: '/elements/dropdown' })`
+drives the router directly and returns the settled `to` URL. Since it doesn't reload, the `pageLoadId`
+is unchanged — to read only what the new route logged, page from the prior tail's max `seq` with
+`console_tail({ sinceSeq })`. (`currentPageOnly` segments *reloads*, e.g. after `reload_page`.)
 
 **3. Target by visible text.** `click` takes `text` directly (`within` to scope, `exact:false` for
 substring) — no need to read a rect and click a point:

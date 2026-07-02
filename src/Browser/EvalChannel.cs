@@ -10,6 +10,7 @@ namespace KY.AI.Browser;
 //   evaluate_js → kind "eval"   (run an expression, serialize the value)
 //   query_dom   → kind "query"  (querySelector(All) + describe the elements)
 //   reload_page → kind "reload" (the page navigates away; completed at hand-off, not by a result)
+//   navigate    → kind "navigate" (drive the SPA router / History API; stays on the page, posts a result)
 //   click       → kind "click"  (synthetic pointer/mouse sequence at a selector or coordinate)
 //   move        → kind "move"   (a pointermove path with enter/leave bookkeeping over a duration)
 //   send_key    → kind "key"    (synthetic keydown/keypress/keyup)
@@ -165,6 +166,7 @@ internal sealed class EvalChannel
 //   eval   — Expression [, AwaitPromise]
 //   query  — Selector [, All, Limit]
 //   reload — (none)
+//   navigate — Path [, Replace]
 //   eval   — Expression [, AwaitPromise, AsJson]
 //   click  — Selector | Text(+Within,Exact) | (X, Y) [, Button, Ctrl/Shift/Alt/Meta]
 //   move   — (ToX, ToY) [, FromX, FromY, DurationMs, Steps]
@@ -186,6 +188,10 @@ internal sealed record EvalRequest
     public string? Expression { get; init; }
     public bool AwaitPromise { get; init; }
     public bool AsJson { get; init; }            // eval: return real structured JSON, not a string rendering
+
+    // navigate — the target route/URL, and whether to replaceState (no new history entry) in the fallback
+    public string? Path { get; init; }
+    public bool Replace { get; init; }
 
     // query / click / key / type / wait / scroll / focus / styles / component — the target element
     public string? Selector { get; init; }

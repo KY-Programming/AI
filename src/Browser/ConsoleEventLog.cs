@@ -61,9 +61,11 @@ internal sealed class ConsoleEventLog
     //   grep         — case-insensitive substring over Text + Stack
     //   pageLoadId   — keep only events from this page load (segment one reload/HMR boundary)
     //   dropTransportNoise — drop SignalR/WebSocket negotiation + [vite] HMR socket churn (see TransportNoise)
+    //   dropFrameworkNoise — drop known-benign framework boilerplate (Inferno/Angular banners, …; see FrameworkNoise)
     public IReadOnlyList<ConsoleEvent> Tail(
         int count, string? minLevel = null, long sinceSeq = 0, long sinceBuildSeq = 0,
-        string? grep = null, string? pageLoadId = null, bool dropTransportNoise = false)
+        string? grep = null, string? pageLoadId = null, bool dropTransportNoise = false,
+        bool dropFrameworkNoise = false)
     {
         lock (_sync)
         {
@@ -75,6 +77,7 @@ internal sealed class ConsoleEventLog
             if (sinceBuildSeq > 0) q = q.Where(e => e.BuildSeq >= sinceBuildSeq);
             if (!string.IsNullOrEmpty(pageLoadId)) q = q.Where(e => e.PageLoadId == pageLoadId);
             if (dropTransportNoise) q = q.Where(e => !TransportNoise.IsNoise(e));
+            if (dropFrameworkNoise) q = q.Where(e => !FrameworkNoise.IsNoise(e));
             if (!string.IsNullOrEmpty(grep))
                 q = q.Where(e =>
                     (e.Text?.Contains(grep, StringComparison.OrdinalIgnoreCase) ?? false) ||
@@ -105,6 +108,31 @@ internal static class TransportNoise
         "error: failed to start the connection",
         "[vite]",                                                   // [vite] connecting…/connected./server connection lost
         "ws-proxy",
+    };
+
+    public static bool IsNoise(ConsoleEvent e) => Match(e.Text) || Match(e.Stack);
+
+    private static bool Match(string? s)
+    {
+        if (string.IsNullOrEmpty(s)) return false;
+        foreach (var n in Needles)
+            if (s.Contains(n, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+}
+
+// Recognizes known-benign FRAMEWORK boilerplate that clutters the error/warn channel but says nothing
+// about the app's own health: library dev-mode banners and a dev-only router hiccup. console_tail
+// dropFrameworkNoise=true drops these. This is SEPARATE from appOnly (transport churn) — an agent
+// composes a fully clean channel by setting both. Deliberately narrow and curated: each needle is a
+// distinctive substring of a specific benign message, not a generic word that could hide a real bug.
+internal static class FrameworkNoise
+{
+    private static readonly string[] Needles =
+    {
+        "production build of inferno",                  // DevExtreme/Inferno "you are using a production build of Inferno…" banner
+        "transition was aborted",                       // dev-only router InvalidStateError during rapid navigation
+        "angular is running in development mode",        // Angular dev-mode banner
     };
 
     public static bool IsNoise(ConsoleEvent e) => Match(e.Text) || Match(e.Stack);
