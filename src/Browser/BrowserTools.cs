@@ -196,12 +196,12 @@ internal static class BrowserTools
 
     // ── interaction (synthetic; see the type header) ──
     //
-    // GATED: click/move/send_key/type_text/scroll/focus require start_interaction first, which shows
+    // GATED: click/move/send_key/type_text/scroll/focus/navigate require start_interaction first, which shows
     // the user a fixed red overlay with an animated cursor so they can see the agent driving the page.
     // Call stop_interaction when done. The gate is enforced by the capture instance (it owns the flag).
 
     [McpServerTool(Name = "start_interaction"), Description(
-        "Open supervised interaction — REQUIRED before click/move/send_key/type_text/scroll/focus. It draws " +
+        "Open supervised interaction — REQUIRED before click/move/send_key/type_text/scroll/focus/navigate. It draws " +
         "a fixed, non-interactable red frame over the app with a cursor icon, so the user can plainly see the " +
         "agent is driving the page; each action then animates that cursor (ripple on click, key cap on a key " +
         "press, the cursor gliding on move). Call stop_interaction when you're finished. Returns {ok, " +
@@ -217,7 +217,7 @@ internal static class BrowserTools
 
     [McpServerTool(Name = "stop_interaction"), Description(
         "Close supervised interaction and remove the overlay. Call this when you're done driving the page; " +
-        "afterwards click/move/send_key/type_text/scroll/focus are blocked again until the next " +
+        "afterwards click/move/send_key/type_text/scroll/focus/navigate are blocked again until the next " +
         "start_interaction. Returns {ok, shown:false}. Omit project when only one capture is registered.")]
     public static Task<string> StopInteraction(
         [Description("Max ms to wait for the page (default 3000)")] int timeoutMs = 3000,
@@ -409,9 +409,10 @@ internal static class BrowserTools
         "the History API (pushState + a synthetic popstate the default PathLocationStrategy picks up). Because " +
         "it does not reload, already-created services/singletons stay live (use reload_page when you need those " +
         "re-instantiated). Returns {ok, from, to, navigated, method:'router'|'history'}; `to` is the settled " +
-        "location.href so you can confirm the destination even if a route guard redirected. Not gated behind " +
-        "start_interaction. If the route resolves async, follow with `wait_for` on a destination selector or " +
-        "location.pathname. Omit project when only one capture is registered.")]
+        "location.href so you can confirm the destination even if a route guard redirected. REQUIRES " +
+        "start_interaction first, like click/move/send_key/type_text/scroll/focus — it changes what's on screen, " +
+        "so the user needs the same visible overlay. If the route resolves async, follow with `wait_for` on a " +
+        "destination selector or location.pathname. Omit project when only one capture is registered.")]
     public static Task<string> Navigate(
         [Description("Target route/URL to navigate to, e.g. \"/orders/42\" (router path or same-origin URL)")] string path,
         [Description("Use replaceState instead of pushState in the History fallback (no new history entry)")] bool replace = false,

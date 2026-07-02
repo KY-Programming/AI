@@ -310,6 +310,7 @@
   // returns a payload, or a Promise<payload> when awaitPromise resolves a thenable
   function doEval(req) {
     try {
+      overlay.hint("reading: " + short(req.expression, 60));
       var indirect = eval;                 // indirect eval → evaluate in global scope
       var result = indirect(req.expression);
       if (req.awaitPromise && result && typeof result.then === "function") {
@@ -352,6 +353,7 @@
 
   function doQuery(req) {
     try {
+      overlay.hint("reading: " + short(req.selector, 60));
       var nodes = document.querySelectorAll(req.selector);
       var count = nodes.length;
       var max = req.all ? Math.min(count, req.limit || 20) : Math.min(count, 1);
@@ -428,6 +430,7 @@
   // (cheap), so the discovery surface stays complete — anything in `objects` is expandable via fields.
   function readComponent(target, opts) {
     opts = opts || {};
+    overlay.hint("reading component: " + short(typeof target === "string" ? target : "", 60));
     var el = (typeof target === "string") ? document.querySelector(target) : target;
     if (!el) return { ok: false, error: "no element matches " + (typeof target === "string" ? "selector " + target : "target") };
     var ng = window.ng;
@@ -598,19 +601,27 @@
    * its document.querySelectorAll never touch it. All best-effort — never throws into the app.
    */
   var OVERLAY_CSS =
-    ".kyai-frame{position:absolute;inset:0;box-sizing:border-box;border:3px solid rgba(229,57,53,.95);}" +
-    ".kyai-badge{position:absolute;top:8px;left:50%;transform:translateX(-50%);font:600 11px/1.4 system-ui,sans-serif;color:#fff;background:rgba(229,57,53,.95);padding:3px 10px;border-radius:10px;letter-spacing:.3px;white-space:nowrap;}" +
-    ".kyai-cursor{position:absolute;left:0;top:0;width:24px;height:24px;will-change:transform;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5));}" +
+    ".kyai-frame{position:absolute;inset:0;box-sizing:border-box;border:3px solid rgba(229,57,53,.95);display:none;}" +
+    ".kyai-badge{position:absolute;top:8px;left:50%;transform:translateX(-50%);font:600 11px/1.4 system-ui,sans-serif;color:#fff;background:rgba(229,57,53,.95);padding:3px 10px;border-radius:10px;letter-spacing:.3px;white-space:nowrap;max-width:70vw;overflow:hidden;text-overflow:ellipsis;display:none;}" +
+    ".kyai-cursor{position:absolute;left:0;top:0;width:24px;height:24px;will-change:transform;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5));display:none;}" +
     ".kyai-cursor svg{display:block;}" +
     ".kyai-ripple{position:absolute;width:10px;height:10px;margin:-5px 0 0 -5px;border:2px solid rgba(229,57,53,.9);border-radius:50%;animation:kyai-rip .6s ease-out forwards;}" +
     "@keyframes kyai-rip{from{transform:scale(.3);opacity:.9}to{transform:scale(4.5);opacity:0}}" +
-    ".kyai-key{position:absolute;transform:translate(14px,-6px);font:600 12px/1 ui-monospace,monospace;color:#222;background:#fafafa;border:1px solid #bbb;border-bottom-width:3px;border-radius:6px;padding:5px 8px;box-shadow:0 2px 4px rgba(0,0,0,.3);white-space:nowrap;animation:kyai-key .8s ease-out forwards;}" +
-    "@keyframes kyai-key{0%{opacity:0;transform:translate(14px,2px)}15%{opacity:1;transform:translate(14px,-6px)}80%{opacity:1;transform:translate(14px,-10px)}100%{opacity:0;transform:translate(14px,-18px)}}";
+    ".kyai-clabel{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%) scale(.92);font:600 15px/1.4 system-ui,sans-serif;color:#fff;background:rgba(229,57,53,.95);padding:8px 16px;border-radius:8px;letter-spacing:.2px;white-space:nowrap;max-width:80vw;overflow:hidden;text-overflow:ellipsis;box-shadow:0 4px 14px rgba(0,0,0,.35);animation:kyai-clabel 2s ease-out forwards;}" +
+    "@keyframes kyai-clabel{0%{opacity:0;transform:translate(-50%,-50%) scale(.92)}8%{opacity:1;transform:translate(-50%,-50%) scale(1)}85%{opacity:1}100%{opacity:0;transform:translate(-50%,-50%) scale(.97)}}";
   var CURSOR_SVG = '<svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">' +
     '<path d="M4 2l6 14 2.2-5.6L18 8z" fill="#fff" stroke="#e53935" stroke-width="1.6" stroke-linejoin="round"/></svg>';
 
+  /*
+   * Supervision overlay — a fixed, non-interactable red frame + cursor, shown only while a session is
+   * open (start_interaction..stop_interaction). The top-center badge is shared with the read-only
+   * indicator below: only one badge ever exists, so a read that happens mid-session doesn't lay a
+   * second pill on top of "● ky-ai agent interacting" — it just borrows the same spot for a moment and
+   * hands it back. Lives in a shadow root so the app's CSS/querySelectorAll never touch it.
+   */
   var overlay = (function () {
-    var host = null, root = null, cursor = null, shown = false, cx = 0, cy = 0;
+    var host = null, root = null, frame = null, cursor = null, badge = null;
+    var shown = false, cx = 0, cy = 0, curLabel = null, curLabelTimer = null, hintTimer = null;
     function vw() { return window.innerWidth || (document.documentElement || {}).clientWidth || 0; }
     function vh() { return window.innerHeight || (document.documentElement || {}).clientHeight || 0; }
 
@@ -623,8 +634,8 @@
       s.margin = "0"; s.padding = "0"; s.border = "0"; s.pointerEvents = "none"; s.zIndex = "2147483647";
       root = host.attachShadow ? host.attachShadow({ mode: "open" }) : host;
       var style = document.createElement("style"); style.textContent = OVERLAY_CSS; root.appendChild(style);
-      var frame = document.createElement("div"); frame.className = "kyai-frame"; root.appendChild(frame);
-      var badge = document.createElement("div"); badge.className = "kyai-badge"; badge.textContent = "● ky-ai agent interacting"; root.appendChild(badge);
+      frame = document.createElement("div"); frame.className = "kyai-frame"; root.appendChild(frame);
+      badge = document.createElement("div"); badge.className = "kyai-badge"; root.appendChild(badge);
       cursor = document.createElement("div"); cursor.className = "kyai-cursor"; cursor.innerHTML = CURSOR_SVG; root.appendChild(cursor);
       put(Math.round(vw() / 2), Math.round(vh() / 2), false);
       (document.body || document.documentElement).appendChild(host);
@@ -644,22 +655,64 @@
         (function (n) { setTimeout(function () { try { n.remove(); } catch (e) {} }, 800); })(r);
       }
     }
-    function keycap(label) {
+    // Replaces (rather than stacks) the previous label — a burst of fast actions (e.g. several key
+    // presses in a row) would otherwise pile up overlapping, unreadable text at the same spot.
+    function clabel(text) {
       if (!root) return;
-      var k = document.createElement("div");
-      k.className = "kyai-key"; k.textContent = label; k.style.left = cx + "px"; k.style.top = cy + "px";
-      root.appendChild(k);
-      setTimeout(function () { try { k.remove(); } catch (e) {} }, 850);
+      if (curLabelTimer) { clearTimeout(curLabelTimer); curLabelTimer = null; }
+      if (curLabel) { try { curLabel.remove(); } catch (e) {} curLabel = null; }
+      var el = document.createElement("div");
+      el.className = "kyai-clabel"; el.textContent = text;
+      root.appendChild(el);
+      curLabel = el;
+      curLabelTimer = setTimeout(function () { try { el.remove(); } catch (e) {} if (curLabel === el) curLabel = null; curLabelTimer = null; }, 2000);
+    }
+    // The one top-center badge: while a session is open it idles on "● ky-ai agent interacting"; a
+    // read hint borrows it for HINT_MS then hands it back (or, with no session open, just disappears —
+    // there's no persistent state to return to, which itself reads as "no session").
+    var SESSION_TEXT = "● ky-ai agent interacting", HINT_MS = 2000;
+    function setHint(text) {
+      ensure();
+      if (hintTimer) { clearTimeout(hintTimer); hintTimer = null; }
+      badge.textContent = (shown ? "● " : "○ ") + text;
+      badge.style.display = "block";
+      hintTimer = setTimeout(function () {
+        hintTimer = null;
+        if (shown) { badge.textContent = SESSION_TEXT; } else { badge.style.display = "none"; }
+      }, HINT_MS);
     }
     return {
-      show: function () { try { ensure(); host.style.display = "block"; shown = true; } catch (e) {} },
-      hide: function () { try { if (host) host.style.display = "none"; shown = false; } catch (e) {} },
+      // Persistent, supervised session — started by start_interaction, cleared by stop_interaction.
+      // All manipulation kinds (click/move/key/type/scroll/focus/navigate) are server-gated behind this,
+      // so by the time any of them runs here the frame is already showing.
+      show: function () {
+        try {
+          ensure(); shown = true;
+          frame.style.display = "block"; cursor.style.display = "block";
+          if (!hintTimer) { badge.textContent = SESSION_TEXT; badge.style.display = "block"; }
+        } catch (e) {}
+      },
+      hide: function () {
+        try {
+          shown = false;
+          if (host) { frame.style.display = "none"; cursor.style.display = "none"; }
+          if (!hintTimer && badge) badge.style.display = "none";
+        } catch (e) {}
+      },
       shown: function () { return shown; },
       cursorTo: function (x, y) { try { if (shown) put(x, y, true); } catch (e) {} },
       clickFx: function (x, y) { try { if (shown) { put(x, y, true); ripple(x, y); } } catch (e) {} },
-      keyFx: function (label) { try { if (shown) keycap(label); } catch (e) {} }
+      // Short, center-screen label for a manipulate action ("insert text: xxx", "[ENTER]", "navigate to: xxx").
+      centerLabel: function (text) { try { if (shown) clabel(text); } catch (e) {} },
+      // Read-only hint ("reading: .selector") — shares the one badge above instead of a second pill.
+      hint: function (text) { try { setHint(text); } catch (e) {} }
     };
   })();
+
+  function short(text, max) {
+    var s = String(text || "");
+    return s.length > max ? s.slice(0, max) + "…" : s;
+  }
 
   // Reconcile the overlay with the server's interaction flag (idempotent) — restores it after a reload.
   function reconcileOverlay(active) {
@@ -669,11 +722,11 @@
     } catch (e) {}
   }
 
-  // Compact label for a key press, e.g. "Ctrl+S", "⏎", "Esc".
-  function keyLabel(req) {
-    var mods = (req.ctrl ? "Ctrl+" : "") + (req.alt ? "Alt+" : "") + (req.shift ? "Shift+" : "") + (req.meta ? "Meta+" : "");
-    var key = req.key === "Enter" ? "⏎" : req.key === "Escape" ? "Esc" : req.key === " " ? "Space" : req.key;
-    return mods + key;
+  // Center-screen label for a key press, e.g. "[ENTER]", "[CTRL+S]", "[ESC]".
+  function keyCenterLabel(req) {
+    var mods = (req.ctrl ? "CTRL+" : "") + (req.alt ? "ALT+" : "") + (req.shift ? "SHIFT+" : "") + (req.meta ? "META+" : "");
+    var key = req.key === " " ? "SPACE" : String(req.key || "").toUpperCase();
+    return "[" + mods + key + "]";
   }
 
   function doClick(req) {
@@ -682,7 +735,7 @@
       if (t.badArgs) return { ok: false, error: "click requires selector, text, or x,y" };
       if (!t.el) return { ok: false, error: "no element matches " + (req.selector ? "selector" : req.text ? "text" : "point"), selector: req.selector, text: req.text };
       var el = t.el, x = t.x, y = t.y;
-      overlay.clickFx(x, y);
+      overlay.clickFx(x, y);   // ripple at the click point already shows this — no need for a center label too
       var btn = req.button === "right" ? 2 : req.button === "middle" ? 1 : 0;
       var opts = { button: btn, buttons: 1, ctrl: req.ctrl, shift: req.shift, alt: req.alt, meta: req.meta };
       fire(el, "pointerover", x, y, opts); fire(el, "pointerenter", x, y, { bubbles: false });
@@ -739,7 +792,7 @@
       try { if (req.selector && el.focus) el.focus(); } catch (e) {}
       var init = { bubbles: true, cancelable: true, composed: true, key: req.key, code: req.code || "", ctrlKey: !!req.ctrl, shiftKey: !!req.shift, altKey: !!req.alt, metaKey: !!req.meta };
       function kev(type) { try { return new KeyboardEvent(type, init); } catch (e) { return null; } }
-      overlay.keyFx(keyLabel(req));
+      overlay.centerLabel(keyCenterLabel(req));
       var d = kev("keydown"); if (d) el.dispatchEvent(d);
       if (req.key.length === 1) { var pr = kev("keypress"); if (pr) el.dispatchEvent(pr); } // printable only
       var u = kev("keyup"); if (u) el.dispatchEvent(u);
@@ -763,7 +816,7 @@
       if (!el) return { ok: false, error: "no element matches selector", selector: req.selector };
       try { if (el.focus) el.focus(); } catch (e) {}
       var text = req.text == null ? "" : String(req.text);
-      overlay.keyFx(text.length > 12 ? text.slice(0, 12) + "…" : (text || "⌫"));
+      overlay.centerLabel(text ? "insert text: " + (text.length > 40 ? text.slice(0, 40) + "…" : text) : "clear text");
       var tag = (el.tagName || "").toUpperCase();
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
         setNativeValue(el, req.append ? ((el.value || "") + text) : text);
@@ -784,6 +837,7 @@
   function doWait(req) {
     return new Promise(function (resolve) {
       try {
+        overlay.hint("waiting for: " + short(req.selector || req.expression, 60));
         var deadline = Date.now() + (req.timeoutMs || 5000);
         var pollMs = Math.max(20, req.pollMs || 100);
         function check() {
@@ -804,6 +858,7 @@
 
   function doScroll(req) {
     try {
+      overlay.centerLabel("scroll");
       if (req.selector) {
         var el = document.querySelector(req.selector);
         if (!el) return { ok: false, error: "no element matches selector", selector: req.selector };
@@ -820,11 +875,13 @@
     try {
       if (req.blur) {
         var b = req.selector ? document.querySelector(req.selector) : document.activeElement;
+        overlay.centerLabel("blur");
         try { if (b && b.blur) b.blur(); } catch (e) {}
         return { ok: true, action: "blur", target: b ? describeEl(b, req.detail) : null };
       }
       var el = document.querySelector(req.selector);
       if (!el) return { ok: false, error: "no element matches selector", selector: req.selector };
+      overlay.centerLabel("focus");
       try { var r = el.getBoundingClientRect(); overlay.cursorTo(Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2)); } catch (e) {}
       try { if (el.focus) el.focus(); } catch (e) {}
       return { ok: true, action: "focus", focused: document.activeElement === el, target: describeEl(el, req.detail) };
@@ -835,6 +892,7 @@
   function doStyles(req) {
     try {
       if (!req.selector) return { ok: false, error: "styles requires a selector" };
+      overlay.hint("reading styles: " + short(req.selector, 60));
       var el = document.querySelector(req.selector);
       if (!el) return { ok: false, error: "no element matches selector", selector: req.selector };
       var cs = window.getComputedStyle(el);
@@ -934,6 +992,7 @@
     var path = req && req.path;
     var from = location.href;
     if (!path) return { ok: false, error: "path is required" };
+    overlay.centerLabel("navigate to: " + path);
 
     var router = null;
     try { router = findRouter(); } catch (e) { router = null; }

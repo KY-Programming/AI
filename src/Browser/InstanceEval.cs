@@ -16,7 +16,7 @@ internal static class InstanceEval
     };
 
     public static bool IsManipulationKind(string? kind) =>
-        kind is "click" or "move" or "key" or "type" or "scroll" or "focus";
+        kind is "click" or "move" or "key" or "type" or "scroll" or "focus" or "navigate";
 
     // Gate, then enqueue + await. `ch` is null only if capture isn't running (defensive — an instance
     // always has its channel); waitMs is how long to park the call waiting on the page.
