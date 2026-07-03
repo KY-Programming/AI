@@ -121,7 +121,13 @@ internal static class Program
         string ngName;
         try
         {
-            var found = await DiscoverNgAsync(ngHubPort, project);
+            // When launched via `ky-ai-ng serve --after-start`, our launch (first build settled) and
+            // ng's own hub registration (a separate fire-and-forget retry loop) are unsynchronized — ng
+            // can still be mid-registration when we ask. Give that race a few seconds to resolve instead
+            // of failing on the first miss; a manual invocation (no --started-by) still fails fast.
+            var found = startedBy is null
+                ? await DiscoverNgAsync(ngHubPort, project)
+                : await DiscoverNgWithRetryAsync(ngHubPort, project, TimeSpan.FromSeconds(5));
             if (found is null)
             {
                 Console.Error.WriteLine(
@@ -368,6 +374,20 @@ internal static class Program
         if (regs.Count == 1) return (regs[0].name!, regs[0].url!);
         throw new InvalidOperationException(
             $"multiple frontends registered ({string.Join(", ", regs.Select(r => r.name))}); pass --project <name>.");
+    }
+
+    // Retries DiscoverNgAsync (hub not up yet, or ng not registered yet) until it finds a match or
+    // `timeout` elapses. A genuine ambiguity (multiple frontends, no --project) is not transient —
+    // propagate it immediately instead of retrying it out.
+    private static async Task<(string Name, string Url)?> DiscoverNgWithRetryAsync(int hubPort, string? project, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (true)
+        {
+            var found = await DiscoverNgAsync(hubPort, project);
+            if (found is not null || DateTime.UtcNow >= deadline) return found;
+            await Task.Delay(TimeSpan.FromMilliseconds(250));
+        }
     }
 
     // ── browser-hub registration (mirrors SupervisorHost/TerminalHost) ──
