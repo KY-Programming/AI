@@ -191,6 +191,8 @@ internal static class Program
             running = true,
             pageConnected = eval.PageConnected,
             interactionActive = eval.InteractionActive,
+            paused = eval.Paused,
+            killed = eval.Killed,
             buildSeq = Interlocked.Read(ref Capture.BuildSeq),
         }, EvalJson), "application/json"));
         app.MapGet("/console/tail", (int? lines, string? level, long? sinceSeq, string? grep, string? pageLoad, bool? compact, bool? appOnly, bool? dropFrameworkNoise, bool? currentPageOnly) =>
@@ -201,6 +203,27 @@ internal static class Program
         {
             collector.Clear();
             return Results.Content(JsonSerializer.Serialize(new { ok = true, action = "console_clear" }, EvalJson), "application/json");
+        });
+        // Blocks until the human clicks the paused pill's resume, or times out — same shape as ng's
+        // /wait-for-build (a plain poll loop the tool call just waits on), so an agent can wait for the
+        // human's go-ahead instead of retrying start_interaction itself. A kill is stronger than a pause
+        // and is never worth waiting out (WaitForResumeAsync returns false immediately for one), so the
+        // response calls that out explicitly instead of just looking like an ordinary timeout.
+        app.MapPost("/wait-for-resume", async (HttpContext ctx, int? timeout) =>
+        {
+            var cleared = await eval.WaitForResumeAsync(timeout ?? 60_000, ctx.RequestAborted);
+            var killed = eval.Killed;
+            return Results.Content(JsonSerializer.Serialize(new
+            {
+                ok = cleared,
+                timedOut = !cleared && !killed,
+                killed,
+                paused = eval.Paused,
+                interactionActive = eval.InteractionActive,
+                error = killed
+                    ? "the user stopped the session completely (not just paused) — do not call this again; wait for them in chat instead"
+                    : cleared ? null : "still paused — call wait_for_resume again to keep waiting",
+            }, EvalJson), "application/json");
         });
         // Every page action arrives here as an EvalRequest the hub already built from the MCP args.
         // InstanceEval owns the interaction gate (its flag lives on the channel), then queues + awaits.
@@ -246,10 +269,10 @@ internal static class Program
         {
             Cors(ctx);
             if (!string.Equals(ctx.Request.Query["token"], collector.Token, StringComparison.Ordinal))
-                return Results.Json(new { requests = Array.Empty<EvalRequest>(), interactionActive = false }, EvalJson);   // foreign tab — hand it nothing
+                return Results.Json(new { requests = Array.Empty<EvalRequest>(), interactionActive = false, paused = false, killed = false }, EvalJson);   // foreign tab — hand it nothing
             var reqs = await eval.PollAsync(EvalPollWindowMs, ctx.RequestAborted);
-            // interactionActive lets a (re)loaded page restore the supervision overlay on its own.
-            return Results.Json(new { requests = reqs, interactionActive = eval.InteractionActive }, EvalJson);
+            // interactionActive/paused/killed let a (re)loaded page restore the overlay/paused/killed pill on its own.
+            return Results.Json(new { requests = reqs, interactionActive = eval.InteractionActive, paused = eval.Paused, killed = eval.Killed }, EvalJson);
         });
         app.MapMethods("/__kyai/eval/result", new[] { "OPTIONS" }, (HttpContext ctx) =>
         {
@@ -269,6 +292,49 @@ internal static class Program
                 return Results.Json(new { ok = eval.Complete(token, id, payload) });
             }
             catch { return Results.Json(new { ok = false }); }
+        });
+
+        // ── human overrides: the badge's Pause/Stop icons (the paused pill carries its own Stop icon
+        //    too, for a direct Pause→Stop escalation) — clicked by the human, not the agent. Same
+        //    token-guard pattern as the rest of the page-facing endpoints. Pause is the brief, resumable
+        //    one (paired with /resume). Stop/kill is the hard one — deliberately NOT paired with a
+        //    "revive" route: resuming after a kill means the human tells the agent in chat, and the
+        //    agent's own start_interaction clears it (see EvalChannel.SetInteraction). ──
+        app.MapMethods("/__kyai/interaction/pause", new[] { "OPTIONS" }, (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            return Results.StatusCode(StatusCodes.Status204NoContent);
+        });
+        app.MapPost("/__kyai/interaction/pause", async (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            if (!await HasValidTokenAsync(ctx, collector.Token)) return Results.Json(new { ok = false });
+            eval.SetPaused(true);
+            return Results.Json(new { ok = true, paused = true });
+        });
+        app.MapMethods("/__kyai/interaction/resume", new[] { "OPTIONS" }, (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            return Results.StatusCode(StatusCodes.Status204NoContent);
+        });
+        app.MapPost("/__kyai/interaction/resume", async (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            if (!await HasValidTokenAsync(ctx, collector.Token)) return Results.Json(new { ok = false });
+            eval.SetPaused(false);
+            return Results.Json(new { ok = true, paused = false });
+        });
+        app.MapMethods("/__kyai/interaction/kill", new[] { "OPTIONS" }, (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            return Results.StatusCode(StatusCodes.Status204NoContent);
+        });
+        app.MapPost("/__kyai/interaction/kill", async (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            if (!await HasValidTokenAsync(ctx, collector.Token)) return Results.Json(new { ok = false });
+            eval.SetKilled(true);
+            return Results.Json(new { ok = true, killed = true });
         });
         app.Urls.Add($"http://127.0.0.1:{restPort}");
 
@@ -340,6 +406,18 @@ internal static class Program
         ctx.Response.Headers["Access-Control-Allow-Origin"] = "*";
         ctx.Response.Headers["Access-Control-Allow-Headers"] = "*";
         ctx.Response.Headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS";
+    }
+
+    // Same {token} body shape as /__kyai/eval/result, factored out for the stop/resume routes.
+    private static async Task<bool> HasValidTokenAsync(HttpContext ctx, string expectedToken)
+    {
+        try
+        {
+            using var doc = await JsonDocument.ParseAsync(ctx.Request.Body, cancellationToken: ctx.RequestAborted);
+            var token = doc.RootElement.TryGetProperty("token", out var t) ? t.GetString() : null;
+            return string.Equals(token, expectedToken, StringComparison.Ordinal);
+        }
+        catch { return false; }
     }
 
     private static string? GetBoundUrl(WebApplication app)

@@ -138,6 +138,7 @@ user a fixed red overlay with an animated cursor so they can see the agent drivi
 |---|---|---|
 | `start_interaction` | `timeoutMs?` | **required before any interaction** — draws the supervision overlay; returns `{ok, shown}` |
 | `stop_interaction` | `timeoutMs?` | remove the overlay and re-block interaction |
+| `wait_for_resume` | `timeoutMs?` | block until the user clicks "resume" after a `paused` refusal (see below), instead of retrying `start_interaction` yourself. Returns `{ok, paused, killed, interactionActive}`, or `{ok:false, timedOut:true}` if the timeout elapses first — call it again to keep waiting. Returns immediately (not blocking) with `killed:true` if the user hit the harder Stop instead of Pause — don't call it again in that case |
 | `click` | `selector?` \| `text?`(`within?`,`exact?`) \| `x?,y?`, `button?`, modifiers, `detail?`, `timeoutMs?` | full pointer+mouse sequence then `click()`. Target by CSS `selector`, by visible `text` (deepest match; `within` scopes it, `exact` defaults true), or by `x,y` point. Returns the element actually hit |
 | `move` | `toX,toY`, `fromX?,fromY?`, `durationMs?`, `steps?`, `detail?` | pointermove along a path with enter/leave bookkeeping — drives JS hover/dwell logic |
 | `send_key` | `key`, `code?`, `selector?`, modifiers, `detail?` | keydown/keypress/keyup for one key (Enter, Escape, arrows, shortcuts) — does **not** change input value |
@@ -173,6 +174,28 @@ page with a cursor icon, and each action animates it — a ripple on `click`, a 
 `send_key`/`type_text`, the cursor gliding on `move`. So a human watching always sees, and can
 follow, what the agent is doing. The overlay restores itself if the page reloads mid-interaction, and
 clears itself if `ky-ai-browser` goes away.
+
+**Human overrides: Pause vs. Stop.** The status badge carries two small icons at its end for exactly
+the case where you want to use the page yourself while the agent is mid-flow — they differ in how hard
+they hit the brakes, and in how you get the agent back afterwards.
+
+- **⏸ Pause** — brief and resumable. Ends the session and swaps the badge for a **paused** pill
+  (`⏸ paused — click to let ky-ai continue`, plus its own **⏹** icon for a direct escalation to Stop
+  without resuming first). While paused, manipulation/`batch`/a fresh `start_interaction` are refused
+  with `paused:true`; reads (`evaluate_js`, `query_dom`, `get_styles`, `read_component`, …) still work.
+  Click the pill's text to hand control back, or the agent can call `wait_for_resume` right after the
+  refusal to block until you do, instead of polling.
+- **⏹ Stop** — the hard one, reachable from the badge or the paused pill. Kills the whole session and
+  removes **all** overlay UI immediately — no pill, nothing left to click. **Every** gated tool AND
+  every read is refused with `killed:true`, and the message tells the agent to stop entirely: not to
+  wait, not to retry, not to call `wait_for_resume`. There is deliberately no button to bring it back —
+  resuming means telling the agent to continue in chat; the agent's own next `start_interaction` is what
+  starts a clean new session, and succeeding is what clears the kill (a stray `stop_interaction` does
+  not).
+
+A `batch` running when you click either finishes its current step and drops the rest (`paused:true` or
+`killed:true` in the result, matching which one you hit). The paused pill survives a page reload; a
+kill does too (the overlay just stays invisible until the agent's next `start_interaction`).
 
 ## Recipes
 

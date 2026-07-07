@@ -241,6 +241,16 @@
   var EVAL_POLL = EVAL_BASE + "/poll";
   var EVAL_RESULT = EVAL_BASE + "/result";
 
+  // Human overrides: the Pause/Stop icons (on the badge, and Stop again on the paused pill) post here
+  // directly (not through the eval channel — this is the human overriding the agent, not the agent's
+  // own start/stop_interaction). Pause is the brief, resumable one (paired with resume). Stop/kill is
+  // the hard one that also blocks reads — deliberately NOT paired with a revive route: resuming after a
+  // kill happens by the human telling the agent in chat, not by clicking anything here.
+  var INTERACTION_BASE = INGEST.replace(/\/console$/, "/interaction");
+  var INTERACTION_PAUSE = INTERACTION_BASE + "/pause";
+  var INTERACTION_RESUME = INTERACTION_BASE + "/resume";
+  var INTERACTION_KILL = INTERACTION_BASE + "/kill";
+
   function evalTypeOf(v) {
     if (v === null) return "null";
     if (Array.isArray(v)) return "array";
@@ -266,6 +276,25 @@
       })["catch"](function () { /* server gone — nothing to do */ });
     } catch (e) { /* never throw into the app */ }
   }
+
+  // The human clicked Pause or Stop: reflect it locally right away (no need to wait for the round-trip)
+  // and tell the server so the agent's next call is refused with a clear reason. Resume is the mirror
+  // for Pause — only the human's own click clears it, never the agent. Stop has no such mirror; it
+  // clears only when the agent's own start_interaction starts a clean new session (see EvalChannel).
+  function postInteractionOverride(url) {
+    try {
+      fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=UTF-8" },
+        body: JSON.stringify({ token: TOKEN }),
+        credentials: "omit",
+        cache: "no-store"
+      })["catch"](function () { /* server gone — nothing to do */ });
+    } catch (e) { /* never throw into the app */ }
+  }
+  function onUserPause() { try { overlay.showPaused(); } catch (e) {} postInteractionOverride(INTERACTION_PAUSE); }
+  function onUserResume() { try { overlay.clearPaused(); } catch (e) {} postInteractionOverride(INTERACTION_RESUME); }
+  function onUserKill() { try { overlay.showKilled(); } catch (e) {} postInteractionOverride(INTERACTION_KILL); }
 
   // JSON-safe deep copy of a value (caps depth/breadth, tags functions/DOM/Errors, breaks cycles) so
   // evaluate_js can return real structured JSON (asJson:true) instead of a one-line string rendering.
@@ -602,7 +631,20 @@
    */
   var OVERLAY_CSS =
     ".kyai-frame{position:absolute;inset:0;box-sizing:border-box;border:3px solid rgba(229,57,53,.95);display:none;}" +
-    ".kyai-badge{position:absolute;top:8px;left:50%;transform:translateX(-50%);font:600 11px/1.4 system-ui,sans-serif;color:#fff;background:rgba(229,57,53,.95);padding:3px 10px;border-radius:10px;letter-spacing:.3px;white-space:nowrap;max-width:70vw;overflow:hidden;text-overflow:ellipsis;display:none;}" +
+    ".kyai-badge{position:absolute;top:8px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:6px;font:600 11px/1.4 system-ui,sans-serif;color:#fff;background:rgba(229,57,53,.95);padding:3px 8px 3px 10px;border-radius:10px;letter-spacing:.3px;white-space:nowrap;max-width:70vw;display:none;}" +
+    ".kyai-badge-text{flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}" +
+    // The real, clickable controls in an otherwise pointer-events:none overlay — pointer-events:auto
+    // opts just these icons back in so the rest of the frame never intercepts the page's own clicks.
+    // Reused on both the badge (Pause + Stop) and the paused pill (Stop again, for a direct escalation).
+    // SVG, not a Unicode ⏸/⏹ glyph — those render via an emoji/symbol font whose visible ink sits at an
+    // inconsistent, often asymmetric offset within its character cell, so flex-centering the TEXT still
+    // left the icon looking off-center. A hand-drawn shape has an exact, known bounding box instead.
+    ".kyai-icon-btn{flex:none;pointer-events:auto;cursor:pointer;display:none;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:rgba(0,0,0,.3);}" +
+    ".kyai-icon-btn:hover{background:rgba(0,0,0,.5);}" +
+    ".kyai-icon-btn svg{display:block;}" +
+    ".kyai-paused{position:absolute;top:8px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:6px;font:600 11px/1.4 system-ui,sans-serif;color:#fff;background:rgba(66,66,66,.95);padding:3px 8px 3px 10px;border-radius:10px;letter-spacing:.3px;white-space:nowrap;max-width:80vw;display:none;}" +
+    ".kyai-paused-text{pointer-events:auto;cursor:pointer;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;}" +
+    ".kyai-paused-text:hover{text-decoration:underline;}" +
     ".kyai-cursor{position:absolute;left:0;top:0;width:24px;height:24px;will-change:transform;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5));display:none;}" +
     ".kyai-cursor svg{display:block;}" +
     ".kyai-ripple{position:absolute;width:10px;height:10px;margin:-5px 0 0 -5px;border:2px solid rgba(229,57,53,.9);border-radius:50%;animation:kyai-rip .6s ease-out forwards;}" +
@@ -611,6 +653,10 @@
     "@keyframes kyai-clabel{0%{opacity:0;transform:translate(-50%,-50%) scale(.92)}8%{opacity:1;transform:translate(-50%,-50%) scale(1)}85%{opacity:1}100%{opacity:0;transform:translate(-50%,-50%) scale(.97)}}";
   var CURSOR_SVG = '<svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">' +
     '<path d="M4 2l6 14 2.2-5.6L18 8z" fill="#fff" stroke="#e53935" stroke-width="1.6" stroke-linejoin="round"/></svg>';
+  var ICON_PAUSE_SVG = '<svg width="9" height="9" viewBox="0 0 9 9" xmlns="http://www.w3.org/2000/svg">' +
+    '<rect x="1.5" y="0.5" width="2" height="8" rx="0.5" fill="#fff"/><rect x="5.5" y="0.5" width="2" height="8" rx="0.5" fill="#fff"/></svg>';
+  var ICON_STOP_SVG = '<svg width="9" height="9" viewBox="0 0 9 9" xmlns="http://www.w3.org/2000/svg">' +
+    '<rect x="1" y="1" width="7" height="7" rx="1" fill="#fff"/></svg>';
 
   /*
    * Supervision overlay — a fixed, non-interactable red frame + cursor, shown only while a session is
@@ -618,10 +664,24 @@
    * indicator below: only one badge ever exists, so a read that happens mid-session doesn't lay a
    * second pill on top of "● ky-ai agent interacting" — it just borrows the same spot for a moment and
    * hands it back. Lives in a shadow root so the app's CSS/querySelectorAll never touch it.
+   *
+   * Icons break the "non-interactable" rule on purpose (pointer-events:auto on just those elements):
+   *   ⏸ Pause  — brief, resumable "hands off for a moment"; reads still work. Swaps the badge for a
+   *              paused pill; resumed by clicking its text (or the agent can call wait_for_resume
+   *              instead of retrying itself). The paused pill carries its OWN Stop icon too, for a
+   *              direct Pause→Stop escalation without resuming first.
+   *   ⏹ Stop   — the hard one: kills the WHOLE session, reads included, no auto-retry path for the
+   *              agent at all. There is deliberately no pill, no UI of any kind for it afterwards —
+   *              clicking it removes everything. Resuming means the human tells the agent in chat,
+   *              which then calls start_interaction for a clean new session (that clears the kill
+   *              server-side; see EvalChannel.SetInteraction) — nothing to click here for that.
+   * Both are the human's own override — the agent never gets a tool call that clears the pause, and
+   * there is no tool OR UI control at all that clears a kill except the agent's own fresh session.
    */
   var overlay = (function () {
-    var host = null, root = null, frame = null, cursor = null, badge = null;
-    var shown = false, cx = 0, cy = 0, curLabel = null, curLabelTimer = null, hintTimer = null;
+    var host = null, root = null, frame = null, cursor = null, badge = null, badgeText = null,
+      badgePause = null, badgeKill = null, pausedPill = null, pausedText = null, pausedKill = null;
+    var shown = false, paused = false, killed = false, cx = 0, cy = 0, curLabel = null, curLabelTimer = null, hintTimer = null;
     function vw() { return window.innerWidth || (document.documentElement || {}).clientWidth || 0; }
     function vh() { return window.innerHeight || (document.documentElement || {}).clientHeight || 0; }
 
@@ -635,7 +695,29 @@
       root = host.attachShadow ? host.attachShadow({ mode: "open" }) : host;
       var style = document.createElement("style"); style.textContent = OVERLAY_CSS; root.appendChild(style);
       frame = document.createElement("div"); frame.className = "kyai-frame"; root.appendChild(frame);
-      badge = document.createElement("div"); badge.className = "kyai-badge"; root.appendChild(badge);
+      badge = document.createElement("div"); badge.className = "kyai-badge";
+      badgeText = document.createElement("span"); badgeText.className = "kyai-badge-text"; badge.appendChild(badgeText);
+      badgePause = document.createElement("span"); badgePause.className = "kyai-icon-btn"; badgePause.innerHTML = ICON_PAUSE_SVG;
+      badgePause.title = "Pause"; badgePause.setAttribute("role", "button"); badgePause.setAttribute("tabindex", "0");
+      badgePause.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); onUserPause(); });
+      badge.appendChild(badgePause);
+      badgeKill = document.createElement("span"); badgeKill.className = "kyai-icon-btn"; badgeKill.innerHTML = ICON_STOP_SVG;
+      badgeKill.title = "Stop"; badgeKill.setAttribute("role", "button"); badgeKill.setAttribute("tabindex", "0");
+      badgeKill.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); onUserKill(); });
+      badge.appendChild(badgeKill);
+      root.appendChild(badge);
+      pausedPill = document.createElement("div"); pausedPill.className = "kyai-paused";
+      pausedText = document.createElement("span"); pausedText.className = "kyai-paused-text";
+      pausedText.textContent = "⏸ paused — click to let ky-ai continue";
+      pausedText.setAttribute("role", "button"); pausedText.setAttribute("tabindex", "0");
+      pausedText.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); onUserResume(); });
+      pausedPill.appendChild(pausedText);
+      pausedKill = document.createElement("span"); pausedKill.className = "kyai-icon-btn"; pausedKill.innerHTML = ICON_STOP_SVG;
+      pausedKill.title = "Stop"; pausedKill.setAttribute("role", "button"); pausedKill.setAttribute("tabindex", "0");
+      pausedKill.style.display = "flex";   // always visible whenever the parent pill is (pill's own display gates it)
+      pausedKill.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); onUserKill(); });
+      pausedPill.appendChild(pausedKill);
+      root.appendChild(pausedPill);
       cursor = document.createElement("div"); cursor.className = "kyai-cursor"; cursor.innerHTML = CURSOR_SVG; root.appendChild(cursor);
       put(Math.round(vw() / 2), Math.round(vh() / 2), false);
       (document.body || document.documentElement).appendChild(host);
@@ -667,18 +749,21 @@
       curLabel = el;
       curLabelTimer = setTimeout(function () { try { el.remove(); } catch (e) {} if (curLabel === el) curLabel = null; curLabelTimer = null; }, 2000);
     }
-    // The one top-center badge: while a session is open it idles on "● ky-ai agent interacting"; a
-    // read hint borrows it for HINT_MS then hands it back (or, with no session open, just disappears —
-    // there's no persistent state to return to, which itself reads as "no session").
+    // The one top-center badge: while a session is open it idles on "● ky-ai agent interacting" with
+    // the Pause/Stop icons at its end; a read hint borrows the text for HINT_MS then hands it back (or,
+    // with no session open, just disappears — there's no persistent state to return to, which itself
+    // reads as "no session"). The icons only ever show while a session is actually open.
     var SESSION_TEXT = "● ky-ai agent interacting", HINT_MS = 2000;
     function setHint(text) {
       ensure();
       if (hintTimer) { clearTimeout(hintTimer); hintTimer = null; }
-      badge.textContent = (shown ? "● " : "○ ") + text;
-      badge.style.display = "block";
+      badgeText.textContent = (shown ? "● " : "○ ") + text;
+      badge.style.display = "flex";
+      badgePause.style.display = badgeKill.style.display = shown ? "flex" : "none";
       hintTimer = setTimeout(function () {
         hintTimer = null;
-        if (shown) { badge.textContent = SESSION_TEXT; } else { badge.style.display = "none"; }
+        if (shown) { badgeText.textContent = SESSION_TEXT; }
+        else { badge.style.display = "none"; badgePause.style.display = badgeKill.style.display = "none"; }
       }, HINT_MS);
     }
     return {
@@ -687,18 +772,46 @@
       // so by the time any of them runs here the frame is already showing.
       show: function () {
         try {
-          ensure(); shown = true;
+          ensure(); shown = true; paused = false;
           frame.style.display = "block"; cursor.style.display = "block";
-          if (!hintTimer) { badge.textContent = SESSION_TEXT; badge.style.display = "block"; }
+          pausedPill.style.display = "none";
+          if (!hintTimer) { badgeText.textContent = SESSION_TEXT; badge.style.display = "flex"; }
+          badgePause.style.display = badgeKill.style.display = "flex";
         } catch (e) {}
       },
       hide: function () {
         try {
           shown = false;
-          if (host) { frame.style.display = "none"; cursor.style.display = "none"; }
+          if (host) { frame.style.display = "none"; cursor.style.display = "none"; badgePause.style.display = badgeKill.style.display = "none"; }
           if (!hintTimer && badge) badge.style.display = "none";
+          if (!paused && pausedPill) pausedPill.style.display = "none";
         } catch (e) {}
       },
+      // The human's own Pause click: end the session right now and swap the badge for the paused pill —
+      // distinct from hide() (which the server can also drive via stop_interaction) so a reload or a
+      // stray overlay(show:false) doesn't quietly clear a pause the human hasn't lifted yet.
+      showPaused: function () {
+        try {
+          ensure(); paused = true; shown = false;
+          frame.style.display = "none"; cursor.style.display = "none"; badgePause.style.display = badgeKill.style.display = "none";
+          badge.style.display = "none"; pausedPill.style.display = "flex";
+        } catch (e) {}
+      },
+      clearPaused: function () { try { paused = false; if (pausedPill) pausedPill.style.display = "none"; } catch (e) {} },
+      isPaused: function () { return paused; },
+      // The human's own (harder) Stop click, from either the badge or the paused pill: end everything
+      // right now and show NO ui at all — no pill, nothing. Unlike pause there is no page-side control
+      // that clears this; only the agent's own fresh start_interaction does (see EvalChannel), which the
+      // human triggers by telling the agent to continue in chat, not by clicking anything here.
+      showKilled: function () {
+        try {
+          killed = true; shown = false; paused = false;
+          if (host) { frame.style.display = "none"; cursor.style.display = "none"; badgePause.style.display = badgeKill.style.display = "none"; badge.style.display = "none"; }
+          if (pausedPill) pausedPill.style.display = "none";
+        } catch (e) {}
+      },
+      clearKilled: function () { killed = false; },
+      isKilled: function () { return killed; },
       shown: function () { return shown; },
       cursorTo: function (x, y) { try { if (shown) put(x, y, true); } catch (e) {} },
       clickFx: function (x, y) { try { if (shown) { put(x, y, true); ripple(x, y); } } catch (e) {} },
@@ -719,6 +832,26 @@
     try {
       if (active && !overlay.shown()) overlay.show();
       else if (!active && overlay.shown()) overlay.hide();
+    } catch (e) {}
+  }
+
+  // Reconcile the paused pill with the server's Paused flag (idempotent) — restores it after a
+  // reload, so a page refresh mid-pause doesn't silently drop back into "no session" and let the agent
+  // in unnoticed.
+  function reconcilePaused(paused) {
+    try {
+      if (paused && !overlay.isPaused()) overlay.showPaused();
+      else if (!paused && overlay.isPaused()) overlay.clearPaused();
+    } catch (e) {}
+  }
+
+  // Reconcile the (invisible) killed flag with the server's Killed state (idempotent) — there's no pill
+  // to restore, but a reload right after a kill should still keep the overlay hidden and the doBatch
+  // abort check armed until the agent's own start_interaction clears it server-side.
+  function reconcileKilled(killed) {
+    try {
+      if (killed && !overlay.isKilled()) overlay.showKilled();
+      else if (!killed && overlay.isKilled()) overlay.clearKilled();
     } catch (e) {}
   }
 
@@ -936,6 +1069,15 @@
     return new Promise(function (resolve) {
       var i = 0;
       function next() {
+        // The human hit Pause or Stop mid-batch — don't run the remaining steps.
+        if (overlay.isKilled()) {
+          resolve({ ok: false, action: "batch", killed: true, failedAt: i, count: results.length, results: results });
+          return;
+        }
+        if (overlay.isPaused()) {
+          resolve({ ok: false, action: "batch", paused: true, failedAt: i, count: results.length, results: results });
+          return;
+        }
         if (i >= steps.length) { resolve({ ok: true, action: "batch", count: results.length, results: results }); return; }
         var step = steps[i];
         var p;
@@ -1061,6 +1203,8 @@
       .then(function (data) {
         lastPollOkAt = Date.now();
         reconcileOverlay(data && data.interactionActive);  // restore/clear the overlay (e.g. after a reload)
+        reconcilePaused(data && data.paused);                // restore/clear the paused pill likewise
+        reconcileKilled(data && data.killed);                // restore/clear the killed pill likewise
         var reqs = (data && data.requests) || [];
         for (var i = 0; i < reqs.length; i++) dispatchEval(reqs[i]);
         setTimeout(pollEvalOnce, 0);     // immediately re-open the long-poll

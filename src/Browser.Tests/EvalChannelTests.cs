@@ -82,4 +82,106 @@ public class EvalChannelTests
         await ch.PollAsync(1, default);             // a poll (even an empty one) marks the page connected
         Assert.True(ch.PageConnected);
     }
+
+    [Fact]
+    public void SetPaused_true_also_closes_the_interaction_gate()
+    {
+        var ch = new EvalChannel("tok");
+        ch.SetInteraction(true);
+
+        ch.SetPaused(true);
+        Assert.True(ch.Paused);
+        Assert.False(ch.InteractionActive);   // the human's Pause click always closes the gate too
+
+        ch.SetPaused(false);
+        Assert.False(ch.Paused);
+        Assert.False(ch.InteractionActive);   // resuming clears the pause but doesn't reopen the gate itself
+    }
+
+    [Fact]
+    public void SetKilled_true_also_closes_the_gate_and_clears_any_pause()
+    {
+        var ch = new EvalChannel("tok");
+        ch.SetInteraction(true);
+        ch.SetPaused(true);
+
+        ch.SetKilled(true);
+        Assert.True(ch.Killed);
+        Assert.False(ch.InteractionActive);
+        Assert.False(ch.Paused);   // a kill supersedes a pause — the two states never overlap
+    }
+
+    [Fact]
+    public void SetInteraction_true_clears_a_kill_but_SetInteraction_false_does_not()
+    {
+        // There is no page-side "revive" for a kill — a fresh start_interaction (SetInteraction(true))
+        // is what starts the clean new session that clears it, per the human telling the agent in chat.
+        var ch = new EvalChannel("tok");
+        ch.SetKilled(true);
+
+        ch.SetInteraction(false);   // e.g. a stray stop_interaction — must NOT clear the kill
+        Assert.True(ch.Killed);
+
+        ch.SetInteraction(true);    // a fresh start_interaction — clears it
+        Assert.False(ch.Killed);
+        Assert.True(ch.InteractionActive);
+    }
+
+    [Fact]
+    public async Task WaitForResumeAsync_returns_immediately_when_never_paused()
+    {
+        var ch = new EvalChannel("tok");
+        var resumed = await ch.WaitForResumeAsync(5000, default);
+        Assert.True(resumed);
+    }
+
+    [Fact]
+    public async Task WaitForResumeAsync_unblocks_the_moment_the_user_resumes()
+    {
+        var ch = new EvalChannel("tok");
+        ch.SetPaused(true);
+        var wait = ch.WaitForResumeAsync(5000, default);
+        Assert.False(wait.IsCompleted);   // still paused → still parked
+
+        await Task.Delay(150);
+        ch.SetPaused(false);       // the human clicks the paused pill
+
+        Assert.True(await wait);
+    }
+
+    [Fact]
+    public async Task WaitForResumeAsync_times_out_while_still_paused()
+    {
+        var ch = new EvalChannel("tok");
+        ch.SetPaused(true);
+        var resumed = await ch.WaitForResumeAsync(200, default);
+        Assert.False(resumed);
+        Assert.True(ch.Paused);    // still paused — only the timeout elapsed, nothing was cleared
+    }
+
+    [Fact]
+    public async Task WaitForResumeAsync_never_blocks_on_a_kill_even_if_paused_too()
+    {
+        var ch = new EvalChannel("tok");
+        ch.SetPaused(true);
+        ch.SetKilled(true);   // a kill is stronger than a pause — never worth waiting out
+
+        var resumed = await ch.WaitForResumeAsync(5000, default);   // must return fast, not park for 5s
+
+        Assert.False(resumed);
+    }
+
+    [Fact]
+    public async Task WaitForResumeAsync_unblocks_immediately_if_killed_mid_wait()
+    {
+        var ch = new EvalChannel("tok");
+        ch.SetPaused(true);
+        var wait = ch.WaitForResumeAsync(5000, default);
+        Assert.False(wait.IsCompleted);
+
+        await Task.Delay(150);
+        ch.SetKilled(true);   // the human escalates from Pause to Stop mid-wait
+
+        Assert.False(await wait);   // unblocks right away as false, not "resumed"
+    }
 }

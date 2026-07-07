@@ -42,6 +42,8 @@ internal sealed class EvalChannel
     private long _nextId;
     private DateTimeOffset _lastPollAt = DateTimeOffset.MinValue;
     private volatile bool _interactionActive;
+    private volatile bool _paused;
+    private volatile bool _killed;
 
     private readonly string _token;
 
@@ -50,7 +52,57 @@ internal sealed class EvalChannel
     // Whether supervised interaction is open (start_interaction…stop_interaction). The manipulation
     // tools gate on this; the poll response echoes it so a reloaded page re-shows the overlay.
     public bool InteractionActive => _interactionActive;
-    public void SetInteraction(bool active) => _interactionActive = active;
+    public void SetInteraction(bool active)
+    {
+        _interactionActive = active;
+        // Opening a session is by definition a CLEAN one: a fresh start_interaction is how the human's
+        // "ok, go ahead" (said in chat after a hard Stop, not clicked in the browser — there is no revive
+        // control) turns into a new session, so it clears any lingering kill. It does NOT clear a pause —
+        // that still requires the human's own paused-pill click (InstanceEval refuses a fresh
+        // start_interaction outright while Paused, so this branch is never reached in that state).
+        if (active) _killed = false;
+    }
+
+    // Set when the human clicks the badge's Pause icon — a manual, resumable override for "I'm testing
+    // this tab myself right now, just for a moment". Closes the gate immediately and, while true, also
+    // refuses a fresh start_interaction: the agent must wait for the human to click the paused pill's
+    // "resume" before it can drive the page again. Cleared only by that resume click (InstanceEval never
+    // clears it). Reads (evaluate_js/query_dom/etc.) are NOT affected — only manipulation/batch/overlay.
+    public bool Paused => _paused;
+    public void SetPaused(bool paused)
+    {
+        _paused = paused;
+        if (paused) _interactionActive = false;
+    }
+
+    // Set when the human clicks the (harder) Stop icon on the badge or the paused pill — kills the whole
+    // interaction session and removes all overlay UI: EVERY /eval kind is refused (including reads —
+    // evaluate_js, query_dom, wait_for, get_styles, read_component — not just manipulation), and the
+    // agent is told to stop entirely, not to wait or retry. There is deliberately no page-side "revive" —
+    // resuming means the human tells the agent in chat, which then calls start_interaction for a clean
+    // new session; THAT clears it (see SetInteraction), not this setter. Also drops any lingering pause
+    // so the two states can't overlap.
+    public bool Killed => _killed;
+    public void SetKilled(bool killed)
+    {
+        _killed = killed;
+        if (killed) { _interactionActive = false; _paused = false; }
+    }
+
+    // Block until the human clicks the paused pill's resume (Paused goes false) or timeoutMs elapses —
+    // the same plain poll-loop shape as BuildTracker.WaitForSettleAsync, so wait_for_resume is an
+    // ordinary blocking tool call instead of needing a separate notification channel. Returns
+    // immediately if it wasn't paused to begin with, OR if the human has since killed the session
+    // outright — a kill is stronger than a pause and is never worth waiting out (see Killed above).
+    public async Task<bool> WaitForResumeAsync(int timeoutMs, CancellationToken ct)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddMilliseconds(timeoutMs);
+        while (_paused && !_killed && DateTimeOffset.UtcNow < deadline && !ct.IsCancellationRequested)
+        {
+            try { await Task.Delay(80, ct); } catch (OperationCanceledException) { break; }
+        }
+        return !_paused && !_killed;
+    }
 
     // True when the capture snippet has long-polled recently — i.e. the app is open and listening.
     public bool PageConnected

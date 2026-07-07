@@ -290,4 +290,111 @@ public class BrowserToolsTests
         }
         finally { BrowserTools.ForwardHook = null; }
     }
+
+    // ── user Pause override (the badge's own Pause/resume, not start/stop_interaction) ──
+
+    [Fact]
+    public async Task User_pause_closes_the_gate_and_refuses_even_a_fresh_start_interaction()
+    {
+        var ch = new EvalChannel("t");
+        ch.SetInteraction(true);
+        ch.SetPaused(true);   // the human clicked Pause on the badge
+        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        try
+        {
+            Assert.False(ch.InteractionActive);   // pausing closed the gate immediately
+
+            var clickBlocked = await BrowserTools.Click(selector: "x");
+            Assert.Contains("\"paused\":true", clickBlocked);
+
+            var startBlocked = await BrowserTools.StartInteraction();
+            Assert.Contains("\"paused\":true", startBlocked);
+            Assert.False(ch.InteractionActive);   // start_interaction did NOT reopen the gate
+
+            Assert.Empty(await ch.PollAsync(50, default));   // nothing was ever queued to the page
+        }
+        finally { BrowserTools.ForwardHook = null; }
+    }
+
+    [Fact]
+    public async Task Resuming_after_a_user_pause_lets_start_interaction_succeed_again()
+    {
+        var ch = new EvalChannel("t");
+        ch.SetPaused(true);
+        ch.SetPaused(false);   // the human clicked "resume" on the paused pill
+        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        try
+        {
+            var task = BrowserTools.StartInteraction();
+            var req = Assert.Single(await ch.PollAsync(1000, default));
+            Assert.Equal("overlay", req.Kind);
+            Assert.True(req.Show);
+            ch.Complete("t", req.Id, "{\"ok\":true,\"shown\":true}");
+            await task;
+
+            Assert.True(ch.InteractionActive);
+        }
+        finally { BrowserTools.ForwardHook = null; }
+    }
+
+    // ── user Kill override (a Stop icon, badge or paused pill) — blocks EVERYTHING, reads included,
+    //    EXCEPT a fresh start_interaction: that's the one path back, and it clears the kill itself. ──
+
+    [Fact]
+    public async Task User_kill_refuses_reads_and_manipulation_but_not_a_fresh_start_interaction()
+    {
+        var ch = new EvalChannel("t");
+        ch.SetInteraction(true);
+        ch.SetKilled(true);   // the human clicked a Stop icon
+        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        try
+        {
+            Assert.False(ch.InteractionActive);
+
+            var readBlocked = await BrowserTools.EvaluateJs("1+1");
+            Assert.Contains("\"killed\":true", readBlocked);
+
+            var clickBlocked = await BrowserTools.Click(selector: "x");
+            Assert.Contains("\"killed\":true", clickBlocked);
+
+            Assert.Empty(await ch.PollAsync(50, default));   // neither of those reached the page
+
+            // start_interaction is the one exception — it's how the human's "ok, continue" (given in
+            // chat, not clicked anywhere) becomes a clean new session, so it must go through even
+            // while killed, and succeeding is what clears the kill (see EvalChannel.SetInteraction).
+            var task = BrowserTools.StartInteraction();
+            var req = Assert.Single(await ch.PollAsync(1000, default));
+            Assert.Equal("overlay", req.Kind);
+            Assert.True(req.Show);
+            ch.Complete("t", req.Id, "{\"ok\":true,\"shown\":true}");
+            await task;
+
+            Assert.False(ch.Killed);          // the fresh session cleared it
+            Assert.True(ch.InteractionActive);
+        }
+        finally { BrowserTools.ForwardHook = null; }
+    }
+
+    [Fact]
+    public async Task Stop_interaction_while_killed_does_not_clear_the_kill()
+    {
+        var ch = new EvalChannel("t");
+        ch.SetKilled(true);
+        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        try
+        {
+            // Only a fresh (show:true) start_interaction clears a kill — a stray stop_interaction
+            // (show:false) is not the "clean new session" signal and must not clear it.
+            var task = BrowserTools.StopInteraction();
+            var req = Assert.Single(await ch.PollAsync(1000, default));
+            Assert.Equal("overlay", req.Kind);
+            Assert.False(req.Show);
+            ch.Complete("t", req.Id, "{\"ok\":true,\"shown\":false}");
+            await task;
+
+            Assert.True(ch.Killed);            // still killed — show:false never clears it
+            Assert.False(ch.InteractionActive);
+        }
+        finally { BrowserTools.ForwardHook = null; }
+    }
 }

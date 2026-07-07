@@ -227,6 +227,22 @@ internal static class BrowserTools
         return Eval(project, budget, new EvalRequest { Id = "", Kind = "overlay", Show = false, TimeoutMs = budget });
     }
 
+    [McpServerTool(Name = "wait_for_resume"), Description(
+        "Block until the user clicks \"resume\" after pausing the badge's Pause icon — use this instead of " +
+        "retrying start_interaction yourself after a `paused` refusal. Returns immediately if the user " +
+        "never paused it. Returns {ok, paused, killed, interactionActive}; ok:false with timedOut:true if " +
+        "the timeout elapses first — call it again to keep waiting. Do NOT call this after a `killed` " +
+        "refusal (the harder Stop icon, not Pause) — it returns immediately with killed:true and does not " +
+        "wait, because a kill means stop entirely, not \"wait a bit\". Omit project when only one capture " +
+        "is registered.")]
+    public static Task<string> WaitForResume(
+        [Description("Max ms to wait (default 60000)")] int timeoutMs = 60_000,
+        [Description("Project name; omit when only one capture is registered")] string? project = null)
+    {
+        var sec = Math.Clamp(timeoutMs / 1000 + 5, 5, 124);
+        return Hub.ForwardAsync(project, HttpMethod.Post, $"/wait-for-resume?timeout={timeoutMs}", sec);
+    }
+
     [McpServerTool(Name = "click"), Description(
         "Synthetically click an element — a full pointer/mouse sequence (pointerover/enter, pointerdown, " +
         "mousedown, focus, pointerup, mouseup) then the element's click() so default actions (toggle, submit, " +
