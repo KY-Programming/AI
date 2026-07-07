@@ -15,7 +15,11 @@ internal static class HubTools
         "names the other tools expect. Compact by default — each entry is {name, running, pid, build:" +
         "{status, errors, warnings, building, pending}}, just the headline. Set detail=true (or use " +
         "`status` with no project) for the full per-server payload incl. structured diagnostics, file " +
-        "lists and log paths.")]
+        "lists and log paths. If this or any tool in this group is unreachable / errors with a connection " +
+        "failure, the hub (and its dev servers) is down — stop, tell the user, and ask them to restart it " +
+        "themselves; don't try to work around it (no port scans, no launching the dev server process " +
+        "yourself). Likewise if a project you expect is missing here, ask the user to start it rather than " +
+        "launching it yourself.")]
     public static Task<string> List(
         [Description("Include each server's full status (diagnostics, files, log paths) instead of the headline")] bool detail = false)
         => Hub.ListAsync(detail);
@@ -56,19 +60,22 @@ internal static class HubTools
         "Restart a dev server and wait for the rebuild; returns the build verdict (status, error/warning " +
         "counts, duration, diagnostics) plus a noise-free `summary` of the build's key lines. Only needed " +
         "for changes the dev server does not hot-reload (config/build files, new dependencies) or when it " +
-        "is wedged. Omit project when only one is registered.")]
+        "is wedged. Use this instead of killing and relaunching the process yourself. Omit project when " +
+        "only one is registered.")]
     public static Task<string> Restart([Description("Project name; omit when only one is registered")] string? project = null)
         => Hub.ForwardAsync(project, HttpMethod.Post, "/restart", 124);
 
     [McpServerTool(Name = "stop"), Description(
         "Stop a dev server's child process (kills the whole tree, freeing the port). The supervisor stays " +
-        "registered. Omit project when only one is registered.")]
+        "registered. This is the sanctioned way to stop it — do not kill the process yourself (no " +
+        "`Stop-Process`/`taskkill`, no port scanning) outside this hub. Omit project when only one is " +
+        "registered.")]
     public static Task<string> Stop([Description("Project name; omit when only one is registered")] string? project = null)
         => Hub.ForwardAsync(project, HttpMethod.Post, "/stop", 30);
 
     [McpServerTool(Name = "start"), Description(
-        "Start a dev server if it is stopped; waits for the build and returns the verdict. Omit project " +
-        "when only one is registered.")]
+        "Start a dev server if it is stopped; waits for the build and returns the verdict. Use this " +
+        "instead of launching the process yourself. Omit project when only one is registered.")]
     public static Task<string> Start([Description("Project name; omit when only one is registered")] string? project = null)
         => Hub.ForwardAsync(project, HttpMethod.Post, "/start", 124);
 
@@ -103,6 +110,7 @@ internal static class HubTools
     [McpServerTool(Name = "shutdown"), Description(
         "Tear down the whole stack: stop every registered dev server (each frees its port) and then " +
         "the hub process itself. Use this to release the published binaries for a re-publish, or to " +
-        "stop everything at once. The `<tool> shutdown` CLI command and POST/GET /shutdown do the same.")]
+        "stop everything at once — instead of killing the hub process yourself. The `<tool> shutdown` " +
+        "CLI command and POST/GET /shutdown do the same.")]
     public static Task<string> Shutdown() => Hub.ShutdownAllAsync();
 }
