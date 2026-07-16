@@ -373,8 +373,8 @@ internal static class Program
         // 5) Register with the browser hub (auto-starting it if needed), then inject.
         if (useHub)
         {
-            if (!await HubReachableAsync(hubUrl))
-                TryLaunchHub(hubPort);
+            if (!await HubLifecycle.HubReachableAsync(hubUrl))
+                HubLifecycle.TryLaunchHub("ky-ai-browser", hubPort);
             _ = RegisterLoopAsync(hubUrl, instanceName, selfUrl, stopping.Token);
         }
 
@@ -502,55 +502,6 @@ internal static class Program
         await http.PostAsync(hubUrl.TrimEnd('/') + "/deregister", content);
     }
 
-    private static async Task<bool> HubReachableAsync(string hubUrl)
-    {
-        try
-        {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
-            using var resp = await http.GetAsync(hubUrl.TrimEnd('/') + "/health");
-            return resp.IsSuccessStatusCode;
-        }
-        catch { return false; }
-    }
-
-    // Launch `ky-ai-browser hub` from this same exe, detached and hidden, so it outlives this instance
-    // and isn't tied to this console's Ctrl+C. Auto-started hubs self-exit when idle.
-    // Process.Start (esp. UseShellExecute=true) can block for seconds if AV scans a freshly written
-    // exe; run it on a dedicated thread, not the ThreadPool, so a slow spawn can never starve the pool
-    // Kestrel's own connection-accept continuations depend on (this runs right after we bind our own
-    // control port, so a starved pool here could delay serving /status etc. for that long).
-    private static void TryLaunchHub(int port)
-    {
-        new Thread(() =>
-        {
-            try
-            {
-                var self = Environment.ProcessPath;
-                if (self is null) return;
-                var psi = new ProcessStartInfo { FileName = self };
-                if (OperatingSystem.IsWindows())
-                {
-                    psi.UseShellExecute = true;
-                    psi.WindowStyle = ProcessWindowStyle.Hidden;
-                }
-                else
-                {
-                    psi.UseShellExecute = false;
-                    psi.CreateNoWindow = true;
-                }
-                psi.ArgumentList.Add("hub");
-                psi.ArgumentList.Add("--port");
-                psi.ArgumentList.Add(port.ToString());
-                psi.ArgumentList.Add("--exit-when-idle");
-                Process.Start(psi);
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"ky-ai-browser: could not auto-start hub: {ex.Message}");
-            }
-        }) { IsBackground = true, Name = "ky-ai-browser-hub-launch" }.Start();
-    }
-
     private static async Task<bool> InjectAsync(string controlUrl, string scriptTag)
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
@@ -641,7 +592,7 @@ internal static class Program
         cleaning up, ky-ai-ng strips the leftover automatically. All HTTP is loopback-only.
 
         HUB — the MCP control plane (auto-started; rarely run by hand):
-          ky-ai-browser hub [--port <N>] [--exit-when-idle]
+          ky-ai-browser hub [--port <N>]
 
         SHUTDOWN — tear down the whole stack: the hub plus every capture instance (each removes its
         script and restores index.html):

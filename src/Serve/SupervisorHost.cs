@@ -118,7 +118,7 @@ public static class SupervisorHost
 
         BannerBox.Render(cfg.ToolName, lines);
 
-        if (launchHubPort is int port) HubLifecycle.TryLaunchHub(cfg.ToolName, port, exitWhenIdle: true);
+        if (launchHubPort is int port) HubLifecycle.TryLaunchHub(cfg.ToolName, port);
         if (opt.UseHub) _ = RegisterLoopAsync(opt.HubUrl, opt.Name, controlUrl, stopping.Token);
         if (afterStart is not null && opt.AfterStart is { Count: > 0 } afterCmd2)
             _ = afterStart.LaunchAfterBuildAsync(cfg, server, afterCmd2, opt.Name, stopping.Token);

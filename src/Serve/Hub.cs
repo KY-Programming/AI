@@ -12,6 +12,17 @@ internal static class Hub
 
     public static int Count => Registry.All().Count;
 
+    // Attached stdio bridges. The window is a few heartbeats wide so a momentarily slow bridge isn't
+    // declared dead, while a killed one stops counting quickly.
+    public static BridgeRegistry Bridges { get; } = new();
+    public static readonly TimeSpan BridgeHeartbeatInterval = TimeSpan.FromSeconds(3);
+    public static readonly TimeSpan BridgeLiveWindow = TimeSpan.FromSeconds(10);
+    public static int LiveBridges => Bridges.LiveCount(BridgeLiveWindow);
+
+    // Set by ShutdownAllAsync. Bridges poll it on their heartbeat and exit when it flips, which is
+    // how a `<tool> shutdown` reaches processes that have no listener of their own.
+    public static volatile bool ShutdownRequested;
+
     // Configured by HubHost.RunAsync from the HubConfig.
     public static string Noun = "server";        // singular, e.g. "frontend"
     public static string NounPlural = "servers"; // plural list-payload key, e.g. "frontends"
@@ -154,11 +165,18 @@ internal static class Hub
     }
 
     // Tear down the whole stack: tell every registered supervisor to exit (each deregisters and
-    // kills its dev-server tree), then stop the hub itself. This backs `<tool> shutdown`, the
-    // shutdown MCP tool, and POST/GET /shutdown — a `shutdown` means "stop everything".
+    // kills its dev-server tree) and every attached bridge to let go, then stop the hub itself.
+    // This backs `<tool> shutdown`, the shutdown MCP tool, and POST/GET /shutdown — a `shutdown`
+    // means "stop everything", which is also what the updater needs before it can replace the
+    // tool's files.
     public static async Task<string> ShutdownAllAsync()
     {
+        // Flip this FIRST: bridges read it on their next heartbeat and exit, and it stops one of
+        // them re-launching the very hub we're about to stop.
+        ShutdownRequested = true;
+
         var regs = Registry.All();
+        var bridges = LiveBridges;
         await Task.WhenAll(regs.Select(async r =>
         {
             try
@@ -170,11 +188,25 @@ internal static class Hub
             catch { /* already gone — nothing to stop */ }
         }));
 
-        // Stop the hub a beat later so this response flushes before the host tears down.
+        // Wait for the bridges to actually let go before stopping the hub, so `shutdown` really does
+        // free the tool's binaries (a bridge holds its exe open for the whole MCP session). Each
+        // exits within a heartbeat and says goodbye, so this usually returns well inside the budget;
+        // the deadline just bounds a wedged one — callers hard-kill leftovers anyway.
         var hook = ShutdownHook;
-        _ = Task.Run(async () => { await Task.Delay(250); hook?.Invoke(); });
-        return JsonSerializer.Serialize(
-            new { ok = true, stopped = regs.Count, message = $"hub and {regs.Count} supervisor(s) shutting down" }, Json);
+        _ = Task.Run(async () =>
+        {
+            var deadline = DateTimeOffset.UtcNow + BridgeHeartbeatInterval * 2 + TimeSpan.FromSeconds(1);
+            while (LiveBridges > 0 && DateTimeOffset.UtcNow < deadline) await Task.Delay(100);
+            await Task.Delay(250);   // let this response flush before the host tears down
+            hook?.Invoke();
+        });
+        return JsonSerializer.Serialize(new
+        {
+            ok = true,
+            stopped = regs.Count,
+            bridges,
+            message = $"hub, {regs.Count} supervisor(s) and {bridges} bridge(s) shutting down",
+        }, Json);
     }
 
     private static string UnknownProject(string project) => JsonSerializer.Serialize(new

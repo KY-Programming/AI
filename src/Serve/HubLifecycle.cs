@@ -18,11 +18,12 @@ internal static class HubLifecycle
         catch { return false; }
     }
 
-    // Launch `<self> hub` detached so it outlives the launching process. Process.Start (esp.
-    // UseShellExecute=true) can block for seconds if AV scans a freshly written exe; run it on a
-    // dedicated thread, not the ThreadPool, so a slow spawn can never starve the pool an ASP.NET
-    // Core host's own connection-accept continuations depend on.
-    public static void TryLaunchHub(string toolName, int port, bool exitWhenIdle)
+    // Launch `<self> hub` detached so it outlives the launching process. The hub decides for itself
+    // when to stop (it self-exits once no supervisor and no bridge needs it), so there's nothing to
+    // pass here. Process.Start (esp. UseShellExecute=true) can block for seconds if AV scans a
+    // freshly written exe; run it on a dedicated thread, not the ThreadPool, so a slow spawn can
+    // never starve the pool an ASP.NET Core host's own connection-accept continuations depend on.
+    public static void TryLaunchHub(string toolName, int port)
     {
         new Thread(() =>
         {
@@ -47,7 +48,6 @@ internal static class HubLifecycle
                 psi.ArgumentList.Add("hub");
                 psi.ArgumentList.Add("--port");
                 psi.ArgumentList.Add(port.ToString());
-                if (exitWhenIdle) psi.ArgumentList.Add("--exit-when-idle");
                 Process.Start(psi);
             }
             catch (Exception ex)
@@ -57,16 +57,16 @@ internal static class HubLifecycle
         }) { IsBackground = true, Name = $"{toolName}-hub-launch" }.Start();
     }
 
-    // Ensure a hub is reachable at hubUrl, launching one (persistently — no --exit-when-idle) if
-    // it isn't, and polling /health until it answers or the timeout elapses. Used by StdioBridge,
-    // which — unlike SupervisorHost's fire-and-forget launch — needs the hub actually up before it
-    // can proxy a call, and shouldn't race a not-yet-listening port with its first request.
+    // Ensure a hub is reachable at hubUrl, launching one if it isn't and polling /health until it
+    // answers or the timeout elapses. Used by StdioBridge, which — unlike SupervisorHost's
+    // fire-and-forget launch — needs the hub actually up before it can proxy a call, and shouldn't
+    // race a not-yet-listening port with its first request.
     public static async Task<bool> EnsureRunningAsync(string toolName, int port, TimeSpan timeout)
     {
         var hubUrl = $"http://127.0.0.1:{port}";
         if (await HubReachableAsync(hubUrl)) return true;
 
-        TryLaunchHub(toolName, port, exitWhenIdle: false);
+        TryLaunchHub(toolName, port);
 
         var deadline = DateTimeOffset.UtcNow + timeout;
         while (DateTimeOffset.UtcNow < deadline)

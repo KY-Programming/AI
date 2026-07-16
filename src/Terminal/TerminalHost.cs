@@ -62,7 +62,7 @@ internal static class TerminalHost
             if (opt.AutostartHub && !await HubLifecycle.HubReachableAsync(opt.HubUrl))
             {
                 Console.Error.WriteLine($"{opt.ToolName} · hub not reachable — auto-starting it on port {opt.DefaultHubPort}");
-                HubLifecycle.TryLaunchHub(opt.ToolName, opt.DefaultHubPort, exitWhenIdle: true);
+                HubLifecycle.TryLaunchHub(opt.ToolName, opt.DefaultHubPort);
             }
             Console.Error.WriteLine($"{opt.ToolName} · session '{session.Name}' · {session.ShellDisplay} · mode {session.Mode.Wire()} · control {controlUrl} · hub {opt.HubUrl}");
             _ = RegisterLoopAsync(opt.HubUrl, session.Name, controlUrl, stopping.Token);
