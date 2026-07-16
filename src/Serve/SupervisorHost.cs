@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting.Server;
@@ -101,7 +100,7 @@ public static class SupervisorHost
         if (opt.UseHub)
         {
             var hubPort = TryGetLoopbackPort(opt.HubUrl);
-            if (opt.AutostartHub && hubPort is int hp && !await HubReachableAsync(opt.HubUrl))
+            if (opt.AutostartHub && hubPort is int hp && !await HubLifecycle.HubReachableAsync(opt.HubUrl))
             {
                 lines.Add(BannerBox.Row("hub", $"not reachable — auto-starting on port {hp}"));
                 launchHubPort = hp;
@@ -119,7 +118,7 @@ public static class SupervisorHost
 
         BannerBox.Render(cfg.ToolName, lines);
 
-        if (launchHubPort is int port) TryLaunchHub(cfg.ToolName, port);
+        if (launchHubPort is int port) HubLifecycle.TryLaunchHub(cfg.ToolName, port, exitWhenIdle: true);
         if (opt.UseHub) _ = RegisterLoopAsync(opt.HubUrl, opt.Name, controlUrl, stopping.Token);
         if (afterStart is not null && opt.AfterStart is { Count: > 0 } afterCmd2)
             _ = afterStart.LaunchAfterBuildAsync(cfg, server, afterCmd2, opt.Name, stopping.Token);
@@ -166,17 +165,6 @@ public static class SupervisorHost
         await http.PostAsync(hubUrl.TrimEnd('/') + "/deregister", content);
     }
 
-    private static async Task<bool> HubReachableAsync(string hubUrl)
-    {
-        try
-        {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
-            using var resp = await http.GetAsync(hubUrl.TrimEnd('/') + "/health");
-            return resp.IsSuccessStatusCode;
-        }
-        catch { return false; }
-    }
-
     private static int? TryGetLoopbackPort(string url)
     {
         if (Uri.TryCreate(url, UriKind.Absolute, out var u) &&
@@ -185,39 +173,4 @@ public static class SupervisorHost
         return null;
     }
 
-    // Launch `<tool> hub` from this same exe, detached and hidden, so it outlives this
-    // supervisor and isn't tied to this console's Ctrl+C. Auto-started hubs self-exit when idle.
-    private static void TryLaunchHub(string toolName, int port)
-    {
-        try
-        {
-            var self = Environment.ProcessPath;
-            if (self is null) return;
-            var psi = new ProcessStartInfo { FileName = self };
-            if (OperatingSystem.IsWindows())
-            {
-                // Detached with no console window — survives this supervisor's Ctrl+C.
-                psi.UseShellExecute = true;
-                psi.WindowStyle = ProcessWindowStyle.Hidden;
-            }
-            else
-            {
-                // On POSIX, exec our own binary directly (UseShellExecute=true would route
-                // through the desktop file handler instead). The hub outlives our normal exit
-                // and self-exits when idle, so the worst case is a stray Ctrl+C taking it down
-                // and the next `serve` re-launching it.
-                psi.UseShellExecute = false;
-                psi.CreateNoWindow = true;
-            }
-            psi.ArgumentList.Add("hub");
-            psi.ArgumentList.Add("--port");
-            psi.ArgumentList.Add(port.ToString());
-            psi.ArgumentList.Add("--exit-when-idle");
-            Process.Start(psi);
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"{toolName}: could not auto-start hub: {ex.Message}");
-        }
-    }
 }

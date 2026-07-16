@@ -34,6 +34,7 @@
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.4.0" />
+    <PackageReference Include="ModelContextProtocol" Version="1.4.0" />
   </ItemGroup>
   <!-- Plain Microsoft.NET.Sdk doesn't add the ASP.NET Core implicit usings the Web SDK gives;
        add them so the shared hosting code reads the same as it did inside each exe. -->

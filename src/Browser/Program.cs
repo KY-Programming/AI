@@ -57,6 +57,10 @@ internal static class Program
         if (args.Length > 0 && string.Equals(args[0], "hub", StringComparison.OrdinalIgnoreCase))
             return await HubHost.RunAsync(BrowserHubCfg, args[1..], typeof(Program).Assembly);
 
+        // connect: the stdio bridge Claude Code spawns — proxies to the hub above over HTTP.
+        if (args.Length > 0 && string.Equals(args[0], "connect", StringComparison.OrdinalIgnoreCase))
+            return await StdioBridge.RunAsync(BrowserHubCfg, args[1..]);
+
         // init: wire ky-ai-browser into a Claude Code workspace (.mcp.json + allow-list), reflecting
         // BrowserTools off this exe's assembly — same shared command the other tools use.
         if (args.Length > 0 && string.Equals(args[0], "init", StringComparison.OrdinalIgnoreCase))
@@ -511,33 +515,40 @@ internal static class Program
 
     // Launch `ky-ai-browser hub` from this same exe, detached and hidden, so it outlives this instance
     // and isn't tied to this console's Ctrl+C. Auto-started hubs self-exit when idle.
+    // Process.Start (esp. UseShellExecute=true) can block for seconds if AV scans a freshly written
+    // exe; run it on a dedicated thread, not the ThreadPool, so a slow spawn can never starve the pool
+    // Kestrel's own connection-accept continuations depend on (this runs right after we bind our own
+    // control port, so a starved pool here could delay serving /status etc. for that long).
     private static void TryLaunchHub(int port)
     {
-        try
+        new Thread(() =>
         {
-            var self = Environment.ProcessPath;
-            if (self is null) return;
-            var psi = new ProcessStartInfo { FileName = self };
-            if (OperatingSystem.IsWindows())
+            try
             {
-                psi.UseShellExecute = true;
-                psi.WindowStyle = ProcessWindowStyle.Hidden;
+                var self = Environment.ProcessPath;
+                if (self is null) return;
+                var psi = new ProcessStartInfo { FileName = self };
+                if (OperatingSystem.IsWindows())
+                {
+                    psi.UseShellExecute = true;
+                    psi.WindowStyle = ProcessWindowStyle.Hidden;
+                }
+                else
+                {
+                    psi.UseShellExecute = false;
+                    psi.CreateNoWindow = true;
+                }
+                psi.ArgumentList.Add("hub");
+                psi.ArgumentList.Add("--port");
+                psi.ArgumentList.Add(port.ToString());
+                psi.ArgumentList.Add("--exit-when-idle");
+                Process.Start(psi);
             }
-            else
+            catch (Exception ex)
             {
-                psi.UseShellExecute = false;
-                psi.CreateNoWindow = true;
+                Console.Error.WriteLine($"ky-ai-browser: could not auto-start hub: {ex.Message}");
             }
-            psi.ArgumentList.Add("hub");
-            psi.ArgumentList.Add("--port");
-            psi.ArgumentList.Add(port.ToString());
-            psi.ArgumentList.Add("--exit-when-idle");
-            Process.Start(psi);
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"ky-ai-browser: could not auto-start hub: {ex.Message}");
-        }
+        }) { IsBackground = true, Name = "ky-ai-browser-hub-launch" }.Start();
     }
 
     private static async Task<bool> InjectAsync(string controlUrl, string scriptTag)

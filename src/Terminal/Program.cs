@@ -40,6 +40,12 @@ internal static class Program
                 return await HubHost.RunAsync(HubCfg, args[1..], typeof(Program).Assembly);
             }
 
+            if (string.Equals(args[0], "connect", StringComparison.OrdinalIgnoreCase))
+            {
+                Cli.TrySetUtf8Console();
+                return await StdioBridge.RunAsync(HubCfg, args[1..]);
+            }
+
             if (string.Equals(args[0], "shutdown", StringComparison.OrdinalIgnoreCase))
                 return await ShutdownCommand.RunAsync("ky-ai-terminal", DefaultHubPort, args[1..]);
 

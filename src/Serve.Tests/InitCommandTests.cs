@@ -32,18 +32,22 @@ public class InitCommandTests
         Assert.Equal(new[] { "alpha", "mixed_case_name", "zebra" }, names);
     }
 
-    // ── MergeMcpJson ──
+    // ── MergeMcpJson (Claude's default shape is now stdio — see McpShape.Claude) ──
+
+    private const string FakeExe = @"C:\tools\ky-ai-ng.exe";
 
     [Fact]
-    public void MergeMcpJson_adds_server_to_empty_input()
+    public void MergeMcpJson_stdio_shape_adds_command_and_args_to_empty_input()
     {
-        var res = InitCommand.MergeMcpJson(null, "ky-ai-ng", 5101);
+        var res = InitCommand.MergeMcpJson(null, "ky-ai-ng", 5101, exePath: FakeExe);
 
         Assert.True(res.Added);
         Assert.True(res.Changed);
-        var server = JsonNode.Parse(res.Json)!["mcpServers"]!["ky-ai-ng"]!;
-        Assert.Equal("http", server["type"]!.GetValue<string>());
-        Assert.Equal("http://127.0.0.1:5101/mcp", server["url"]!.GetValue<string>());
+        var server = JsonNode.Parse(res.Json)!["mcpServers"]!["ky-ai-ng"]!.AsObject();
+        Assert.Equal(FakeExe, server["command"]!.GetValue<string>());
+        Assert.Equal("connect", server["args"]![0]!.GetValue<string>());
+        Assert.False(server.ContainsKey("url"));   // no url/type for a stdio entry
+        Assert.False(server.ContainsKey("type"));
     }
 
     [Fact]
@@ -51,7 +55,7 @@ public class InitCommandTests
     {
         const string existing = """{ "mcpServers": { "other": { "type": "http", "url": "http://127.0.0.1:9999/mcp" } } }""";
 
-        var res = InitCommand.MergeMcpJson(existing, "ky-ai-dotnet", 5102);
+        var res = InitCommand.MergeMcpJson(existing, "ky-ai-dotnet", 5102, exePath: FakeExe);
 
         var servers = JsonNode.Parse(res.Json)!["mcpServers"]!.AsObject();
         Assert.True(servers.ContainsKey("other"));
@@ -60,25 +64,38 @@ public class InitCommandTests
     }
 
     [Fact]
-    public void MergeMcpJson_is_idempotent_when_already_present()
+    public void MergeMcpJson_stdio_shape_is_idempotent_when_already_present()
     {
-        var first = InitCommand.MergeMcpJson(null, "ky-ai-ng", 5101);
-        var second = InitCommand.MergeMcpJson(first.Json, "ky-ai-ng", 5101);
+        var first = InitCommand.MergeMcpJson(null, "ky-ai-ng", 5101, exePath: FakeExe);
+        var second = InitCommand.MergeMcpJson(first.Json, "ky-ai-ng", 5101, exePath: FakeExe);
 
         Assert.False(second.Changed);
         Assert.False(second.Added);
     }
 
     [Fact]
-    public void MergeMcpJson_updates_when_url_differs()
+    public void MergeMcpJson_stdio_shape_updates_when_exe_path_differs()
     {
-        var first = InitCommand.MergeMcpJson(null, "ky-ai-ng", 5101);
+        var first = InitCommand.MergeMcpJson(null, "ky-ai-ng", 5101, exePath: FakeExe);
 
-        var changed = InitCommand.MergeMcpJson(first.Json, "ky-ai-ng", 5999); // different port
+        var changed = InitCommand.MergeMcpJson(first.Json, "ky-ai-ng", 5101, exePath: @"D:\other\ky-ai-ng.exe");
 
         Assert.True(changed.Changed);
         Assert.False(changed.Added);  // updated, not added
-        Assert.Contains("5999", changed.Json);
+        var server = JsonNode.Parse(changed.Json)!["mcpServers"]!["ky-ai-ng"]!;
+        Assert.Equal(@"D:\other\ky-ai-ng.exe", server["command"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void MergeMcpJson_stdio_shape_unaffected_by_hub_port()
+    {
+        // The stdio entry doesn't embed the hub port at all (the bridge resolves its own hub via
+        // HubConfig.DefaultPort) — only the exe path/toolName drive whether the entry changes.
+        var first = InitCommand.MergeMcpJson(null, "ky-ai-ng", 5101, exePath: FakeExe);
+
+        var same = InitCommand.MergeMcpJson(first.Json, "ky-ai-ng", 5999, exePath: FakeExe);
+
+        Assert.False(same.Changed);
     }
 
     [Fact]

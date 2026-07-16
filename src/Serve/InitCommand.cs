@@ -112,7 +112,8 @@ public static class InitCommand
         }
 
         var paths = Discover(startDir, agent);
-        var url = $"http://127.0.0.1:{hubPort}/mcp";
+        var exePath = Environment.ProcessPath;
+        var connectDesc = agent.Shape.Stdio ? $"{toolName} connect (stdio)" : $"http://127.0.0.1:{hubPort}/mcp";
         var mcpLabel = agent.McpInMarkerDir ? $"{agent.MarkerDir}/{agent.McpFileName}" : agent.McpFileName;
 
         Console.WriteLine($"Agent:        {agent.DisplayName}{(paths.AgentDetected ? "" : $"  (no {agent.MarkerDir}/ — will create under {paths.Root})")}");
@@ -128,7 +129,7 @@ public static class InitCommand
         try
         {
             var existing = paths.McpExists ? File.ReadAllText(paths.McpPath) : null;
-            var res = MergeMcpJson(existing, toolName, hubPort, agent.Shape);
+            var res = MergeMcpJson(existing, toolName, hubPort, agent.Shape, exePath);
             if (!res.Changed)
             {
                 Console.WriteLine($"{Check} MCP server '{toolName}' already configured — no change.");
@@ -137,7 +138,7 @@ public static class InitCommand
             {
                 WriteFile(paths.McpPath, res.Json);
                 anyChange = true;
-                Console.WriteLine($"{Check} {(res.Added ? "added" : "updated")} MCP server '{toolName}' → {url}");
+                Console.WriteLine($"{Check} {(res.Added ? "added" : "updated")} MCP server '{toolName}' → {connectDesc}");
             }
             else
             {
@@ -256,7 +257,9 @@ public static class InitCommand
 
     // ── merge the tool's server into the agent's MCP config (preserving any other content) ──
     // `shape` captures the per-agent JSON differences; it defaults to Claude's for back-compat.
-    public static McpMergeResult MergeMcpJson(string? existing, string toolName, int hubPort, McpShape? shape = null)
+    // `exePath` is only used for a stdio shape (the `command` to launch); pass a fixed value from
+    // tests for determinism, or let a real caller default to Environment.ProcessPath.
+    public static McpMergeResult MergeMcpJson(string? existing, string toolName, int hubPort, McpShape? shape = null, string? exePath = null)
     {
         shape ??= McpShape.Claude;
         var root = ParseObjectOrNew(existing);
@@ -267,8 +270,19 @@ public static class InitCommand
         }
 
         var desired = new JsonObject();
-        if (shape.IncludeType) desired["type"] = "http";
-        desired[shape.UrlKey] = $"http://127.0.0.1:{hubPort}/mcp";
+        if (shape.Stdio)
+        {
+            // A stdio bridge Claude Code spawns itself every session, which proxies to the tool's
+            // hub over HTTP — see StdioBridge. Unlike the raw http entry below, this has no single
+            // point of failure tied to whether the hub happens to be running at connect time.
+            desired["command"] = exePath ?? Environment.ProcessPath ?? toolName;
+            desired["args"] = new JsonArray("connect");
+        }
+        else
+        {
+            if (shape.IncludeType) desired["type"] = "http";
+            desired[shape.UrlKey] = $"http://127.0.0.1:{hubPort}/mcp";
+        }
 
         var existed = servers.ContainsKey(toolName);
         var changed = !existed || !JsonNode.DeepEquals(servers[toolName], desired);
@@ -519,13 +533,17 @@ public sealed record AgentTarget(
     McpShape Shape,
     bool HasAllowList);
 
-// The three ways an HTTP MCP server entry is written across agents:
+// The ways an MCP server entry is written across agents:
 //   • ServersKey  — the top-level object holding servers ("mcpServers", or "servers" for VS Code)
 //   • IncludeType — whether to emit "type": "http" (Cursor infers transport from `url` and omits it)
 //   • UrlKey      — the URL property name ("url"; agents that use a different key set it here)
-public sealed record McpShape(string ServersKey, bool IncludeType, string UrlKey)
+//   • Stdio       — emit a `command`/`args` stdio entry instead of `type`/`url` (IncludeType/UrlKey
+//                   are then unused). Claude Code's HTTP reconnect isn't reliable enough for a hub
+//                   that's only intermittently running — see StdioBridge — so its entries point at
+//                   `<tool> connect` instead of the hub's raw URL.
+public sealed record McpShape(string ServersKey, bool IncludeType, string UrlKey, bool Stdio = false)
 {
-    public static readonly McpShape Claude = new("mcpServers", IncludeType: true, UrlKey: "url");
+    public static readonly McpShape Claude = new("mcpServers", IncludeType: true, UrlKey: "url", Stdio: true);
     public static readonly McpShape Cursor = new("mcpServers", IncludeType: false, UrlKey: "url");
     public static readonly McpShape VsCode = new("servers", IncludeType: true, UrlKey: "url");
 }

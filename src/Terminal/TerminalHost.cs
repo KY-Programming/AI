@@ -1,6 +1,6 @@
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using KY.AI.Serve;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 
@@ -59,10 +59,10 @@ internal static class TerminalHost
 
         if (opt.UseHub)
         {
-            if (opt.AutostartHub && !await HubReachableAsync(opt.HubUrl))
+            if (opt.AutostartHub && !await HubLifecycle.HubReachableAsync(opt.HubUrl))
             {
                 Console.Error.WriteLine($"{opt.ToolName} · hub not reachable — auto-starting it on port {opt.DefaultHubPort}");
-                TryLaunchHub(opt.ToolName, opt.DefaultHubPort);
+                HubLifecycle.TryLaunchHub(opt.ToolName, opt.DefaultHubPort, exitWhenIdle: true);
             }
             Console.Error.WriteLine($"{opt.ToolName} · session '{session.Name}' · {session.ShellDisplay} · mode {session.Mode.Wire()} · control {controlUrl} · hub {opt.HubUrl}");
             _ = RegisterLoopAsync(opt.HubUrl, session.Name, controlUrl, stopping.Token);
@@ -120,34 +120,4 @@ internal static class TerminalHost
         await http.PostAsync(hubUrl.TrimEnd('/') + "/deregister", content);
     }
 
-    private static async Task<bool> HubReachableAsync(string hubUrl)
-    {
-        try
-        {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
-            using var resp = await http.GetAsync(hubUrl.TrimEnd('/') + "/health");
-            return resp.IsSuccessStatusCode;
-        }
-        catch { return false; }
-    }
-
-    // Launch `<self> hub` detached so it outlives this session; auto-started hubs self-exit when idle.
-    private static void TryLaunchHub(string toolName, int port)
-    {
-        try
-        {
-            var self = Environment.ProcessPath;
-            if (self is null) return;
-            var psi = new ProcessStartInfo { FileName = self, UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden };
-            psi.ArgumentList.Add("hub");
-            psi.ArgumentList.Add("--port");
-            psi.ArgumentList.Add(port.ToString());
-            psi.ArgumentList.Add("--exit-when-idle");
-            Process.Start(psi);
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"{toolName}: could not auto-start hub: {ex.Message}");
-        }
-    }
 }

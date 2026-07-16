@@ -55,6 +55,8 @@ internal static class Program
 
         if (string.Equals(args[0], "hub", StringComparison.OrdinalIgnoreCase))
             return await HubHost.RunAsync(HubCfg, args[1..]);
+        if (string.Equals(args[0], "connect", StringComparison.OrdinalIgnoreCase))
+            return await StdioBridge.RunAsync(HubCfg, args[1..]);
         if (string.Equals(args[0], "shutdown", StringComparison.OrdinalIgnoreCase))
             return await ShutdownCommand.RunAsync("ky-ai-ng", DefaultHubPort, args[1..]);
         if (string.Equals(args[0], "init", StringComparison.OrdinalIgnoreCase))
