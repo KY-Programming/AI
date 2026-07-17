@@ -163,10 +163,13 @@ internal static class Program
             ky-ai-terminal --shell ssh -- user@host
             ky-ai-terminal --shell ssh -- -p 2222 user@host
 
-        INIT — wire ky-ai-terminal into a Claude Code workspace (.mcp.json + allow-list):
-          ky-ai-terminal init [-y] [--dir <path>]
-          Finds the nearest .mcp.json and .claude/, then (each step confirmed) adds the MCP
-          server and allows its commands. Merges into existing files; safe to re-run.
+        INIT — wire ky-ai-terminal into an AI agent's workspace (Claude Code, Cursor, or VS Code):
+          ky-ai-terminal init [--agent <claude|cursor|vscode>] [-y] [--dir <path>]
+          Walks up from the current directory for the agent's config folder, then (each step
+          confirmed) adds the MCP server and, for Claude, allows its commands in
+          .claude/settings.local.json. Without --agent the agent is auto-detected and confirmed
+          via a picker; -y takes the detected one and accepts every prompt (non-interactive).
+          Merges into existing files; safe to re-run. `init --help` lists the per-agent paths.
 
         SHUTDOWN — stop the hub and every session it supervises:
           ky-ai-terminal shutdown

@@ -626,12 +626,17 @@ internal static class Program
           (it locks the files), then on Windows the update runs in a new window that opens once this
           process exits (a running tool can't overwrite its own files).
 
-        INIT — wire ky-ai-browser into a Claude Code workspace (.mcp.json + allow-list):
-          ky-ai-browser init [-y] [--dir <path>]
-          Finds the nearest .mcp.json and .claude/, then (each step confirmed) adds the MCP server
-          (127.0.0.1:5104) and allows its commands. Merges into existing files; safe to re-run. Or
-          wire it by hand:
-            { "mcpServers": { "ky-ai-browser": { "type": "http", "url": "http://127.0.0.1:5104/mcp" } } }
+        INIT — wire ky-ai-browser into an AI agent's workspace (Claude Code, Cursor, or VS Code):
+          ky-ai-browser init [--agent <claude|cursor|vscode>] [-y] [--dir <path>]
+          Walks up from the current directory for the agent's config folder, then (each step
+          confirmed) adds the MCP server (127.0.0.1:5104) and, for Claude, allows its commands in
+          .claude/settings.local.json. Without --agent the agent is auto-detected and confirmed
+          via a picker; -y takes the detected one and accepts every prompt (non-interactive).
+          Merges into existing files; safe to re-run. `init --help` lists the per-agent paths.
+          Or wire it by hand — Cursor (.cursor/mcp.json) and VS Code (.vscode/mcp.json) take the
+          hub URL, while Claude (.mcp.json) proxies over stdio so it reconnects to an on-demand hub:
+            { "mcpServers": { "ky-ai-browser": { "url": "http://127.0.0.1:5104/mcp" } } }
+            { "mcpServers": { "ky-ai-browser": { "command": "ky-ai-browser", "args": ["connect"] } } }
         """);
     }
 }

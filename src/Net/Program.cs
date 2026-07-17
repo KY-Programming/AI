@@ -161,10 +161,13 @@ internal static class Program
           Anything else after `serve` is forwarded to dotnet (e.g. --project ./Api.csproj).
           `dotnet watch run` hot-reloads; the agent verifies builds via the hub's wait_for_build.
 
-        INIT — wire ky-ai-dotnet into a Claude Code workspace (.mcp.json + allow-list):
-          ky-ai-dotnet init [-y] [--dir <path>]
-          Finds the nearest .mcp.json and .claude/, then (each step confirmed) adds the MCP
-          server and allows its commands. Merges into existing files; safe to re-run.
+        INIT — wire ky-ai-dotnet into an AI agent's workspace (Claude Code, Cursor, or VS Code):
+          ky-ai-dotnet init [--agent <claude|cursor|vscode>] [-y] [--dir <path>]
+          Walks up from the current directory for the agent's config folder, then (each step
+          confirmed) adds the MCP server and, for Claude, allows its commands in
+          .claude/settings.local.json. Without --agent the agent is auto-detected and confirmed
+          via a picker; -y takes the detected one and accepts every prompt (non-interactive).
+          Merges into existing files; safe to re-run. `init --help` lists the per-agent paths.
 
         UPDATE — update this tool to the latest version (via the package manager it came from):
           ky-ai-dotnet update
