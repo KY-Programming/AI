@@ -44,6 +44,7 @@ internal sealed class EvalChannel
     private volatile bool _interactionActive;
     private volatile bool _paused;
     private volatile bool _killed;
+    private volatile bool _reloadReleased;
 
     private readonly string _token;
 
@@ -60,8 +61,29 @@ internal sealed class EvalChannel
         // control) turns into a new session, so it clears any lingering kill. It does NOT clear a pause —
         // that still requires the human's own paused-pill click (InstanceEval refuses a fresh
         // start_interaction outright while Paused, so this branch is never reached in that state).
-        if (active) _killed = false;
+        // It also re-arms the reload hold: a release is scoped to the session it was clicked in, so the
+        // next session starts holding again rather than inheriting the last one's opt-out.
+        if (active) { _killed = false; _reloadReleased = false; }
     }
+
+    // While a session is open the page suppresses the Angular dev server's live-reload/HMR traffic, so a
+    // rebuild (or a colleague's save) can't yank the page out from under the agent mid-test. This is
+    // page-side interception of vite's HMR socket — the dev server still builds and ky-ai-ng still reports
+    // the verdict; only the page's reaction is deferred.
+    //
+    // Derived, not stored: it follows the session automatically (start_interaction ⇒ hold,
+    // stop_interaction ⇒ release), which also means a human Pause/Stop — both of which clear
+    // _interactionActive — hands live-reload straight back while they're driving the tab themselves.
+    // The human can also opt out for the CURRENT session alone by clicking the held-reload pill
+    // (SetReloadReleased) without ending the agent's session; the next one re-arms (see SetInteraction).
+    public bool HoldReload => _interactionActive && !_reloadReleased;
+
+    // Whether the human clicked "continue reloading" for this session. Kept distinct from HoldReload
+    // because the page reads it to decide whether releasing the hold should force a catch-up reload:
+    // an automatic release (the agent finished) resyncs the page, but a human's explicit click means
+    // "carry on as if it was never paused" — so it deliberately leaves the page as-is.
+    public bool ReloadReleased => _reloadReleased;
+    public void SetReloadReleased(bool released) => _reloadReleased = released;
 
     // Set when the human clicks the badge's Pause icon — a manual, resumable override for "I'm testing
     // this tab myself right now, just for a moment". Closes the gate immediately and, while true, also

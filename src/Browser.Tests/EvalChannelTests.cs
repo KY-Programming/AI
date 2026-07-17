@@ -127,6 +127,67 @@ public class EvalChannelTests
         Assert.True(ch.InteractionActive);
     }
 
+    // ── reload hold: suppress the Angular dev server's live-reload while the agent drives the page ──
+
+    [Fact]
+    public void HoldReload_follows_the_session_and_is_off_outside_one()
+    {
+        var ch = new EvalChannel("tok");
+        Assert.False(ch.HoldReload);      // no session → the dev's live-reload is untouched
+
+        ch.SetInteraction(true);
+        Assert.True(ch.HoldReload);       // start_interaction holds reloads, no opt-in needed
+
+        ch.SetInteraction(false);
+        Assert.False(ch.HoldReload);      // stop_interaction hands them straight back
+    }
+
+    [Fact]
+    public void A_human_pause_or_kill_hands_live_reload_back()
+    {
+        // Both clear the gate, so the hold lifts with it: the human is driving/looking at the tab
+        // themselves, and their own saves must show up again.
+        var ch = new EvalChannel("tok");
+        ch.SetInteraction(true);
+        ch.SetPaused(true);
+        Assert.False(ch.HoldReload);
+
+        ch.SetPaused(false);
+        ch.SetInteraction(true);
+        Assert.True(ch.HoldReload);
+        ch.SetKilled(true);
+        Assert.False(ch.HoldReload);
+    }
+
+    [Fact]
+    public void SetReloadReleased_lifts_the_hold_without_ending_the_session()
+    {
+        // The held-reload pill's click: live-reload resumes, but the agent keeps driving — unlike Pause,
+        // which ends the session outright.
+        var ch = new EvalChannel("tok");
+        ch.SetInteraction(true);
+
+        ch.SetReloadReleased(true);
+        Assert.False(ch.HoldReload);
+        Assert.True(ch.ReloadReleased);
+        Assert.True(ch.InteractionActive);   // the session itself is untouched
+    }
+
+    [Fact]
+    public void A_reload_release_is_scoped_to_its_session_and_the_next_one_re_arms()
+    {
+        var ch = new EvalChannel("tok");
+        ch.SetInteraction(true);
+        ch.SetReloadReleased(true);
+        Assert.False(ch.HoldReload);
+
+        ch.SetInteraction(false);
+        ch.SetInteraction(true);             // a fresh start_interaction
+
+        Assert.False(ch.ReloadReleased);     // the opt-out doesn't leak into the next session
+        Assert.True(ch.HoldReload);
+    }
+
     [Fact]
     public async Task WaitForResumeAsync_returns_immediately_when_never_paused()
     {

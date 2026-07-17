@@ -197,6 +197,8 @@ internal static class Program
             interactionActive = eval.InteractionActive,
             paused = eval.Paused,
             killed = eval.Killed,
+            holdReload = eval.HoldReload,
+            reloadReleased = eval.ReloadReleased,
             buildSeq = Interlocked.Read(ref Capture.BuildSeq),
         }, EvalJson), "application/json"));
         app.MapGet("/console/tail", (int? lines, string? level, long? sinceSeq, string? grep, string? pageLoad, bool? compact, bool? appOnly, bool? dropFrameworkNoise, bool? currentPageOnly) =>
@@ -273,10 +275,13 @@ internal static class Program
         {
             Cors(ctx);
             if (!string.Equals(ctx.Request.Query["token"], collector.Token, StringComparison.Ordinal))
-                return Results.Json(new { requests = Array.Empty<EvalRequest>(), interactionActive = false, paused = false, killed = false }, EvalJson);   // foreign tab — hand it nothing
+                return Results.Json(new { requests = Array.Empty<EvalRequest>(), interactionActive = false, paused = false, killed = false, holdReload = false }, EvalJson);   // foreign tab — hand it nothing
             var reqs = await eval.PollAsync(EvalPollWindowMs, ctx.RequestAborted);
             // interactionActive/paused/killed let a (re)loaded page restore the overlay/paused/killed pill on its own.
-            return Results.Json(new { requests = reqs, interactionActive = eval.InteractionActive, paused = eval.Paused, killed = eval.Killed }, EvalJson);
+            // holdReload drives the page's dev-server reload suppression; paused/killed additionally tell it
+            // whether a release should force a catch-up reload (they mean a human is looking at the page, so it
+            // must not be disturbed — see the reloadHold module in console-capture.js).
+            return Results.Json(new { requests = reqs, interactionActive = eval.InteractionActive, paused = eval.Paused, killed = eval.Killed, holdReload = eval.HoldReload }, EvalJson);
         });
         app.MapMethods("/__kyai/eval/result", new[] { "OPTIONS" }, (HttpContext ctx) =>
         {
@@ -339,6 +344,23 @@ internal static class Program
             if (!await HasValidTokenAsync(ctx, collector.Token)) return Results.Json(new { ok = false });
             eval.SetKilled(true);
             return Results.Json(new { ok = true, killed = true });
+        });
+        // The held-reload pill's click: hand the Angular dev server's live-reload back for THIS session
+        // without ending the agent's session (unlike Pause, which does end it). Deliberately one-way and
+        // session-scoped — the agent can't re-arm the hold itself, and the next start_interaction does
+        // (see EvalChannel.SetInteraction). The page skips its catch-up reload on this path, so clicking
+        // never disturbs whatever is currently on screen.
+        app.MapMethods("/__kyai/reload/release", new[] { "OPTIONS" }, (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            return Results.StatusCode(StatusCodes.Status204NoContent);
+        });
+        app.MapPost("/__kyai/reload/release", async (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            if (!await HasValidTokenAsync(ctx, collector.Token)) return Results.Json(new { ok = false });
+            eval.SetReloadReleased(true);
+            return Results.Json(new { ok = true, holdReload = false });
         });
         app.Urls.Add($"http://127.0.0.1:{restPort}");
 

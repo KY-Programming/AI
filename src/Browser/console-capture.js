@@ -250,6 +250,9 @@
   var INTERACTION_PAUSE = INTERACTION_BASE + "/pause";
   var INTERACTION_RESUME = INTERACTION_BASE + "/resume";
   var INTERACTION_KILL = INTERACTION_BASE + "/kill";
+  // The held-reload pill's click — hands the dev server's live-reload back for this session without
+  // ending it (see the reloadHold module below). Same token-guard/CORS shape as the overrides above.
+  var RELOAD_RELEASE = INGEST.replace(/\/console$/, "/reload/release");
 
   function evalTypeOf(v) {
     if (v === null) return "null";
@@ -631,7 +634,11 @@
    */
   var OVERLAY_CSS =
     ".kyai-frame{position:absolute;inset:0;box-sizing:border-box;border:3px solid rgba(229,57,53,.95);display:none;}" +
-    ".kyai-badge{position:absolute;top:8px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:6px;font:600 11px/1.4 system-ui,sans-serif;color:#fff;background:rgba(229,57,53,.95);padding:3px 8px 3px 10px;border-radius:10px;letter-spacing:.3px;white-space:nowrap;max-width:70vw;display:none;}" +
+    // One centered row holding every top pill, so they sit side by side and the GROUP stays centered as
+    // pills come and go. They can't each center themselves (translateX(-50%) would stack them on the same
+    // spot); the row owns the positioning and the pills are plain in-flow flex items.
+    ".kyai-topbar{position:absolute;top:8px;left:50%;transform:translateX(-50%);display:flex;align-items:flex-start;gap:6px;max-width:92vw;}" +
+    ".kyai-badge{display:flex;align-items:center;gap:6px;font:600 11px/1.4 system-ui,sans-serif;color:#fff;background:rgba(229,57,53,.95);padding:3px 8px 3px 10px;border-radius:10px;letter-spacing:.3px;white-space:nowrap;max-width:70vw;display:none;}" +
     ".kyai-badge-text{flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}" +
     // The real, clickable controls in an otherwise pointer-events:none overlay — pointer-events:auto
     // opts just these icons back in so the rest of the frame never intercepts the page's own clicks.
@@ -641,10 +648,20 @@
     // left the icon looking off-center. A hand-drawn shape has an exact, known bounding box instead.
     ".kyai-icon-btn{flex:none;pointer-events:auto;cursor:pointer;display:none;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:rgba(0,0,0,.3);}" +
     ".kyai-icon-btn:hover{background:rgba(0,0,0,.5);}" +
-    ".kyai-icon-btn svg{display:block;}" +
-    ".kyai-paused{position:absolute;top:8px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:6px;font:600 11px/1.4 system-ui,sans-serif;color:#fff;background:rgba(66,66,66,.95);padding:3px 8px 3px 10px;border-radius:10px;letter-spacing:.3px;white-space:nowrap;max-width:80vw;display:none;}" +
+    // Nudged up/left by a pixel: each glyph's ink sits marginally low-right of its viewBox centre, so
+    // pure flex-centering of the SVG box still left the visible shape looking off inside the circle.
+    ".kyai-icon-btn svg{display:block;transform:translate(-1px,-1px);}" +
+    ".kyai-paused{display:flex;align-items:center;gap:6px;font:600 11px/1.4 system-ui,sans-serif;color:#fff;background:rgba(66,66,66,.95);padding:3px 8px 3px 10px;border-radius:10px;letter-spacing:.3px;white-space:nowrap;max-width:80vw;display:none;}" +
     ".kyai-paused-text{pointer-events:auto;cursor:pointer;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;}" +
     ".kyai-paused-text:hover{text-decoration:underline;}" +
+    // The held-reload pill: a SECOND badge sharing the row with the session badge (it only ever shows
+    // while a session is open, so it always has that badge beside it). Same red as the badge — it's part
+    // of the agent-is-driving state, not a separate mode like the grey paused pill. Its ▶ is a real
+    // control (the pill's text isn't clickable); the ↻ ahead of the text is decoration.
+    ".kyai-reload{display:flex;align-items:center;gap:6px;font:600 11px/1.4 system-ui,sans-serif;color:#fff;background:rgba(229,57,53,.95);padding:3px 8px 3px 10px;border-radius:10px;letter-spacing:.3px;white-space:nowrap;max-width:70vw;display:none;}" +
+    ".kyai-reload-icon{flex:none;display:flex;align-items:center;justify-content:center;}" +
+    ".kyai-reload-icon svg{display:block;}" +
+    ".kyai-reload-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;}" +
     ".kyai-cursor{position:absolute;left:0;top:0;width:24px;height:24px;will-change:transform;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5));display:none;}" +
     ".kyai-cursor svg{display:block;}" +
     ".kyai-ripple{position:absolute;width:10px;height:10px;margin:-5px 0 0 -5px;border:2px solid rgba(229,57,53,.9);border-radius:50%;animation:kyai-rip .6s ease-out forwards;}" +
@@ -657,6 +674,14 @@
     '<rect x="1.5" y="0.5" width="2" height="8" rx="0.5" fill="#fff"/><rect x="5.5" y="0.5" width="2" height="8" rx="0.5" fill="#fff"/></svg>';
   var ICON_STOP_SVG = '<svg width="9" height="9" viewBox="0 0 9 9" xmlns="http://www.w3.org/2000/svg">' +
     '<rect x="1" y="1" width="7" height="7" rx="1" fill="#fff"/></svg>';
+  // Play triangle — the held-reload pill's "let Angular reload again" control. Drawn on the same 9x9
+  // grid as Pause/Stop so all three icon buttons share one optical size.
+  var ICON_PLAY_SVG = '<svg width="9" height="9" viewBox="0 0 9 9" xmlns="http://www.w3.org/2000/svg">' +
+    '<path d="M2.25 1L8 4.5 2.25 8z" fill="#fff"/></svg>';
+  // Circular-arrow refresh mark for the held-reload pill. Unlike the Pause/Stop/Play icons this one is
+  // decoration, not a control, so it takes no pointer-events.
+  var ICON_RELOAD_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">' +
+    '<path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0020 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 004 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z" fill="#fff"/></svg>';
 
   /*
    * Supervision overlay — a fixed, non-interactable red frame + cursor, shown only while a session is
@@ -679,8 +704,9 @@
    * there is no tool OR UI control at all that clears a kill except the agent's own fresh session.
    */
   var overlay = (function () {
-    var host = null, root = null, frame = null, cursor = null, badge = null, badgeText = null,
-      badgePause = null, badgeKill = null, pausedPill = null, pausedText = null, pausedKill = null;
+    var host = null, root = null, frame = null, cursor = null, topbar = null, badge = null, badgeText = null,
+      badgePause = null, badgeKill = null, pausedPill = null, pausedText = null, pausedKill = null,
+      reloadPill = null, reloadText = null, reloadPlay = null;
     var shown = false, paused = false, killed = false, cx = 0, cy = 0, curLabel = null, curLabelTimer = null, hintTimer = null;
     function vw() { return window.innerWidth || (document.documentElement || {}).clientWidth || 0; }
     function vh() { return window.innerHeight || (document.documentElement || {}).clientHeight || 0; }
@@ -695,6 +721,7 @@
       root = host.attachShadow ? host.attachShadow({ mode: "open" }) : host;
       var style = document.createElement("style"); style.textContent = OVERLAY_CSS; root.appendChild(style);
       frame = document.createElement("div"); frame.className = "kyai-frame"; root.appendChild(frame);
+      topbar = document.createElement("div"); topbar.className = "kyai-topbar";
       badge = document.createElement("div"); badge.className = "kyai-badge";
       badgeText = document.createElement("span"); badgeText.className = "kyai-badge-text"; badge.appendChild(badgeText);
       badgePause = document.createElement("span"); badgePause.className = "kyai-icon-btn"; badgePause.innerHTML = ICON_PAUSE_SVG;
@@ -705,7 +732,7 @@
       badgeKill.title = "Stop"; badgeKill.setAttribute("role", "button"); badgeKill.setAttribute("tabindex", "0");
       badgeKill.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); onUserKill(); });
       badge.appendChild(badgeKill);
-      root.appendChild(badge);
+      topbar.appendChild(badge);
       pausedPill = document.createElement("div"); pausedPill.className = "kyai-paused";
       pausedText = document.createElement("span"); pausedText.className = "kyai-paused-text";
       pausedText.textContent = "⏸ paused — click to let ky-ai continue";
@@ -717,7 +744,21 @@
       pausedKill.style.display = "flex";   // always visible whenever the parent pill is (pill's own display gates it)
       pausedKill.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); onUserKill(); });
       pausedPill.appendChild(pausedKill);
-      root.appendChild(pausedPill);
+      topbar.appendChild(pausedPill);
+      reloadPill = document.createElement("div"); reloadPill.className = "kyai-reload";
+      var reloadIcon = document.createElement("span"); reloadIcon.className = "kyai-reload-icon"; reloadIcon.innerHTML = ICON_RELOAD_SVG;
+      reloadPill.appendChild(reloadIcon);
+      reloadText = document.createElement("span"); reloadText.className = "kyai-reload-text";
+      reloadText.textContent = "Angular reload paused";
+      reloadPill.appendChild(reloadText);
+      reloadPlay = document.createElement("span"); reloadPlay.className = "kyai-icon-btn"; reloadPlay.innerHTML = ICON_PLAY_SVG;
+      reloadPlay.title = "Continue Angular reloading";
+      reloadPlay.setAttribute("role", "button"); reloadPlay.setAttribute("tabindex", "0");
+      reloadPlay.style.display = "flex";   // always visible whenever the parent pill is (pill's own display gates it)
+      reloadPlay.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); onUserContinueReload(); });
+      reloadPill.appendChild(reloadPlay);
+      topbar.appendChild(reloadPill);
+      root.appendChild(topbar);
       cursor = document.createElement("div"); cursor.className = "kyai-cursor"; cursor.innerHTML = CURSOR_SVG; root.appendChild(cursor);
       put(Math.round(vw() / 2), Math.round(vh() / 2), false);
       (document.body || document.documentElement).appendChild(host);
@@ -785,6 +826,7 @@
           if (host) { frame.style.display = "none"; cursor.style.display = "none"; badgePause.style.display = badgeKill.style.display = "none"; }
           if (!hintTimer && badge) badge.style.display = "none";
           if (!paused && pausedPill) pausedPill.style.display = "none";
+          if (reloadPill) reloadPill.style.display = "none";   // the hold is session-scoped — no session, no pill
         } catch (e) {}
       },
       // The human's own Pause click: end the session right now and swap the badge for the paused pill —
@@ -795,6 +837,7 @@
           ensure(); paused = true; shown = false;
           frame.style.display = "none"; cursor.style.display = "none"; badgePause.style.display = badgeKill.style.display = "none";
           badge.style.display = "none"; pausedPill.style.display = "flex";
+          reloadPill.style.display = "none";   // pausing hands live-reload back (see reloadHold)
         } catch (e) {}
       },
       clearPaused: function () { try { paused = false; if (pausedPill) pausedPill.style.display = "none"; } catch (e) {} },
@@ -808,6 +851,7 @@
           killed = true; shown = false; paused = false;
           if (host) { frame.style.display = "none"; cursor.style.display = "none"; badgePause.style.display = badgeKill.style.display = "none"; badge.style.display = "none"; }
           if (pausedPill) pausedPill.style.display = "none";
+          if (reloadPill) reloadPill.style.display = "none";
         } catch (e) {}
       },
       clearKilled: function () { killed = false; },
@@ -818,7 +862,11 @@
       // Short, center-screen label for a manipulate action ("insert text: xxx", "[ENTER]", "navigate to: xxx").
       centerLabel: function (text) { try { if (shown) clabel(text); } catch (e) {} },
       // Read-only hint ("reading: .selector") — shares the one badge above instead of a second pill.
-      hint: function (text) { try { setHint(text); } catch (e) {} }
+      hint: function (text) { try { setHint(text); } catch (e) {} },
+      // The held-reload pill, stacked under the badge — shown once the hold has actually swallowed a
+      // dev-server reload, so it reads as "your change is waiting", not as idle chrome on every session.
+      showReloadHeld: function () { try { ensure(); reloadPill.style.display = "flex"; } catch (e) {} },
+      hideReloadHeld: function () { try { if (reloadPill) reloadPill.style.display = "none"; } catch (e) {} }
     };
   })();
 
@@ -854,6 +902,102 @@
       else if (!killed && overlay.isKilled()) overlay.clearKilled();
     } catch (e) {}
   }
+
+  /*
+   * Angular reload hold — keep the dev server from yanking the page out from under the agent mid-test.
+   *
+   * While a session is open (start_interaction..stop_interaction) the Angular dev server would still
+   * rebuild on every save and push a reload/HMR update to the page, destroying whatever the agent was
+   * driving. This intercepts that push at the page end: the build still runs and ky-ai-ng still reports
+   * its verdict — only the page's REACTION is deferred.
+   *
+   * How it hooks in: Angular's dev server (vite) delivers reloads over a WebSocket it tags with the
+   * "vite-hmr" subprotocol, and its client attaches via addEventListener. This snippet is a CLASSIC
+   * script and /@vite/client is a deferred MODULE, so we always run first — early enough to wrap the
+   * WebSocket constructor and register our own message listener BEFORE vite's. Being first is what lets
+   * stopImmediatePropagation() drop a message before vite's own handler ever sees it. Vite's separate
+   * "vite-ping" socket is left alone.
+   *
+   * Releasing is deliberately asymmetric, because "who is looking at the page right now" differs:
+   *   - the agent finished (stop_interaction)  ⇒ force one catch-up reload, so the page resyncs to the
+   *     code on disk. Necessary, not cosmetic: swallowed `update` messages leave vite's client module
+   *     graph behind the server's, and a hard reload is the only reliable way back.
+   *   - the human clicked the pill, or hit Pause/Stop ⇒ NO reload. They're mid-look at this page; a
+   *     reload would destroy the very state they wanted. Live-reload simply resumes from here, exactly
+   *     as if it had never been held (their next save reloads normally).
+   */
+  var reloadHold = (function () {
+    var HOLD_TYPES = { "update": 1, "full-reload": 1, "prune": 1 };
+    var holding = false;        // server says: session open, hold not released
+    var held = false;           // we actually swallowed something (⇒ the page is now behind the code)
+    var releasedLocally = false; // the human clicked "continue" — sticky until the server agrees
+
+    function isViteHmr(protocols) {
+      if (protocols === "vite-hmr") return true;
+      try { return !!protocols && typeof protocols.indexOf === "function" && protocols.indexOf("vite-hmr") >= 0; }
+      catch (e) { return false; }
+    }
+    function msgType(data) {
+      try { return typeof data === "string" ? (JSON.parse(data) || {}).type : null; } catch (e) { return null; }
+    }
+    // Registered from inside the WebSocket constructor, so it always precedes vite's own listener.
+    function attach(ws) {
+      try {
+        ws.addEventListener("message", function (e) {
+          try {
+            if (!holding) return;                       // not holding → vite handles it as normal
+            if (!HOLD_TYPES[msgType(e.data)]) return;   // connected/ping/error/custom → never our business
+            held = true;
+            overlay.showReloadHeld();
+            e.stopImmediatePropagation();               // we're first ⇒ vite's handler never runs
+          } catch (e2) { /* never break the app's HMR on our account */ }
+        });
+      } catch (e) {}
+    }
+    return {
+      // Wrap the WebSocket constructor via a Proxy (keeps statics/prototype/instanceof intact, unlike a
+      // plain function wrapper). Runs synchronously at snippet parse — i.e. before vite's client exists.
+      install: function () {
+        try {
+          var Native = window.WebSocket;
+          if (!Native) return;
+          window.WebSocket = new Proxy(Native, {
+            construct: function (Target, args) {
+              var ws = new Target(args[0], args[1]);
+              if (isViteHmr(args[1])) attach(ws);
+              return ws;
+            }
+          });
+        } catch (e) { /* no Proxy / locked-down env → holding just never engages */ }
+      },
+      // Drive the hold off the poll's holdReload flag. paused/killed mean a human is looking at the page,
+      // so a release must not reload it (see the asymmetry note above).
+      reconcile: function (serverHold, paused, killed) {
+        try {
+          if (serverHold) {
+            if (releasedLocally) return;            // our release is in flight — don't re-arm behind it
+            if (!holding) { holding = true; held = false; }
+            if (held) overlay.showReloadHeld();     // survives a reload mid-session
+          } else if (holding || releasedLocally) {
+            var catchUp = held && !releasedLocally && !paused && !killed;
+            holding = false; held = false; releasedLocally = false;
+            overlay.hideReloadHeld();
+            if (catchUp) setTimeout(function () { try { location.reload(); } catch (e) {} }, 0);
+          }
+        } catch (e) {}
+      },
+      // The pill's click: hand live-reload back for this session, leaving the page exactly as it is.
+      release: function () {
+        if (!holding) return;
+        releasedLocally = true; holding = false; held = false;
+        overlay.hideReloadHeld();
+      },
+      isHolding: function () { return holding; }
+    };
+  })();
+  reloadHold.install();
+
+  function onUserContinueReload() { reloadHold.release(); postInteractionOverride(RELOAD_RELEASE); }
 
   // Center-screen label for a key press, e.g. "[ENTER]", "[CTRL+S]", "[ESC]".
   function keyCenterLabel(req) {
@@ -1205,6 +1349,9 @@
         reconcileOverlay(data && data.interactionActive);  // restore/clear the overlay (e.g. after a reload)
         reconcilePaused(data && data.paused);                // restore/clear the paused pill likewise
         reconcileKilled(data && data.killed);                // restore/clear the killed pill likewise
+        // Engage/release the dev-server reload hold. Ordered after the three above so a release that
+        // force-reloads sees the overlay state already settled.
+        reloadHold.reconcile(data && data.holdReload, data && data.paused, data && data.killed);
         var reqs = (data && data.requests) || [];
         for (var i = 0; i < reqs.length; i++) dispatchEval(reqs[i]);
         setTimeout(pollEvalOnce, 0);     // immediately re-open the long-poll
