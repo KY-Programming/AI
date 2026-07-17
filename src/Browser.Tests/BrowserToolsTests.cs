@@ -170,6 +170,49 @@ public class BrowserToolsTests
     }
 
     [Fact]
+    public async Task Batch_forwards_a_sleep_step_with_its_duration()
+    {
+        var steps = new[]
+        {
+            new BatchStep { Action = "click", Selector = ".menu" },
+            new BatchStep { Action = "sleep", DurationMs = 500 },
+            new BatchStep { Action = "click", Text = "Zwei" },
+        };
+        var r = await Enqueued(() => BrowserTools.Batch(steps));
+        Assert.Equal("sleep", r.Actions![1].Action);
+        Assert.Equal(500, r.Actions[1].DurationMs);
+    }
+
+    [Fact]
+    public async Task Batch_budget_covers_its_sleeps()
+    {
+        // A sleep must widen the derived budget, or a long pause would time the batch out mid-flow —
+        // the failure it's most likely to cause and the least obvious to diagnose.
+        var slept = await Enqueued(() => BrowserTools.Batch(new[]
+        {
+            new BatchStep { Action = "sleep", DurationMs = 20_000 },
+        }));
+        Assert.True(slept.TimeoutMs > 20_000, $"budget {slept.TimeoutMs} must exceed the 20s sleep it contains");
+    }
+
+    [Fact]
+    public async Task A_batch_of_sleeps_alone_needs_no_interaction()
+    {
+        // sleep touches nothing, so it must not be gated like a manipulation step.
+        var ch = new EvalChannel("t");   // interaction NOT opened
+        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        try
+        {
+            var task = BrowserTools.Batch(new[] { new BatchStep { Action = "sleep", DurationMs = 10 } });
+            var req = Assert.Single(await ch.PollAsync(1000, default));
+            Assert.Equal("batch", req.Kind);
+            ch.Complete("t", req.Id, "{\"ok\":true}");
+            await task;
+        }
+        finally { BrowserTools.ForwardHook = null; }
+    }
+
+    [Fact]
     public async Task Batch_with_a_manipulation_step_is_gated()
     {
         var ch = new EvalChannel("t");   // interaction NOT opened

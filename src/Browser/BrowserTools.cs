@@ -444,20 +444,28 @@ internal static class BrowserTools
     [McpServerTool(Name = "batch"), Description(
         "Run a sequence of actions in ONE page round-trip — much faster than separate calls for a multi-step " +
         "flow. `steps` is an ordered list; each step is { action, …the same fields that action's own tool takes }. " +
-        "action ∈ click | move | key | type | wait | scroll | focus | styles | query | component | eval. Steps run in order " +
+        "action ∈ click | move | key | type | wait | scroll | focus | styles | query | component | eval | sleep. Steps run in order " +
         "and STOP at the first failure; the result is { ok, count, results:[{step, action, …payload}], failedAt? }. " +
         "Any manipulation step (click/move/key/type/scroll/focus) requires start_interaction first. Example — open " +
         "a menu then pick an item in one call: steps=[{action:'click',selector:'.menu'},{action:'wait',selector:" +
-        "'.item'},{action:'click',text:'Zwei'}]. Omit project when only one capture is registered.")]
+        "'.item'},{action:'click',text:'Zwei'}]. `sleep` (durationMs, default 500, max 30000) just pauses between " +
+        "steps — use it to pace a flow a human is watching; prefer `wait` to synchronise on the page, since a fixed " +
+        "sleep is a guess. Omit project when only one capture is registered.")]
     public static Task<string> Batch(
         [Description("Ordered steps; each is { action, plus that action's fields }")] BatchStep[] steps,
-        [Description("Max ms for the whole sequence (default: derived from the steps' own waits/durations)")] int timeoutMs = 0,
+        [Description("Max ms for the whole sequence (default: derived from the steps' own waits/durations/sleeps)")] int timeoutMs = 0,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (steps is null || steps.Length == 0) return Task.FromResult(Bad("batch requires at least one step"));
+        // Each step contributes what it can actually cost, so the default budget can't cut its own steps
+        // short: a wait its timeout, a move/sleep its duration, anything else a flat allowance.
+        // click/focus are NOT flat — they glide the overlay cursor to the target and (click) play the
+        // ripple before dispatching, so their worst case sits above the flat 500.
         var derived = 2000 + steps.Sum(s =>
             s.Action == "wait" ? (s.TimeoutMs ?? 5000) :
-            s.Action == "move" ? (s.DurationMs ?? 300) : 500);
+            s.Action == "move" ? (s.DurationMs ?? 300) :
+            s.Action == "sleep" ? (s.DurationMs ?? 500) + 100 :
+            s.Action is "click" or "focus" ? 800 : 500);
         var budget = Math.Clamp(timeoutMs > 0 ? timeoutMs : derived, 1000, 300_000);
         return Eval(project, budget + 1500, new EvalRequest { Id = "", Kind = "batch", Actions = steps, TimeoutMs = budget });
     }

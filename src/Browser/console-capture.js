@@ -588,6 +588,10 @@
     try { var ev = mkMouse(type, x, y, opts); if (ev) el.dispatchEvent(ev); } catch (e) {}
   }
 
+  function delay(ms) {
+    return ms > 0 ? new Promise(function (r) { setTimeout(r, ms); }) : Promise.resolve();
+  }
+
   // Find the most specific element matching visible text: the deepest element (inside `withinSel`,
   // else the whole document) whose collapsed textContent equals (exact) or contains (exact:false)
   // `text`, preferring visible ones. Lets click/etc. target by label instead of selector/coordinate.
@@ -760,14 +764,27 @@
       topbar.appendChild(reloadPill);
       root.appendChild(topbar);
       cursor = document.createElement("div"); cursor.className = "kyai-cursor"; cursor.innerHTML = CURSOR_SVG; root.appendChild(cursor);
-      put(Math.round(vw() / 2), Math.round(vh() / 2), false);
+      put(Math.round(vw() / 2), Math.round(vh() / 2), 0);
       (document.body || document.documentElement).appendChild(host);
     }
-    function put(x, y, animate) {
+    // Cursor motion, in two flavours. doMove retargets every ~16ms and leans on a fixed trailing
+    // transition to smooth those steps into one glide — that stays exactly as it was. A ONE-SHOT glide
+    // (click/focus) instead scales its duration with the distance travelled, so a cross-screen jump is
+    // followable rather than a blur, and a cursor already on target costs nothing at all (e.g. when the
+    // agent called move first).
+    var CURSOR_STEP_MS = 120;                                        // doMove's per-step trailing transition
+    var CURSOR_PX_PER_MS = 2.2, CURSOR_MIN_MS = 80, CURSOR_MAX_MS = 320;
+    function put(x, y, ms) {
       cx = x; cy = y;
       if (!cursor) return;
-      cursor.style.transition = animate ? "transform .12s linear" : "none";
+      cursor.style.transition = ms > 0 ? "transform " + ms + "ms linear" : "none";
       cursor.style.transform = "translate(" + x + "px," + y + "px)";
+    }
+    function glideMsTo(x, y) {
+      var dx = x - cx, dy = y - cy;
+      var d = Math.sqrt(dx * dx + dy * dy);
+      if (d < 1) return 0;
+      return Math.max(CURSOR_MIN_MS, Math.min(CURSOR_MAX_MS, Math.round(d / CURSOR_PX_PER_MS)));
     }
     function ripple(x, y) {
       if (!root) return;
@@ -857,8 +874,36 @@
       clearKilled: function () { killed = false; },
       isKilled: function () { return killed; },
       shown: function () { return shown; },
-      cursorTo: function (x, y) { try { if (shown) put(x, y, true); } catch (e) {} },
-      clickFx: function (x, y) { try { if (shown) { put(x, y, true); ripple(x, y); } } catch (e) {} },
+      cursorTo: function (x, y) { try { if (shown) put(x, y, CURSOR_STEP_MS); } catch (e) {} },
+      // Glide to (x,y) and resolve only once the cursor has visually ARRIVED, so the caller can act at
+      // the moment the human sees it land. Without this the effect races the animation — a popup would
+      // open while the cursor was still travelling, making the overlay lie about when things happened.
+      // Resolves immediately when there's no session to watch, or the cursor is already on target.
+      cursorGlide: function (x, y) {
+        try {
+          if (!shown) return Promise.resolve();
+          var ms = glideMsTo(x, y);
+          put(x, y, ms);
+          if (ms <= 0) return Promise.resolve();
+          // Wait for the real transitionend, not a same-length timer: the timer starts counting NOW but
+          // the transition only starts at the next style flush, so a timer always fires ~a frame early
+          // and the click would land while the cursor was still visibly short of the target. The timeout
+          // is only a fallback for a transition that never starts or gets interrupted.
+          return new Promise(function (r) {
+            var done = false;
+            function finish() {
+              if (done) return;
+              done = true;
+              try { cursor.removeEventListener("transitionend", onEnd); } catch (e) {}
+              r();
+            }
+            function onEnd(e) { if (!e || e.propertyName === "transform") finish(); }
+            try { cursor.addEventListener("transitionend", onEnd); } catch (e) {}
+            setTimeout(finish, ms + 150);
+          });
+        } catch (e) { return Promise.resolve(); }
+      },
+      rippleAt: function (x, y) { try { if (shown) ripple(x, y); } catch (e) {} },
       // Short, center-screen label for a manipulate action ("insert text: xxx", "[ENTER]", "navigate to: xxx").
       centerLabel: function (text) { try { if (shown) clabel(text); } catch (e) {} },
       // Read-only hint ("reading: .selector") — shares the one badge above instead of a second pill.
@@ -1006,25 +1051,43 @@
     return "[" + mods + key + "]";
   }
 
+  // How long the click's own animation (the ripple at the cursor) plays BEFORE the click is dispatched.
+  // Without this beat the ripple and the page's reaction start on the same tick, so a click that
+  // navigates swaps the page out from under its own ripple — the human sees the aftermath but never sees
+  // the click land, which is the whole point of the overlay. Long enough for the first ring to expand and
+  // the second (90ms-delayed) one to appear, without making every click feel sluggish.
+  var CLICK_FX_MS = 150;
+
+  // returns a Promise<payload>. Ordering is the point: the cursor glides to the target, the ripple plays
+  // at it, and only THEN is the click dispatched — so a watching human sees pointer → click → reaction,
+  // in that order. It used to dispatch on the same tick as both, so the page reacted mid-glide.
+  // Nothing is dispatched during the glide/ripple (they're purely visual), so the page can't shift under
+  // the already-resolved target while we wait.
   function doClick(req) {
     try {
       var t = resolveTarget(req);
       if (t.badArgs) return { ok: false, error: "click requires selector, text, or x,y" };
       if (!t.el) return { ok: false, error: "no element matches " + (req.selector ? "selector" : req.text ? "text" : "point"), selector: req.selector, text: req.text };
       var el = t.el, x = t.x, y = t.y;
-      overlay.clickFx(x, y);   // ripple at the click point already shows this — no need for a center label too
-      var btn = req.button === "right" ? 2 : req.button === "middle" ? 1 : 0;
-      var opts = { button: btn, buttons: 1, ctrl: req.ctrl, shift: req.shift, alt: req.alt, meta: req.meta };
-      fire(el, "pointerover", x, y, opts); fire(el, "pointerenter", x, y, { bubbles: false });
-      fire(el, "mouseover", x, y, opts); fire(el, "mouseenter", x, y, { bubbles: false });
-      fire(el, "pointermove", x, y, opts); fire(el, "mousemove", x, y, opts);
-      fire(el, "pointerdown", x, y, opts); fire(el, "mousedown", x, y, opts);
-      try { if (el.focus) el.focus(); } catch (e) {}
-      fire(el, "pointerup", x, y, opts); fire(el, "mouseup", x, y, opts);
-      if (btn === 2) { fire(el, "contextmenu", x, y, opts); }
-      else if (typeof el.click === "function") { try { el.click(); } catch (e) { fire(el, "click", x, y, opts); } } // click() runs default actions
-      else { fire(el, "click", x, y, opts); }
-      return { ok: true, action: "click", button: req.button || "left", point: { x: x, y: y }, target: describeEl(el, req.detail) };
+      return overlay.cursorGlide(x, y).then(function () {
+        overlay.rippleAt(x, y);   // ripple at the click point already shows this — no need for a center label too
+        return delay(overlay.shown() ? CLICK_FX_MS : 0);   // no session ⇒ nobody watching ⇒ don't stall
+      }).then(function () {
+        try {
+          var btn = req.button === "right" ? 2 : req.button === "middle" ? 1 : 0;
+          var opts = { button: btn, buttons: 1, ctrl: req.ctrl, shift: req.shift, alt: req.alt, meta: req.meta };
+          fire(el, "pointerover", x, y, opts); fire(el, "pointerenter", x, y, { bubbles: false });
+          fire(el, "mouseover", x, y, opts); fire(el, "mouseenter", x, y, { bubbles: false });
+          fire(el, "pointermove", x, y, opts); fire(el, "mousemove", x, y, opts);
+          fire(el, "pointerdown", x, y, opts); fire(el, "mousedown", x, y, opts);
+          try { if (el.focus) el.focus(); } catch (e) {}
+          fire(el, "pointerup", x, y, opts); fire(el, "mouseup", x, y, opts);
+          if (btn === 2) { fire(el, "contextmenu", x, y, opts); }
+          else if (typeof el.click === "function") { try { el.click(); } catch (e) { fire(el, "click", x, y, opts); } } // click() runs default actions
+          else { fire(el, "click", x, y, opts); }
+          return { ok: true, action: "click", button: req.button || "left", point: { x: x, y: y }, target: describeEl(el, req.detail) };
+        } catch (e) { return errPayload(e); }
+      });
     } catch (e) { return errPayload(e); }
   }
 
@@ -1159,9 +1222,14 @@
       var el = document.querySelector(req.selector);
       if (!el) return { ok: false, error: "no element matches selector", selector: req.selector };
       overlay.centerLabel("focus");
-      try { var r = el.getBoundingClientRect(); overlay.cursorTo(Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2)); } catch (e) {}
-      try { if (el.focus) el.focus(); } catch (e) {}
-      return { ok: true, action: "focus", focused: document.activeElement === el, target: describeEl(el, req.detail) };
+      // Same ordering rule as doClick: land the cursor before the focus takes effect, so what the human
+      // sees matches what actually happened. Returns a Promise<payload>; postDo/doBatch both handle it.
+      var p = null;
+      try { var r = el.getBoundingClientRect(); p = { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; } catch (e) {}
+      return (p ? overlay.cursorGlide(p.x, p.y) : Promise.resolve()).then(function () {
+        try { if (el.focus) el.focus(); } catch (e) {}
+        return { ok: true, action: "focus", focused: document.activeElement === el, target: describeEl(el, req.detail) };
+      });
     } catch (e) { return errPayload(e); }
   }
 
@@ -1188,6 +1256,16 @@
   function assign(a, b) { if (b) for (var k in b) if (Object.prototype.hasOwnProperty.call(b, k)) a[k] = b[k]; return a; }
 
   // map one batch step (action + fields) to its handler; returns payload or Promise<payload>
+  // sleep: pace a batch — nothing but a delay before the next step. Deliberately silent in the overlay:
+  // it touches nothing, so a hint/label would be describing an action that isn't happening; the session
+  // badge already says the agent is driving. Clamped so a bad durationMs can't park a batch indefinitely
+  // (the tool's own budget accounts for the same numbers). Returns a Promise<payload>.
+  function doSleep(req) {
+    var ms = typeof req.durationMs === "number" ? req.durationMs : 500;
+    ms = Math.max(0, Math.min(30000, ms));
+    return delay(ms).then(function () { return { ok: true, action: "sleep", durationMs: ms }; });
+  }
+
   function runStep(step) {
     switch (step.action) {
       case "click": return doClick(step);
@@ -1201,6 +1279,7 @@
       case "query": return doQuery(step);
       case "component": return readComponent(step.selector, step);
       case "eval": return doEval(step);
+      case "sleep": return doSleep(step);
       default: return { ok: false, error: "unknown batch action: " + step.action };
     }
   }

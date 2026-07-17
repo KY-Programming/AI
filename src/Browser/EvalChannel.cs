@@ -329,9 +329,11 @@ internal sealed record EvalRequest
     public int TimeoutMs { get; init; } = 5000;
 }
 
-// One step of a `batch`: an Action (click|move|key|type|wait|scroll|focus|styles|query|eval) plus the
-// same fields the matching single tool takes. Serialized camelCase to the page, where the snippet runs
+// One step of a `batch`: an Action (click|move|key|type|wait|scroll|focus|styles|query|eval|sleep) plus
+// the same fields the matching single tool takes. Serialized camelCase to the page, where the snippet runs
 // each step in order. Manipulation steps (click/move/key/type/scroll/focus) require open interaction.
+// `sleep` (DurationMs, shared with move) is batch-only — it exists to pace a flow between steps, which
+// has no meaning as a standalone tool call.
 public sealed record BatchStep
 {
     public required string Action { get; init; }
