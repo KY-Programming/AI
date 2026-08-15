@@ -119,7 +119,7 @@ internal sealed class TabRegistry
         {
             string reassign;
             lock (_sync) reassign = MintTabId();
-            return new TabPoll(Array.Empty<EvalRequest>(), false, false, false, false, ch.TabId, false, null, reassign);
+            return new TabPoll(Array.Empty<EvalRequest>(), false, false, false, false, false, ch.TabId, false, null, reassign);
         }
 
         if (!string.IsNullOrEmpty(pageLoadId)) ch.CurrentPageLoadId = pageLoadId;
@@ -135,7 +135,7 @@ internal sealed class TabRegistry
             var reqs = await ch.PollAsync(waitMs, ct);
             var handoff = HandoffFor(ch);
             return new TabPoll(reqs, ch.InteractionActive, ch.Paused, ch.Killed, ch.HoldReload,
-                ch.TabId, claimed, handoff, null);
+                ch.UserHoldReload, ch.TabId, claimed, handoff, null);
         }
         finally
         {
@@ -322,6 +322,19 @@ internal sealed class TabRegistry
         var ch = Get(tabId);
         if (ch is null) return false;
         ch.SetReloadReleased(true);
+        // The pill's ▶ means "let Angular reload again", full stop — so it lifts the human's own manual
+        // hold too, not just the session-scoped one. Otherwise clicking it while both were on would look
+        // like it did nothing (HoldReload stays true via the manual flag).
+        ch.SetUserHoldReload(false);
+        return true;
+    }
+
+    // The overlay menu's "Stop Angular reloads" toggle — the human's own, session-independent hold.
+    public bool SetUserHoldReload(string? tabId, bool hold)
+    {
+        var ch = Get(tabId);
+        if (ch is null) return false;
+        ch.SetUserHoldReload(hold);
         return true;
     }
 
@@ -382,6 +395,7 @@ internal sealed class TabRegistry
                     paused = t.Paused,
                     killed = t.Killed,
                     holdReload = t.HoldReload,
+                    userHoldReload = t.UserHoldReload,
                     currentPageLoadId = t.CurrentPageLoadId,
                 }).ToArray();
             return new
@@ -392,6 +406,7 @@ internal sealed class TabRegistry
                 paused = _tabs.Values.Any(t => t.Paused),
                 killed = _tabs.Values.Any(t => t.Killed),
                 holdReload = _tabs.Values.Any(t => t.HoldReload),
+                userHoldReload = _tabs.Values.Any(t => t.UserHoldReload),
                 tabCount = tabs.Length,
                 tabs,
             };
@@ -630,6 +645,7 @@ internal sealed record TabPoll(
     bool Paused,
     bool Killed,
     bool HoldReload,
+    bool UserHoldReload,
     string TabId,
     bool Claimed,
     HandoffInfo? Handoff,

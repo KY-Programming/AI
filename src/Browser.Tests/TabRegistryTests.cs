@@ -363,4 +363,36 @@ public class TabRegistryTests
         // Naming a1's tab must not let a2 click in it (ownership beats an explicit tab argument).
         Assert.Contains("another agent", await reg.DispatchAsync(Click(), 500, "a2", "A"));
     }
+
+    // ── the human's own reload hold (the top-edge menu), per tab ──
+
+    [Fact]
+    public async Task A_user_reload_hold_applies_to_its_own_tab_only()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A"); await Connect(reg, "B");
+
+        Assert.True(reg.SetUserHoldReload("A", true));
+
+        Assert.True((await reg.PollAsync("A", null, null, 1, default)).HoldReload);
+        Assert.True((await reg.PollAsync("A", null, null, 1, default)).UserHoldReload);
+        Assert.False((await reg.PollAsync("B", null, null, 1, default)).HoldReload);   // the other tab reloads as usual
+    }
+
+    [Fact]
+    public async Task The_pill_release_lifts_the_users_own_hold_too()
+    {
+        // The pill's ▶ says "let Angular reload again" — if it only cleared the session flag while the
+        // human's own hold kept HoldReload true, the click would look like it did nothing.
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A");
+        await OpenOn(reg, "a1", "A");
+        reg.SetUserHoldReload("A", true);
+
+        Assert.True(reg.SetReloadReleased("A"));
+
+        var poll = await reg.PollAsync("A", null, null, 1, default);
+        Assert.False(poll.HoldReload);
+        Assert.False(poll.UserHoldReload);
+    }
 }

@@ -45,6 +45,7 @@ internal sealed class EvalChannel
     private volatile bool _paused;
     private volatile bool _killed;
     private volatile bool _reloadReleased;
+    private volatile bool _userHoldReload;
 
     // Duplicate-tab (fork) detection — see AdmitPoll. tabId lives in sessionStorage, which the browser
     // COPIES into a duplicated tab (right-click → Duplicate) and into window.open children, so two
@@ -122,12 +123,25 @@ internal sealed class EvalChannel
     // page-side interception of vite's HMR socket — the dev server still builds and ky-ai-ng still reports
     // the verdict; only the page's reaction is deferred.
     //
-    // Derived, not stored: it follows the session automatically (start_interaction ⇒ hold,
-    // stop_interaction ⇒ release), which also means a human Pause/Stop — both of which clear
+    // The session part is derived, not stored: it follows the session automatically (start_interaction ⇒
+    // hold, stop_interaction ⇒ release), which also means a human Pause/Stop — both of which clear
     // _interactionActive — hands live-reload straight back while they're driving the tab themselves.
     // The human can also opt out for the CURRENT session alone by clicking the held-reload pill
     // (SetReloadReleased) without ending the agent's session; the next one re-arms (see SetInteraction).
-    public bool HoldReload => _interactionActive && !_reloadReleased;
+    // OR-ed with the human's own manual hold below, which is independent of any session.
+    public bool HoldReload => (_interactionActive && !_reloadReleased) || _userHoldReload;
+
+    // The human's own hold, toggled from the overlay menu ("Stop Angular reloads") — for the case the
+    // session-scoped hold above can't cover: the human is testing something by hand while an agent keeps
+    // saving files, with no interaction session open at all (or one that starts and stops repeatedly).
+    //
+    // Deliberately INDEPENDENT of everything the agent does: start_interaction does not clear it (unlike
+    // _reloadReleased), stop_interaction does not clear it, and neither does a Pause or a Stop. Only the
+    // human's own click on the menu (or the held-reload pill's ▶) clears it, so a hold can never be lifted
+    // out from under someone who is mid-test. Because it is not session-scoped, the page keeps showing the
+    // "Angular reload paused" pill while it is on, even with no session — a silent hold would be a trap.
+    public bool UserHoldReload => _userHoldReload;
+    public void SetUserHoldReload(bool hold) => _userHoldReload = hold;
 
     // Whether the human clicked "continue reloading" for this session. Kept distinct from HoldReload
     // because the page reads it to decide whether releasing the hold should force a catch-up reload:

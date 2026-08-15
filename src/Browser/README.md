@@ -197,6 +197,28 @@ A `batch` running when you click either finishes its current step and drops the 
 `killed:true` in the result, matching which one you hit). The paused pill survives a page reload; a
 kill does too (the overlay just stays invisible until the agent's next `start_interaction`).
 
+**Holding the Angular dev server's live-reload.** A rebuild pushes a reload/HMR update to the page and
+destroys whatever was being tested. While an interaction session is open this is held automatically —
+the build still runs and `ky-ai-ng` still reports its verdict, only the page's *reaction* is deferred —
+and an `Angular reload paused` pill appears once something has actually been swallowed. Its **▶** hands
+live-reload back without reloading (you're mid-look at the page); the agent's `stop_interaction` instead
+does one catch-up reload, because swallowed updates leave vite's client module graph behind the
+server's and a full reload is the only reliable resync.
+
+You can also hold reloads **yourself**, with no agent session involved — the case where an agent is
+saving file after file while you test by hand. Move the mouse to the **middle of the tab's top edge**: a
+2px red bar fades in; click it for a menu of red buttons.
+
+- **Stop Angular reloads** — your own hold. Independent of everything the agent does: it survives
+  `start_interaction`/`stop_interaction`, Pause and Stop, and a page reload; only you can lift it (this
+  entry flips to *Continue Angular reloads*, or use the pill's ▶). The pill stays visible the whole
+  time — a hold with no sign of it would just look like a broken dev server.
+- **Reload page now** — pick up what the dev server has built *without* lifting the hold: the page
+  resyncs and then goes on swallowing further updates.
+
+The bar takes no pointer events until it is actually visible, so nothing of ours can swallow your app's
+clicks while it's hidden. The hold is per tab.
+
 ## Recipes
 
 ky-ai-browser is a **read → act → verify** loop over the live page.

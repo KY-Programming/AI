@@ -188,6 +188,54 @@ public class EvalChannelTests
         Assert.True(ch.HoldReload);
     }
 
+    // ── the human's own hold, from the overlay's top-edge menu ("Stop Angular reloads") ──
+
+    [Fact]
+    public void A_user_hold_needs_no_session_and_survives_one()
+    {
+        var ch = new EvalChannel("tok");
+
+        ch.SetUserHoldReload(true);
+        Assert.True(ch.HoldReload);          // holds with no agent anywhere near the tab
+        Assert.False(ch.InteractionActive);  // and without opening a session
+
+        ch.SetInteraction(true);
+        ch.SetInteraction(false);
+        Assert.True(ch.HoldReload);          // a whole agent session came and went; the human's hold stands
+
+        ch.SetUserHoldReload(false);
+        Assert.False(ch.HoldReload);
+    }
+
+    [Fact]
+    public void A_user_hold_outlives_a_pause_and_a_kill()
+    {
+        // Unlike the session-derived hold (which lifts with the gate), the human's own hold is theirs:
+        // pausing or stopping the agent must not hand live-reload back while they're still testing.
+        var ch = new EvalChannel("tok");
+        ch.SetUserHoldReload(true);
+
+        ch.SetPaused(true);
+        Assert.True(ch.HoldReload);
+
+        ch.SetKilled(true);
+        Assert.True(ch.HoldReload);
+        Assert.True(ch.UserHoldReload);
+    }
+
+    [Fact]
+    public void A_fresh_session_re_arms_the_session_hold_but_does_not_touch_the_user_hold()
+    {
+        var ch = new EvalChannel("tok");
+        ch.SetUserHoldReload(true);
+        ch.SetInteraction(true);
+        ch.SetReloadReleased(true);          // the pill's opt-out is session-scoped…
+
+        Assert.True(ch.HoldReload);          // …and can't lift the human's hold on its own
+        ch.SetUserHoldReload(false);
+        Assert.False(ch.HoldReload);
+    }
+
     [Fact]
     public async Task WaitForResumeAsync_returns_immediately_when_never_paused()
     {

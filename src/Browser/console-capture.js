@@ -304,6 +304,10 @@
   // The held-reload pill's click — hands the dev server's live-reload back for this session without
   // ending it (see the reloadHold module below). Same token-guard/CORS shape as the overrides above.
   var RELOAD_RELEASE = INGEST.replace(/\/console$/, "/reload/release");
+  // The top-edge menu's "Stop Angular reloads" — the human's OWN hold, unlike the release above it. It is
+  // not tied to an agent session at all: the case it exists for is an agent saving file after file while
+  // the human is testing by hand, with the dev server reloading the tab out from under them.
+  var RELOAD_HOLD = INGEST.replace(/\/console$/, "/reload/hold");
   // Multi-agent handoff: the "another agent wants in" prompt's Share / Deny buttons post here. (Open-a-
   // new-tab is a pure client action — window.open in the click handler — so it has no server route.)
   var HANDOFF_BASE = INGEST.replace(/\/console$/, "/handoff");
@@ -740,6 +744,19 @@
     ".kyai-reload-icon{flex:none;display:flex;align-items:center;justify-content:center;}" +
     ".kyai-reload-icon svg{display:block;}" +
     ".kyai-reload-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;}" +
+    // The human's own menu, reachable at the top edge regardless of what the agent is doing: hovering the
+    // middle of the tab's top edge fades in a 2px red bar, clicking it drops a column of red buttons.
+    // Deliberately hidden until hovered — it must not sit on top of the app's own UI all day — and the bar
+    // only takes pointer-events once it is VISIBLE, so an invisible strip can never swallow the app's
+    // clicks. The ::after pad widens the 2px line into a hittable target without making it look thicker.
+    ".kyai-menuwrap{position:absolute;top:0;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;}" +
+    ".kyai-hotbar{position:relative;width:180px;height:2px;border-radius:0 0 2px 2px;background:rgba(229,57,53,.95);opacity:0;transition:opacity .12s ease;pointer-events:none;}" +
+    ".kyai-hotbar.kyai-on{opacity:1;pointer-events:auto;cursor:pointer;}" +
+    ".kyai-hotbar::after{content:'';position:absolute;top:0;left:50%;transform:translateX(-50%);width:180px;height:10px;}" +
+    ".kyai-menu{display:none;flex-direction:column;gap:6px;margin-top:6px;padding:8px;border-radius:10px;background:rgba(24,24,27,.96);border:1px solid rgba(229,57,53,.55);box-shadow:0 6px 24px rgba(0,0,0,.45);pointer-events:auto;}" +
+    ".kyai-menu.kyai-on{display:flex;}" +
+    ".kyai-menu-btn{font:600 12px/1.3 system-ui,sans-serif;color:#fff;background:rgba(229,57,53,.95);padding:8px 14px;border-radius:8px;cursor:pointer;white-space:nowrap;text-align:center;user-select:none;}" +
+    ".kyai-menu-btn:hover{background:rgba(229,57,53,1);}" +
     ".kyai-cursor{position:absolute;left:0;top:0;width:24px;height:24px;will-change:transform;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5));display:none;}" +
     ".kyai-cursor svg{display:block;}" +
     ".kyai-ripple{position:absolute;width:10px;height:10px;margin:-5px 0 0 -5px;border:2px solid rgba(229,57,53,.9);border-radius:50%;animation:kyai-rip .6s ease-out forwards;}" +
@@ -785,8 +802,14 @@
     var host = null, root = null, frame = null, cursor = null, topbar = null, badge = null, badgeText = null,
       badgePause = null, badgeKill = null, pausedPill = null, pausedText = null, pausedKill = null,
       reloadPill = null, reloadText = null, reloadPlay = null,
-      handoffPill = null, handoffText = null, handoffOpen = null, handoffShare = null, handoffDeny = null;
+      handoffPill = null, handoffText = null, handoffOpen = null, handoffShare = null, handoffDeny = null,
+      menuWrap = null, hotbar = null, menu = null;
     var shown = false, paused = false, killed = false, cx = 0, cy = 0, curLabel = null, curLabelTimer = null, hintTimer = null, handoffTicket = null;
+    // The held-reload pill is normally session chrome (hidden with the rest of it), but a hold the HUMAN
+    // switched on outlives every session — and a hold with no visible sign of it is a trap ("why isn't my
+    // app updating?"). Sticky ⇒ the pill survives hide()/Pause/Stop until the human lifts the hold.
+    var reloadSticky = false;
+    var menuOpen = false, menuHideTimer = null;
     function vw() { return window.innerWidth || (document.documentElement || {}).clientWidth || 0; }
     function vh() { return window.innerHeight || (document.documentElement || {}).clientHeight || 0; }
 
@@ -870,10 +893,88 @@
       hrow.appendChild(handoffOpen); hrow.appendChild(handoffShare); hrow.appendChild(handoffDeny);
       handoffPill.appendChild(hrow);
       root.appendChild(handoffPill);
+      menuWrap = document.createElement("div"); menuWrap.className = "kyai-menuwrap";
+      hotbar = document.createElement("div"); hotbar.className = "kyai-hotbar";
+      hotbar.setAttribute("role", "button"); hotbar.setAttribute("tabindex", "-1");
+      hotbar.title = "ky-ai";
+      hotbar.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); toggleMenu(); });
+      menuWrap.appendChild(hotbar);
+      menu = document.createElement("div"); menu.className = "kyai-menu";
+      menuWrap.appendChild(menu);
+      // Re-entering the wrap cancels the close the mouseleave armed, so travelling from the bar down onto
+      // the buttons (which briefly crosses the 6px gap) doesn't close the menu under the cursor.
+      menuWrap.addEventListener("mouseenter", function () { if (menuHideTimer) { clearTimeout(menuHideTimer); menuHideTimer = null; } });
+      menuWrap.addEventListener("mouseleave", function () {
+        if (menuHideTimer) clearTimeout(menuHideTimer);
+        menuHideTimer = setTimeout(function () { menuHideTimer = null; closeMenu(); }, MENU_LEAVE_MS);
+      });
+      root.appendChild(menuWrap);
       cursor = document.createElement("div"); cursor.className = "kyai-cursor"; cursor.innerHTML = CURSOR_SVG; root.appendChild(cursor);
       put(Math.round(vw() / 2), Math.round(vh() / 2), 0);
       (document.body || document.documentElement).appendChild(host);
     }
+
+    /*
+     * The human's menu at the tab's top edge. Two states: a 2px red bar that fades in while the cursor is
+     * in the trigger zone (top-center), and — once clicked — a dropped panel of red buttons.
+     *
+     * Hover is detected with a document-level mousemove rather than a permanently-mounted hit area, so
+     * NOTHING of ours takes pointer-events until the bar is actually visible: an invisible strip across
+     * the top of the app that eats clicks would be a much worse bug than the feature is worth. Mouse
+     * events are composed, so moves over our own shadow DOM still reach this listener and keep the bar up.
+     */
+    var HOT_W = 200, HOT_H = 12, MENU_LEAVE_MS = 400;
+    function inHotZone(x, y) { return y >= 0 && y <= HOT_H && Math.abs(x - vw() / 2) <= HOT_W / 2; }
+    function showBar(on) { try { if (hotbar) hotbar.classList[on ? "add" : "remove"]("kyai-on"); } catch (e) {} }
+    function renderMenu() {
+      var items = menuItems();
+      menu.textContent = "";
+      for (var i = 0; i < items.length; i++) {
+        (function (item) {
+          var b = document.createElement("div");
+          b.className = "kyai-menu-btn"; b.textContent = item.label;
+          b.setAttribute("role", "button"); b.setAttribute("tabindex", "0");
+          b.addEventListener("click", function (e) {
+            e.preventDefault(); e.stopPropagation();
+            closeMenu();
+            try { item.run(); } catch (e2) {}
+          });
+          menu.appendChild(b);
+        })(items[i]);
+      }
+    }
+    function openMenu() {
+      ensure();
+      renderMenu();          // labels are re-read on every open, so a toggle always shows its current direction
+      menuOpen = true;
+      menu.classList.add("kyai-on");
+      showBar(true);
+    }
+    function closeMenu() {
+      if (menuHideTimer) { clearTimeout(menuHideTimer); menuHideTimer = null; }
+      menuOpen = false;
+      if (menu) menu.classList.remove("kyai-on");
+      showBar(false);
+    }
+    function toggleMenu() { if (menuOpen) closeMenu(); else openMenu(); }
+    function onDocMove(e) {
+      try {
+        if (menuOpen) return;                    // an open menu is dismissed by click/Esc/leave, not by a move
+        showBar(inHotZone(e.clientX, e.clientY));
+      } catch (e2) {}
+    }
+    // A click anywhere outside the menu dismisses it. composedPath() sees through our shadow root; without
+    // it every click would look like it landed on the host element, so fall back to that comparison.
+    function onDocDown(e) {
+      try {
+        if (!menuOpen) return;
+        var inside = false;
+        if (typeof e.composedPath === "function") inside = e.composedPath().indexOf(menuWrap) >= 0;
+        else inside = e.target === host;
+        if (!inside) closeMenu();
+      } catch (e2) {}
+    }
+    function onDocKey(e) { try { if (menuOpen && (e.key === "Escape" || e.key === "Esc")) closeMenu(); } catch (e2) {} }
     // Cursor motion, in two flavours. doMove retargets every ~16ms and leans on a fixed trailing
     // transition to smooth those steps into one glide — that stays exactly as it was. A ONE-SHOT glide
     // (click/focus) instead scales its duration with the distance travelled, so a cross-screen jump is
@@ -950,7 +1051,7 @@
           if (host) { frame.style.display = "none"; cursor.style.display = "none"; badgePause.style.display = badgeKill.style.display = "none"; }
           if (!hintTimer && badge) badge.style.display = "none";
           if (!paused && pausedPill) pausedPill.style.display = "none";
-          if (reloadPill) reloadPill.style.display = "none";   // the hold is session-scoped — no session, no pill
+          if (reloadPill && !reloadSticky) reloadPill.style.display = "none";   // a session-scoped hold ends with the session; the human's own doesn't
           if (handoffPill) { handoffPill.style.display = "none"; handoffTicket = null; }
         } catch (e) {}
       },
@@ -962,7 +1063,7 @@
           ensure(); paused = true; shown = false;
           frame.style.display = "none"; cursor.style.display = "none"; badgePause.style.display = badgeKill.style.display = "none";
           badge.style.display = "none"; pausedPill.style.display = "flex";
-          reloadPill.style.display = "none";   // pausing hands live-reload back (see reloadHold)
+          if (!reloadSticky) reloadPill.style.display = "none";   // pausing hands the SESSION's live-reload back (see reloadHold); a manual hold stands
         } catch (e) {}
       },
       clearPaused: function () { try { paused = false; if (pausedPill) pausedPill.style.display = "none"; } catch (e) {} },
@@ -976,7 +1077,7 @@
           killed = true; shown = false; paused = false;
           if (host) { frame.style.display = "none"; cursor.style.display = "none"; badgePause.style.display = badgeKill.style.display = "none"; badge.style.display = "none"; }
           if (pausedPill) pausedPill.style.display = "none";
-          if (reloadPill) reloadPill.style.display = "none";
+          if (reloadPill && !reloadSticky) reloadPill.style.display = "none";   // Stop removes the AGENT's UI; the human's own hold isn't that
           if (handoffPill) { handoffPill.style.display = "none"; handoffTicket = null; }
         } catch (e) {}
       },
@@ -1037,8 +1138,25 @@
       currentHandoff: function () { return handoffTicket; },
       // The held-reload pill, stacked under the badge — shown once the hold has actually swallowed a
       // dev-server reload, so it reads as "your change is waiting", not as idle chrome on every session.
-      showReloadHeld: function () { try { ensure(); reloadPill.style.display = "flex"; } catch (e) {} },
-      hideReloadHeld: function () { try { if (reloadPill) reloadPill.style.display = "none"; } catch (e) {} }
+      // sticky ⇒ this is the human's own manual hold, so the pill must outlive the agent's session UI.
+      showReloadHeld: function (sticky) { try { ensure(); reloadSticky = !!sticky; reloadPill.style.display = "flex"; } catch (e) {} },
+      hideReloadHeld: function () { try { reloadSticky = false; if (reloadPill) reloadPill.style.display = "none"; } catch (e) {} },
+      // Mount the human's top-edge menu and its document-level listeners. Called once at boot — unlike the
+      // rest of the overlay it is NOT agent state, so it stays reachable with no session, and after a Stop.
+      installMenu: function () {
+        try {
+          ensure();
+          document.addEventListener("mousemove", onDocMove, true);
+          document.addEventListener("mousedown", onDocDown, true);
+          document.addEventListener("keydown", onDocKey, true);
+          // "The pointer left the window" — and ONLY that. NOT a capture listener on document: mouseleave
+          // doesn't bubble, but capture still delivers every page element's own mouseleave, so crossing any
+          // element boundary while hovering the zone hid the bar (measured live). A plain listener on
+          // documentElement fires for nothing but documentElement itself, i.e. leaving the window.
+          var docEl = document.documentElement;
+          if (docEl) docEl.addEventListener("mouseleave", function () { if (!menuOpen) showBar(false); });
+        } catch (e) {}
+      }
     };
   })();
 
@@ -1103,6 +1221,12 @@
    * stopImmediatePropagation() drop a message before vite's own handler ever sees it. Vite's separate
    * "vite-ping" socket is left alone.
    *
+   * Two things can engage it, and they are independent (either alone holds):
+   *   - an agent session (start_interaction..stop_interaction), server-side EvalChannel.HoldReload;
+   *   - the human's own switch in the top-edge menu ("Stop Angular reloads", server-side UserHoldReload).
+   *     That one is for testing by hand while an agent keeps saving files — no session need be open, and
+   *     nothing the agent does turns it off again.
+   *
    * Releasing is deliberately asymmetric, because "who is looking at the page right now" differs:
    *   - the agent finished (stop_interaction)  ⇒ force one catch-up reload, so the page resyncs to the
    *     code on disk. Necessary, not cosmetic: swallowed `update` messages leave vite's client module
@@ -1113,9 +1237,11 @@
    */
   var reloadHold = (function () {
     var HOLD_TYPES = { "update": 1, "full-reload": 1, "prune": 1 };
-    var holding = false;        // server says: session open, hold not released
+    var holding = false;        // hold engaged (agent session, or the human's own switch)
     var held = false;           // we actually swallowed something (⇒ the page is now behind the code)
     var releasedLocally = false; // the human clicked "continue" — sticky until the server agrees
+    var userHold = false;       // the human's own hold, from the menu (mirrors the server's userHoldReload)
+    var pendingUser = false;    // a menu click of ours hasn't been echoed by a poll yet ⇒ we're authoritative
 
     function isViteHmr(protocols) {
       if (protocols === "vite-hmr") return true;
@@ -1157,12 +1283,22 @@
       },
       // Drive the hold off the poll's holdReload flag. paused/killed mean a human is looking at the page,
       // so a release must not reload it (see the asymmetry note above).
-      reconcile: function (serverHold, paused, killed) {
+      reconcile: function (serverHold, paused, killed, serverUserHold) {
         try {
-          if (serverHold) {
-            if (releasedLocally) return;            // our release is in flight — don't re-arm behind it
+          // The server owns the manual flag EXCEPT while one of our own clicks is still in flight: the poll
+          // answering right now was issued before that POST landed, so its echo is a frame behind and would
+          // flip the switch back under the human. Once the echo agrees, the server is authoritative again.
+          var su = !!serverUserHold;
+          if (pendingUser) { if (su === userHold) pendingUser = false; }
+          else userHold = su;
+
+          if (serverHold && releasedLocally && !userHold) return;   // our release is in flight — don't re-arm behind it
+          if (serverHold || userHold) {
             if (!holding) { holding = true; held = false; }
-            if (held) overlay.showReloadHeld();     // survives a reload mid-session
+            // A session hold only announces itself once it has actually swallowed something ("your change
+            // is waiting"); a manual one shows immediately — the human just asked for it and needs to see
+            // that it took, and that it's still on later.
+            if (held || userHold) overlay.showReloadHeld(userHold);
           } else if (holding || releasedLocally) {
             var catchUp = held && !releasedLocally && !paused && !killed;
             holding = false; held = false; releasedLocally = false;
@@ -1171,18 +1307,52 @@
           }
         } catch (e) {}
       },
-      // The pill's click: hand live-reload back for this session, leaving the page exactly as it is.
+      // The menu's "Stop Angular reloads": the human's own hold, independent of any agent session.
+      engage: function () {
+        userHold = true; pendingUser = true; releasedLocally = false;
+        if (!holding) { holding = true; held = false; }
+        overlay.showReloadHeld(true);
+      },
+      // The pill's ▶ / the menu's "Continue Angular reloads": hand live-reload back — for the agent's
+      // session AND for the human's own hold — leaving the page exactly as it is. Deliberately no
+      // catch-up reload: whoever clicked this is looking at the page right now (that's what the separate
+      // "Reload page now" entry is for).
       release: function () {
-        if (!holding) return;
+        if (!holding && !userHold) return;
         releasedLocally = true; holding = false; held = false;
+        if (userHold) { userHold = false; pendingUser = true; }
         overlay.hideReloadHeld();
       },
-      isHolding: function () { return holding; }
+      isHolding: function () { return holding; },
+      isUserHolding: function () { return userHold; }
     };
   })();
   reloadHold.install();
 
   function onUserContinueReload() { reloadHold.release(); postInteractionOverride(RELOAD_RELEASE); }
+  function onUserHoldReloads() { reloadHold.engage(); postInteractionOverride(RELOAD_HOLD, { hold: true }); }
+  // "Reload page now": pick up whatever the dev server has built, WITHOUT lifting the hold — after the
+  // reload the page keeps swallowing further updates, so it's "give me the current state, then freeze
+  // again" rather than an exit from the hold. (Also the resync a long hold eventually needs: swallowed
+  // `update`s leave vite's client module graph behind the server's, and only a full reload fixes that.)
+  function onUserReloadNow() { try { location.reload(); } catch (e) {} }
+
+  // The top-edge menu's entries, top to bottom. Declarative and re-read on every open, so adding a control
+  // later is one entry here and a toggle always renders its current direction.
+  function menuItems() {
+    return [
+      reloadHold.isUserHolding()
+        ? { label: "Continue Angular reloads", run: onUserContinueReload }
+        : { label: "Stop Angular reloads", run: onUserHoldReloads },
+      { label: "Reload page now", run: onUserReloadNow }
+    ];
+  }
+
+  // Mount the menu once, as early as the DOM allows (the snippet runs in <head>, before <body> exists).
+  try {
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", function () { overlay.installMenu(); });
+    else overlay.installMenu();
+  } catch (e) { /* no menu is survivable; capture must still run */ }
 
   // Center-screen label for a key press, e.g. "[ENTER]", "[CTRL+S]", "[ESC]".
   function keyCenterLabel(req) {
@@ -1585,7 +1755,7 @@
         reconcileKilled(data && data.killed);                // restore/clear the killed pill likewise
         // Engage/release the dev-server reload hold. Ordered after the three above so a release that
         // force-reloads sees the overlay state already settled.
-        reloadHold.reconcile(data && data.holdReload, data && data.paused, data && data.killed);
+        reloadHold.reconcile(data && data.holdReload, data && data.paused, data && data.killed, data && data.userHoldReload);
         reconcileHandoff(data && data.handoff);              // show/hide the "another agent wants in" prompt
         var reqs = (data && data.requests) || [];
         for (var i = 0; i < reqs.length; i++) dispatchEval(reqs[i]);

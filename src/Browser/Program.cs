@@ -283,7 +283,7 @@ internal static class Program
         {
             Cors(ctx);
             if (!string.Equals(ctx.Request.Query["token"], collector.Token, StringComparison.Ordinal))
-                return Results.Json(new { requests = Array.Empty<EvalRequest>(), interactionActive = false, paused = false, killed = false, holdReload = false, tabId = (string?)null, claimed = false, handoff = (object?)null }, EvalJson);   // foreign tab — hand it nothing
+                return Results.Json(new { requests = Array.Empty<EvalRequest>(), interactionActive = false, paused = false, killed = false, holdReload = false, userHoldReload = false, tabId = (string?)null, claimed = false, handoff = (object?)null }, EvalJson);   // foreign tab — hand it nothing
             var tabId = ctx.Request.Query["tabId"].ToString();
             var claim = ctx.Request.Query["claim"].ToString();
             var pageLoadId = ctx.Request.Query["pageLoadId"].ToString();
@@ -299,6 +299,7 @@ internal static class Program
                 paused = poll.Paused,
                 killed = poll.Killed,
                 holdReload = poll.HoldReload,
+                userHoldReload = poll.UserHoldReload,   // the hold is the human's own ⇒ the menu shows it toggled on
                 tabId = poll.TabId,
                 claimed = poll.Claimed,
                 handoff = poll.Handoff,
@@ -423,6 +424,24 @@ internal static class Program
             eval.SetReloadReleased(Str(body, "tabId"));
             return Results.Json(new { ok = true, holdReload = false });
         });
+        // The overlay menu's "Stop Angular reloads" toggle — the human's OWN hold, unlike /reload/release
+        // above (which only opts out of the current agent session's). Independent of any session: nothing
+        // the agent does sets or clears it, so it also works with no session open at all, which is the
+        // point — an agent saving files while the human tests by hand.
+        app.MapMethods("/__kyai/reload/hold", new[] { "OPTIONS" }, (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            return Results.StatusCode(StatusCodes.Status204NoContent);
+        });
+        app.MapPost("/__kyai/reload/hold", async (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            var body = await ReadBodyAsync(ctx);
+            if (!TokenOk(body, collector.Token)) return Results.Json(new { ok = false });
+            var hold = Bool(body, "hold") ?? true;
+            eval.SetUserHoldReload(Str(body, "tabId"), hold);
+            return Results.Json(new { ok = true, userHoldReload = hold });
+        });
         app.Urls.Add($"http://127.0.0.1:{restPort}");
 
         // The heartbeat keeps ky-ai-ng from auto-reverting our inject; cancel it before we uninject so
@@ -509,6 +528,10 @@ internal static class Program
 
     private static bool TokenOk(JsonElement? body, string expected) =>
         body is { } b && b.TryGetProperty("token", out var t) && string.Equals(t.GetString(), expected, StringComparison.Ordinal);
+
+    private static bool? Bool(JsonElement? body, string prop) =>
+        body is { } b && b.TryGetProperty(prop, out var v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? v.GetBoolean() : null;
 
     private static string? Str(JsonElement? body, string prop) =>
         body is { } b && b.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
