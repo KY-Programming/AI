@@ -12,6 +12,7 @@ namespace KY.AI.Browser;
 //   buildSeq    — the build seq in effect when this event was ingested (build correlation;
 //                 pass a wait_for_build verdict's `seq` to console_tail sinceBuildSeq)
 //   pageLoadId  — random id minted by the snippet per page load; segments reloads / HMR boundaries
+//   tabId       — stable per-tab id (sessionStorage); which browser tab logged this, for per-tab tails
 //   receivedAt  — server wall-clock when the supervisor stored it (ISO-8601 w/ offset)
 public sealed record ConsoleEvent(
     long Seq,
@@ -25,7 +26,8 @@ public sealed record ConsoleEvent(
     string Timestamp,
     long BuildSeq,
     string PageLoadId,
-    string ReceivedAt);
+    string ReceivedAt,
+    string? TabId = null);
 
 // The raw per-event shape posted by the injected snippet (camelCase on the wire; matched
 // case-insensitively). Everything is nullable/optional so a malformed event degrades gracefully
@@ -48,7 +50,8 @@ public sealed record ConsoleIngestBatch(
     string? Token,
     string? PageLoadId,
     RawConsoleEvent[]? Events,
-    long? DroppedClient = null);
+    long? DroppedClient = null,
+    string? TabId = null);
 
 // Severity ordering for console_tail's `level` (min-severity) filter. Unknown event levels rank
 // highest so they are never hidden; an unknown filter value disables the filter (rank 0).

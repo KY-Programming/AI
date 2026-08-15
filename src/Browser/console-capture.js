@@ -30,6 +30,57 @@
   var pageLoadId = Math.random().toString(36).slice(2) + "-" + Date.now().toString(36);
   var dropped = 0;
 
+  // A tab opened by the multi-agent handoff ("open a new tab") carries a one-shot claim ticket in its URL
+  // (hash for path-routing apps, query for hash-routing ones). Read it FIRST — before deriving tabId —
+  // strip it so the app's router never sees it, and present it on this tab's FIRST poll so the server
+  // binds this tab to the waiting agent.
+  var pendingClaim = extractClaim();
+
+  // Stable per-TAB id — NEW and deliberately distinct from pageLoadId. It keys the tab across its page
+  // loads (the server routes eval work + interaction state by it); pageLoadId keeps its separate job of
+  // console reload/HMR segmentation — do NOT conflate them.
+  //
+  // sessionStorage survives reload and same-tab navigation (good) but — contrary to a natural assumption —
+  // a script-opened window.open COPIES the opener's sessionStorage into the new tab. So a plain "reuse the
+  // stored id" would make a handoff tab collide with the exact tab it was opened from, which the live smoke
+  // hit: agent 2's "new tab" inherited agent 1's id and evicted it. The rule therefore is: a tab booting
+  // WITH a claim ticket is by definition a fresh handoff tab and must MINT a new id (overwriting the copied
+  // one); only a boot without a ticket may reuse the stored id.
+  var tabId = (function () {
+    var fresh = "t-" + Math.random().toString(36).slice(2) + "-" + Date.now().toString(36);
+    try {
+      if (pendingClaim) { sessionStorage.setItem("__kyai_tab", fresh); return fresh; }
+      var k = sessionStorage.getItem("__kyai_tab");
+      if (!k) { k = fresh; sessionStorage.setItem("__kyai_tab", k); }
+      return k;
+    } catch (e) { return fresh; }
+  })();
+
+  function extractClaim() {
+    try {
+      var m = /[#?&]__kyai_claim=([^&#]*)/.exec(location.href);
+      if (!m) return null;
+      var ticket = decodeURIComponent(m[1]);
+      var stripped = location.href
+        .replace(/([#?&])__kyai_claim=[^&#]*/, function (_, sep) { return sep === "#" ? "#" : sep; })
+        .replace(/\?&/, "?").replace(/#&/, "#").replace(/&&/, "&").replace(/[?&#]$/, "");
+      try { history.replaceState(history.state, "", stripped); } catch (e) {}
+      return ticket;
+    } catch (e) { return null; }
+  }
+
+  // Build the URL a "open a new tab" click points window.open at: the same page plus this claim ticket,
+  // put where it won't corrupt the app's routing (query when the app routes on the hash, else the hash).
+  function claimUrl(ticket) {
+    var enc = encodeURIComponent(ticket);
+    var hashRouting = location.hash && location.hash.charAt(1) === "/";
+    if (hashRouting) {
+      var sep = location.search ? "&" : "?";
+      return location.origin + location.pathname + location.search + sep + "__kyai_claim=" + enc + location.hash;
+    }
+    return location.origin + location.pathname + location.search + "#__kyai_claim=" + enc;
+  }
+
   // Capture UNPATCHED console refs BEFORE patching, so the snippet's own diagnostics (and any
   // console output triggered while sending) can never feed back into the capture queue.
   var nativeConsole = {
@@ -129,7 +180,7 @@
     var batch = takeBatch();
     if (batch.length === 0) return;
 
-    var body = { token: TOKEN, pageLoadId: pageLoadId, events: batch };
+    var body = { token: TOKEN, pageLoadId: pageLoadId, tabId: tabId, events: batch };
     if (dropped > 0) { body.droppedClient = dropped; dropped = 0; }
 
     var json;
@@ -253,6 +304,11 @@
   // The held-reload pill's click — hands the dev server's live-reload back for this session without
   // ending it (see the reloadHold module below). Same token-guard/CORS shape as the overrides above.
   var RELOAD_RELEASE = INGEST.replace(/\/console$/, "/reload/release");
+  // Multi-agent handoff: the "another agent wants in" prompt's Share / Deny buttons post here. (Open-a-
+  // new-tab is a pure client action — window.open in the click handler — so it has no server route.)
+  var HANDOFF_BASE = INGEST.replace(/\/console$/, "/handoff");
+  var HANDOFF_SHARE = HANDOFF_BASE + "/share";
+  var HANDOFF_DENY = HANDOFF_BASE + "/deny";
 
   function evalTypeOf(v) {
     if (v === null) return "null";
@@ -273,7 +329,7 @@
       fetch(EVAL_RESULT, {
         method: "POST",
         headers: { "Content-Type": "text/plain;charset=UTF-8" },
-        body: JSON.stringify({ token: TOKEN, id: id, payload: payload }),
+        body: JSON.stringify({ token: TOKEN, id: id, tabId: tabId, payload: payload }),
         credentials: "omit",
         cache: "no-store"
       })["catch"](function () { /* server gone — nothing to do */ });
@@ -284,12 +340,16 @@
   // and tell the server so the agent's next call is refused with a clear reason. Resume is the mirror
   // for Pause — only the human's own click clears it, never the agent. Stop has no such mirror; it
   // clears only when the agent's own start_interaction starts a clean new session (see EvalChannel).
-  function postInteractionOverride(url) {
+  // Always carries this tab's id so the server acts on the right tab; `extra` adds route-specific fields
+  // (scope:"all" for a global stop, ticket for a handoff share/deny).
+  function postInteractionOverride(url, extra) {
+    var body = { token: TOKEN, tabId: tabId };
+    if (extra) for (var k in extra) if (Object.prototype.hasOwnProperty.call(extra, k)) body[k] = extra[k];
     try {
       fetch(url, {
         method: "POST",
         headers: { "Content-Type": "text/plain;charset=UTF-8" },
-        body: JSON.stringify({ token: TOKEN }),
+        body: JSON.stringify(body),
         credentials: "omit",
         cache: "no-store"
       })["catch"](function () { /* server gone — nothing to do */ });
@@ -298,6 +358,20 @@
   function onUserPause() { try { overlay.showPaused(); } catch (e) {} postInteractionOverride(INTERACTION_PAUSE); }
   function onUserResume() { try { overlay.clearPaused(); } catch (e) {} postInteractionOverride(INTERACTION_RESUME); }
   function onUserKill() { try { overlay.showKilled(); } catch (e) {} postInteractionOverride(INTERACTION_KILL); }
+  // Shift-click a Stop icon = stop EVERY agent's tab at once (handy when several are driving in parallel).
+  function onUserKillAll() { try { overlay.showKilled(); } catch (e) {} postInteractionOverride(INTERACTION_KILL, { scope: "all" }); }
+
+  // Handoff prompt actions (shown when another agent is waiting for a tab):
+  //   open a new tab — window.open MUST be inside this real click handler, or the browser blocks it; the
+  //                    fresh tab reads its claim ticket and binds to the waiting agent on its first poll.
+  //   share this tab — let the waiting agent take THIS tab once the current session ends.
+  //   deny           — refuse; the waiting agent is told to stop.
+  function onOpenNewTab(ticket) {
+    try { window.open(claimUrl(ticket), "_blank"); } catch (e) {}
+    try { overlay.hideHandoff(); } catch (e) {}
+  }
+  function onShareTab(ticket) { try { overlay.hideHandoff(); } catch (e) {} postInteractionOverride(HANDOFF_SHARE, { ticket: ticket }); }
+  function onDenyHandoff(ticket) { try { overlay.hideHandoff(); } catch (e) {} postInteractionOverride(HANDOFF_DENY, { ticket: ticket }); }
 
   // JSON-safe deep copy of a value (caps depth/breadth, tags functions/DOM/Errors, breaks cycles) so
   // evaluate_js can return real structured JSON (asJson:true) instead of a one-line string rendering.
@@ -710,8 +784,9 @@
   var overlay = (function () {
     var host = null, root = null, frame = null, cursor = null, topbar = null, badge = null, badgeText = null,
       badgePause = null, badgeKill = null, pausedPill = null, pausedText = null, pausedKill = null,
-      reloadPill = null, reloadText = null, reloadPlay = null;
-    var shown = false, paused = false, killed = false, cx = 0, cy = 0, curLabel = null, curLabelTimer = null, hintTimer = null;
+      reloadPill = null, reloadText = null, reloadPlay = null,
+      handoffPill = null, handoffText = null, handoffOpen = null, handoffShare = null, handoffDeny = null;
+    var shown = false, paused = false, killed = false, cx = 0, cy = 0, curLabel = null, curLabelTimer = null, hintTimer = null, handoffTicket = null;
     function vw() { return window.innerWidth || (document.documentElement || {}).clientWidth || 0; }
     function vh() { return window.innerHeight || (document.documentElement || {}).clientHeight || 0; }
 
@@ -733,8 +808,8 @@
       badgePause.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); onUserPause(); });
       badge.appendChild(badgePause);
       badgeKill = document.createElement("span"); badgeKill.className = "kyai-icon-btn"; badgeKill.innerHTML = ICON_STOP_SVG;
-      badgeKill.title = "Stop"; badgeKill.setAttribute("role", "button"); badgeKill.setAttribute("tabindex", "0");
-      badgeKill.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); onUserKill(); });
+      badgeKill.title = "Stop (shift-click: stop all agents)"; badgeKill.setAttribute("role", "button"); badgeKill.setAttribute("tabindex", "0");
+      badgeKill.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); (e.shiftKey ? onUserKillAll : onUserKill)(); });
       badge.appendChild(badgeKill);
       topbar.appendChild(badge);
       pausedPill = document.createElement("div"); pausedPill.className = "kyai-paused";
@@ -744,9 +819,9 @@
       pausedText.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); onUserResume(); });
       pausedPill.appendChild(pausedText);
       pausedKill = document.createElement("span"); pausedKill.className = "kyai-icon-btn"; pausedKill.innerHTML = ICON_STOP_SVG;
-      pausedKill.title = "Stop"; pausedKill.setAttribute("role", "button"); pausedKill.setAttribute("tabindex", "0");
+      pausedKill.title = "Stop (shift-click: stop all agents)"; pausedKill.setAttribute("role", "button"); pausedKill.setAttribute("tabindex", "0");
       pausedKill.style.display = "flex";   // always visible whenever the parent pill is (pill's own display gates it)
-      pausedKill.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); onUserKill(); });
+      pausedKill.addEventListener("click", function (e) { e.preventDefault(); e.stopPropagation(); (e.shiftKey ? onUserKillAll : onUserKill)(); });
       pausedPill.appendChild(pausedKill);
       topbar.appendChild(pausedPill);
       reloadPill = document.createElement("div"); reloadPill.className = "kyai-reload";
@@ -763,6 +838,38 @@
       reloadPill.appendChild(reloadPlay);
       topbar.appendChild(reloadPill);
       root.appendChild(topbar);
+      // Handoff prompt (multi-agent): shown in a tab another agent is waiting to get into. Its OWN
+      // fixed, top-centered element BELOW the badge row — the first live test proved that a small pill
+      // inside the topbar's flex ROW sits off to the side and goes unnoticed. Styled inline so it needs
+      // nothing from OVERLAY_CSS; pointer-events:auto so its buttons are clickable through the otherwise
+      // click-through overlay. The Open button's window.open runs in the real click handler (popup rule).
+      handoffPill = document.createElement("div"); handoffPill.className = "kyai-handoff";
+      var hst = handoffPill.style;
+      hst.display = "none"; hst.pointerEvents = "auto"; hst.position = "fixed";
+      hst.top = "52px"; hst.left = "50%"; hst.transform = "translateX(-50%)";
+      hst.background = "rgba(24,24,27,0.96)"; hst.color = "#fff"; hst.borderRadius = "10px";
+      hst.padding = "12px 16px"; hst.font = "13px/1.45 system-ui,-apple-system,sans-serif";
+      hst.boxShadow = "0 4px 24px rgba(0,0,0,0.5)"; hst.border = "1px solid rgba(239,68,68,0.55)";
+      hst.textAlign = "center"; hst.whiteSpace = "nowrap";
+      handoffText = document.createElement("div");
+      handoffText.style.marginBottom = "10px"; handoffText.style.fontWeight = "600";
+      handoffPill.appendChild(handoffText);
+      var hrow = document.createElement("div");
+      hrow.style.display = "flex"; hrow.style.gap = "8px"; hrow.style.justifyContent = "center";
+      function mkHandoffBtn(label, primary) {
+        var b = document.createElement("span");
+        b.textContent = label; b.setAttribute("role", "button"); b.setAttribute("tabindex", "0");
+        var s = b.style;
+        s.cursor = "pointer"; s.padding = "6px 12px"; s.borderRadius = "7px"; s.userSelect = "none";
+        s.background = primary ? "#ef4444" : "rgba(255,255,255,0.14)"; s.color = "#fff"; s.whiteSpace = "nowrap";
+        return b;
+      }
+      handoffOpen = mkHandoffBtn("Open a new tab", true);
+      handoffShare = mkHandoffBtn("Share this tab", false);
+      handoffDeny = mkHandoffBtn("Deny", false);
+      hrow.appendChild(handoffOpen); hrow.appendChild(handoffShare); hrow.appendChild(handoffDeny);
+      handoffPill.appendChild(hrow);
+      root.appendChild(handoffPill);
       cursor = document.createElement("div"); cursor.className = "kyai-cursor"; cursor.innerHTML = CURSOR_SVG; root.appendChild(cursor);
       put(Math.round(vw() / 2), Math.round(vh() / 2), 0);
       (document.body || document.documentElement).appendChild(host);
@@ -844,6 +951,7 @@
           if (!hintTimer && badge) badge.style.display = "none";
           if (!paused && pausedPill) pausedPill.style.display = "none";
           if (reloadPill) reloadPill.style.display = "none";   // the hold is session-scoped — no session, no pill
+          if (handoffPill) { handoffPill.style.display = "none"; handoffTicket = null; }
         } catch (e) {}
       },
       // The human's own Pause click: end the session right now and swap the badge for the paused pill —
@@ -869,6 +977,7 @@
           if (host) { frame.style.display = "none"; cursor.style.display = "none"; badgePause.style.display = badgeKill.style.display = "none"; badge.style.display = "none"; }
           if (pausedPill) pausedPill.style.display = "none";
           if (reloadPill) reloadPill.style.display = "none";
+          if (handoffPill) { handoffPill.style.display = "none"; handoffTicket = null; }
         } catch (e) {}
       },
       clearKilled: function () { killed = false; },
@@ -908,6 +1017,24 @@
       centerLabel: function (text) { try { if (shown) clabel(text); } catch (e) {} },
       // Read-only hint ("reading: .selector") — shares the one badge above instead of a second pill.
       hint: function (text) { try { setHint(text); } catch (e) {} },
+      // Multi-agent handoff prompt: another agent is waiting to drive this app. Wires the three buttons to
+      // the current ticket (window.open for a new tab, or share/deny to the server) and shows the pill.
+      showHandoff: function (info) {
+        try {
+          if (!info || !info.ticket) return;
+          ensure();
+          handoffText.textContent = (info.agentLabel || "Another agent") + " wants to work in this app.";
+          var t = info.ticket;
+          handoffOpen.onclick = function (e) { e.preventDefault(); e.stopPropagation(); onOpenNewTab(t); };
+          handoffShare.onclick = function (e) { e.preventDefault(); e.stopPropagation(); onShareTab(t); };
+          handoffDeny.onclick = function (e) { e.preventDefault(); e.stopPropagation(); onDenyHandoff(t); };
+          handoffTicket = t;
+          handoffPill.style.display = "block";
+        } catch (e) {}
+      },
+      hideHandoff: function () { try { handoffTicket = null; if (handoffPill) handoffPill.style.display = "none"; } catch (e) {} },
+      hasHandoff: function () { return !!handoffTicket; },
+      currentHandoff: function () { return handoffTicket; },
       // The held-reload pill, stacked under the badge — shown once the hold has actually swallowed a
       // dev-server reload, so it reads as "your change is waiting", not as idle chrome on every session.
       showReloadHeld: function () { try { ensure(); reloadPill.style.display = "flex"; } catch (e) {} },
@@ -945,6 +1072,19 @@
     try {
       if (killed && !overlay.isKilled()) overlay.showKilled();
       else if (!killed && overlay.isKilled()) overlay.clearKilled();
+    } catch (e) {}
+  }
+
+  // Reconcile the multi-agent handoff prompt with the server (idempotent): show it when a new agent is
+  // waiting for a tab (a new ticket), retract it when the server clears it (granted / denied / satisfied
+  // elsewhere). Re-showing only on a ticket change avoids rebinding the buttons on every poll.
+  function reconcileHandoff(info) {
+    try {
+      if (info && info.ticket) {
+        if (overlay.currentHandoff() !== info.ticket) overlay.showHandoff(info);
+      } else if (overlay.hasHandoff()) {
+        overlay.hideHandoff();
+      }
     } catch (e) {}
   }
 
@@ -1417,7 +1557,10 @@
 
   var lastPollOkAt = Date.now();
   function pollEvalOnce() {
-    fetch(EVAL_POLL + "?token=" + encodeURIComponent(TOKEN) + "&pageLoadId=" + encodeURIComponent(pageLoadId), {
+    var url = EVAL_POLL + "?token=" + encodeURIComponent(TOKEN) +
+      "&tabId=" + encodeURIComponent(tabId) + "&pageLoadId=" + encodeURIComponent(pageLoadId);
+    if (pendingClaim) url += "&claim=" + encodeURIComponent(pendingClaim);
+    fetch(url, {
       method: "GET",
       credentials: "omit",
       cache: "no-store"
@@ -1425,12 +1568,25 @@
       .then(function (resp) { return resp.json(); })
       .then(function (data) {
         lastPollOkAt = Date.now();
+        // Duplicate-tab split: this tab booted with a sessionStorage tabId COPIED from another tab (via
+        // right-click→Duplicate or window.open), so the server saw two pages colliding on one channel and
+        // re-keyed us. Adopt the fresh id, persist it, and re-poll under it — do NOT process this response
+        // (it carries no work and its flags belong to the other tab's channel).
+        if (data && data.reassignTabId && data.reassignTabId !== tabId) {
+          tabId = data.reassignTabId;
+          try { sessionStorage.setItem("__kyai_tab", tabId); } catch (e) {}
+          pendingClaim = null;
+          setTimeout(pollEvalOnce, 0);
+          return;
+        }
+        if (data && data.claimed) pendingClaim = null;       // server bound this tab to the agent; stop presenting the ticket
         reconcileOverlay(data && data.interactionActive);  // restore/clear the overlay (e.g. after a reload)
         reconcilePaused(data && data.paused);                // restore/clear the paused pill likewise
         reconcileKilled(data && data.killed);                // restore/clear the killed pill likewise
         // Engage/release the dev-server reload hold. Ordered after the three above so a release that
         // force-reloads sees the overlay state already settled.
         reloadHold.reconcile(data && data.holdReload, data && data.paused, data && data.killed);
+        reconcileHandoff(data && data.handoff);              // show/hide the "another agent wants in" prompt
         var reqs = (data && data.requests) || [];
         for (var i = 0; i < reqs.length; i++) dispatchEval(reqs[i]);
         setTimeout(pollEvalOnce, 0);     // immediately re-open the long-poll

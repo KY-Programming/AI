@@ -1,4 +1,4 @@
-# KY.AI
+# KY-AI
 
 A small suite of dev-loop tools that let an **AI agent** see and steer your running app —
 **without ever touching your OS processes or taking your port**. You run your app exactly like

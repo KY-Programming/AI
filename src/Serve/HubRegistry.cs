@@ -44,4 +44,16 @@ internal sealed class BridgeRegistry
             if (at < cutoff) _seen.TryRemove(id, out _);
         return _seen.Count;
     }
+
+    // The live bridge IDs themselves (same pruning as LiveCount). A bridge id doubles as the agent id
+    // on forwarded tool calls, so this is how a supervisor can ask "is that agent's session still open?"
+    // — ky-ai-browser uses it to release a disconnected agent's tab lease without robbing one that is
+    // merely idle (thinking, or waiting for its human).
+    public IReadOnlyCollection<string> LiveIds(TimeSpan window)
+    {
+        var cutoff = DateTimeOffset.UtcNow - window;
+        foreach (var (id, at) in _seen)
+            if (at < cutoff) _seen.TryRemove(id, out _);
+        return _seen.Keys.ToList();
+    }
 }

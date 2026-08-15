@@ -46,9 +46,60 @@ internal sealed class EvalChannel
     private volatile bool _killed;
     private volatile bool _reloadReleased;
 
+    // Duplicate-tab (fork) detection — see AdmitPoll. tabId lives in sessionStorage, which the browser
+    // COPIES into a duplicated tab (right-click → Duplicate) and into window.open children, so two
+    // physical tabs can boot sharing one tabId and both long-poll this one channel — letting two agents
+    // think they hold separate tabs while driving the same page. These three track the current primary
+    // page load so a fork can be told apart from a reload (succession) and split off.
+    private string? _primaryPage;             // pageLoadId currently owning this channel
+    private bool _primaryInFlight;            // a poll from _primaryPage is parked right now
+    private DateTimeOffset _primaryReturnAt;  // when a _primaryPage poll last returned by window-elapse
+    private static readonly TimeSpan ForkGrace = TimeSpan.FromSeconds(40);
+
     private readonly string _token;
 
-    public EvalChannel(string token) => _token = token;
+    // One EvalChannel is one browser TAB's session (its own queue, waiters and interaction flags), so
+    // N tabs of the same app never share a queue — PollAsync on this tab drains only this tab's work.
+    // TabId is the stable per-tab key (sessionStorage on the page, survives reload/navigation); "" is the
+    // legacy/single-tab sentinel used when a caller or an older snippet supplies no tab. Ownership +
+    // lease are managed by the TabRegistry (mutated under its lock); they live here so /status can report
+    // them per tab. CurrentPageLoadId tracks this tab's latest page load for console segmentation.
+    public string TabId { get; }
+    public string? OwnerAgentId { get; private set; }
+    public DateTimeOffset LeaseExpiresAt { get; private set; }
+    public bool LeaseValid => OwnerAgentId is not null && DateTimeOffset.UtcNow < LeaseExpiresAt;
+    public string? CurrentPageLoadId { get; set; }
+
+    public EvalChannel(string token, string? tabId = null)
+    {
+        _token = token;
+        TabId = tabId ?? "";
+    }
+
+    // Bind this tab to an agent with a fresh lease. Called by the registry under its lock when an agent
+    // claims a tab (start_interaction on a free tab, a granted waitlist tab, or a window.open claim).
+    internal void Assign(string agentId, TimeSpan lease)
+    {
+        OwnerAgentId = agentId;
+        LeaseExpiresAt = DateTimeOffset.UtcNow + lease;
+    }
+
+    // Slide the lease while the owning agent is still driving (renewed on each dispatch it makes and on
+    // wait_for_resume). A crashed agent stops renewing, so the lease lapses and the tab frees itself —
+    // fixing the old "InteractionActive sticks forever" wedge.
+    internal void Renew(TimeSpan lease)
+    {
+        if (OwnerAgentId is not null) LeaseExpiresAt = DateTimeOffset.UtcNow + lease;
+    }
+
+    // Release ownership and close the session — the overlay auto-hides on the next reconcile. Called on
+    // stop_interaction, lease expiry, or when a tab is handed to a waiting agent.
+    internal void Unassign()
+    {
+        OwnerAgentId = null;
+        LeaseExpiresAt = default;
+        SetInteraction(false);
+    }
 
     // Whether supervised interaction is open (start_interaction…stop_interaction). The manipulation
     // tools gate on this; the poll response echoes it so a reloaded page re-shows the overlay.
@@ -132,6 +183,10 @@ internal sealed class EvalChannel
         get { lock (_sync) return DateTimeOffset.UtcNow - _lastPollAt < PageFreshFor; }
     }
 
+    // When this tab last long-polled (MinValue if never) — the TabRegistry reads it to reap tabs whose
+    // page went silent (closed) so a stale tab can't hold a lease forever.
+    public DateTimeOffset LastPollAt { get { lock (_sync) return _lastPollAt; } }
+
     private static TaskCompletionSource<bool> NewWake() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     // Enqueue a request (id minted here) and await the page's result JSON. Returns a synthesized
@@ -174,6 +229,49 @@ internal sealed class EvalChannel
                 ? "the page received the request but did not return a result in time (raise timeoutMs, or the expression may be hung)"
                 : "no page is attached — open the app in a browser so the capture script can run (and check ky-ai-browser is still serving)",
         }, Json);
+    }
+
+    // Decide whether an arriving poll may run on this channel, or is a duplicate tab that must be split
+    // off to its own tabId. The discriminator between a duplicate (fork) and a reload (succession) is
+    // temporal OVERLAP: a reloaded page's old load unloads — its long-poll's socket ABORTS (reported via
+    // NotePollEnded) — before the new load polls, so the two never overlap and the newcomer cleanly
+    // succeeds the primary. A duplicate's original keeps polling (its polls return by window-elapse, never
+    // abort) while the copy also polls, so a poll from a different pageLoadId arrives while the primary is
+    // still alive ⇒ Fork. A legacy snippet that sends no pageLoadId opts out (always Proceed).
+    public PollAdmit AdmitPoll(string? pageLoadId)
+    {
+        if (string.IsNullOrEmpty(pageLoadId)) return PollAdmit.Proceed;
+        lock (_sync)
+        {
+            if (_primaryPage is null || string.Equals(_primaryPage, pageLoadId, StringComparison.Ordinal))
+            {
+                _primaryPage = pageLoadId;
+                _primaryInFlight = true;
+                return PollAdmit.Proceed;
+            }
+            var incumbentAlive = _primaryInFlight || DateTimeOffset.UtcNow - _primaryReturnAt < ForkGrace;
+            if (incumbentAlive) return PollAdmit.Fork;
+            // Incumbent's poll aborted (unloaded) or has been silent past the grace ⇒ this is a reload /
+            // takeover of a gone page, not a second live tab. Succeed it as the new primary.
+            _primaryPage = pageLoadId;
+            _primaryInFlight = true;
+            return PollAdmit.Proceed;
+        }
+    }
+
+    // Report how a proceeding poll ended so fork detection knows whether the primary is still alive.
+    // aborted ⇒ the client socket dropped (page unloaded/closed), ending the primary's lineage so the next
+    // page load succeeds it; otherwise the window merely elapsed and the same page will re-poll.
+    public void NotePollEnded(string? pageLoadId, bool aborted)
+    {
+        if (string.IsNullOrEmpty(pageLoadId)) return;
+        lock (_sync)
+        {
+            if (!string.Equals(_primaryPage, pageLoadId, StringComparison.Ordinal)) return;
+            _primaryInFlight = false;
+            if (aborted) _primaryPage = null;
+            else _primaryReturnAt = DateTimeOffset.UtcNow;
+        }
     }
 
     // Long-poll: hand the snippet whatever is queued, waiting up to waitMs for work to arrive.
@@ -233,6 +331,10 @@ internal sealed class EvalChannel
         old.TrySetResult(true);
     }
 }
+
+// AdmitPoll's verdict: run this poll on the channel, or tell the page it's a duplicate that must adopt a
+// fresh server-minted tabId (Fork).
+internal enum PollAdmit { Proceed, Fork }
 
 // One unit of work the capture snippet pulls and runs, by Kind. Serialized camelCase on the wire
 // with null fields omitted; each handler reads only the fields its Kind needs. Coordinates are

@@ -51,6 +51,10 @@ internal static class Hub
             {
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSec));
                 using var req = new HttpRequestMessage(method, url);
+                // Pass the calling agent's id through to the supervisor (browser instances key per-tab
+                // ownership on it; ng/net supervisors simply ignore the header).
+                if (AgentContext.Current is { } agent)
+                    req.Headers.TryAddWithoutValidation(AgentContext.Header, agent);
                 if (jsonBody is not null)
                     req.Content = new StringContent(jsonBody, System.Text.Encoding.UTF8, "application/json");
                 using var resp = await Http.SendAsync(req, cts.Token);

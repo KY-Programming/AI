@@ -76,7 +76,11 @@ public static class StdioBridge
     // mid-session ensures it again and retries the call once before giving up.
     private sealed class UpstreamConnection(string toolName, int port, CancellationTokenSource stopping) : IAsyncDisposable
     {
-        private readonly string id = $"{toolName}-{Environment.ProcessId}";
+        // Identifies this bridge — and, since one `connect` process is one agent session, the AGENT —
+        // to the hub. The random suffix keeps it unique across a PID that the OS later reuses, so two
+        // agents can never collide on a lease or a tab claim downstream. Sent as the bridge heartbeat id
+        // AND (via AdditionalHeaders below) as X-KYAI-Agent on every forwarded tool call.
+        private readonly string id = $"{toolName}-{Environment.ProcessId}-{Guid.NewGuid().ToString("N")[..8]}";
         private readonly Uri endpoint = new($"http://127.0.0.1:{port}/mcp");
         private readonly string hubUrl = $"http://127.0.0.1:{port}";
         private readonly SemaphoreSlim gate = new(1, 1);
@@ -107,7 +111,13 @@ public static class StdioBridge
             {
                 if (client is not null) return client;
                 await HubLifecycle.EnsureRunningAsync(toolName, port, TimeSpan.FromSeconds(15));
-                var transport = new HttpClientTransport(new HttpClientTransportOptions { Endpoint = endpoint });
+                var transport = new HttpClientTransport(new HttpClientTransportOptions
+                {
+                    Endpoint = endpoint,
+                    // Every tool call this bridge forwards carries our agent id, so the hub (and the
+                    // supervisor it forwards to) knows who is calling without the tool declaring a param.
+                    AdditionalHeaders = new Dictionary<string, string> { [AgentContext.Header] = id },
+                });
                 client = await McpClient.CreateAsync(transport, cancellationToken: ct);
                 // Only once we've actually got a hub — before that there'd be nothing to talk to.
                 heartbeat ??= HeartbeatLoopAsync();

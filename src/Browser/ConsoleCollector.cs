@@ -59,6 +59,13 @@ public sealed class ConsoleCollector
     // (scope to the page you're looking at now) and is surfaced in every TailJson response.
     public string? CurrentPageLoadId { get; private set; }
 
+    // Per-tab "live page load": with several tabs open, the instance-wide CurrentPageLoadId above just
+    // means "whoever logged last" and is ambiguous — this maps each tabId to its own latest page load so
+    // a per-tab tail can scope to the right one.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _currentByTab = new(StringComparer.Ordinal);
+    public string? CurrentPageLoadIdFor(string? tabId) =>
+        !string.IsNullOrEmpty(tabId) && _currentByTab.TryGetValue(tabId!, out var p) ? p : null;
+
     // Ingest a posted batch. Returns the number of events stored. A token mismatch rejects the
     // whole batch (foreign data, not ours — not counted as a drop). Overflow past the per-batch
     // cap is dropped and counted.
@@ -72,6 +79,7 @@ public sealed class ConsoleCollector
         if (events is null || events.Length == 0) return 0;
 
         var pageLoadId = Clamp(batch.PageLoadId, MaxFieldLen) ?? "unknown";
+        var tabId = Clamp(batch.TabId, MaxFieldLen);
         var receivedAt = DateTimeOffset.Now.ToString(IsoFormat);
         var buildSeq = _buildSeq();
 
@@ -87,22 +95,26 @@ public sealed class ConsoleCollector
         {
             var raw = events[i];
             if (raw is null) continue;
-            _log.Append(seq => Enrich(seq, raw, pageLoadId, buildSeq, receivedAt));
+            _log.Append(seq => Enrich(seq, raw, pageLoadId, buildSeq, receivedAt, tabId));
             stored++;
         }
-        if (stored > 0) CurrentPageLoadId = pageLoadId;
+        if (stored > 0)
+        {
+            CurrentPageLoadId = pageLoadId;
+            if (!string.IsNullOrEmpty(tabId)) _currentByTab[tabId!] = pageLoadId;
+        }
         return stored;
     }
 
     public IReadOnlyList<ConsoleEvent> Tail(
         int count, string? minLevel = null, long sinceSeq = 0, long sinceBuildSeq = 0,
         string? grep = null, string? pageLoadId = null, bool dropTransportNoise = false,
-        bool dropFrameworkNoise = false) =>
-        _log.Tail(count, minLevel, sinceSeq, sinceBuildSeq, grep, pageLoadId, dropTransportNoise, dropFrameworkNoise);
+        bool dropFrameworkNoise = false, string? tabId = null) =>
+        _log.Tail(count, minLevel, sinceSeq, sinceBuildSeq, grep, pageLoadId, dropTransportNoise, dropFrameworkNoise, tabId);
 
     public void Clear() => _log.Clear();
 
-    private static ConsoleEvent Enrich(long seq, RawConsoleEvent raw, string pageLoadId, long buildSeq, string receivedAt)
+    private static ConsoleEvent Enrich(long seq, RawConsoleEvent raw, string pageLoadId, long buildSeq, string receivedAt, string? tabId)
     {
         var level = (Clamp(raw.Level, MaxFieldLen) ?? "log").ToLowerInvariant();
 
@@ -128,7 +140,8 @@ public sealed class ConsoleCollector
             timestamp!,
             buildSeq,
             pageLoadId,
-            receivedAt);
+            receivedAt,
+            tabId);
     }
 
     // Truncate over-long strings with a marker so a flooded field can't blow the buffer; null/empty
@@ -147,10 +160,14 @@ public sealed class ConsoleCollector
     // reload clear it?" check) unless an explicit pageLoadId was given (that wins).
     public string TailJson(string name, bool enabled,
         int count, string? minLevel, long sinceSeq, long sinceBuildSeq, string? grep, string? pageLoadId,
-        bool compact = false, bool appOnly = false, bool frameworkNoise = false, bool currentPageOnly = false)
+        bool compact = false, bool appOnly = false, bool frameworkNoise = false, bool currentPageOnly = false,
+        string? tabId = null)
     {
-        if (string.IsNullOrEmpty(pageLoadId) && currentPageOnly) pageLoadId = CurrentPageLoadId;
-        var events = Tail(count, minLevel, sinceSeq, sinceBuildSeq, grep, pageLoadId, appOnly, frameworkNoise);
+        // currentPageOnly scopes to the live page load — of the given tab if one was named, else the
+        // instance-wide most-recent (whoever logged last).
+        if (string.IsNullOrEmpty(pageLoadId) && currentPageOnly)
+            pageLoadId = (string.IsNullOrEmpty(tabId) ? null : CurrentPageLoadIdFor(tabId)) ?? CurrentPageLoadId;
+        var events = Tail(count, minLevel, sinceSeq, sinceBuildSeq, grep, pageLoadId, appOnly, frameworkNoise, tabId);
         if (compact)
             return JsonSerializer.Serialize(new
             {

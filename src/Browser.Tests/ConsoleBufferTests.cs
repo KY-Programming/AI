@@ -13,6 +13,35 @@ public class ConsoleBufferTests
     private static long Add(ConsoleEventLog log, string level, string text, long buildSeq = 0, string page = "p1", string? stack = null)
         => log.Append(seq => new ConsoleEvent(seq, level, new[] { text }, text, null, null, null, stack, "t", buildSeq, page, "r"));
 
+    private static long AddTab(ConsoleEventLog log, string text, string tab, string page = "p1")
+        => log.Append(seq => new ConsoleEvent(seq, "log", new[] { text }, text, null, null, null, null, "t", 0, page, "r", tab));
+
+    // ── per-tab (multi-agent) console segmentation ──
+
+    [Fact]
+    public void EventLog_tabId_filter_scopes_to_one_tab()
+    {
+        var log = new ConsoleEventLog(0);
+        AddTab(log, "a", "tabA"); AddTab(log, "b", "tabB"); AddTab(log, "c", "tabA");
+
+        Assert.Equal(new[] { "a", "c" }, log.Tail(0, tabId: "tabA").Select(x => x.Text));
+        Assert.Equal(new[] { "b" }, log.Tail(0, tabId: "tabB").Select(x => x.Text));
+        Assert.Equal(3, log.Tail(0).Count);   // no tab filter ⇒ the interleaved all-tabs view
+    }
+
+    [Fact]
+    public void Collector_tracks_the_live_page_load_per_tab()
+    {
+        var c = new ConsoleCollector(100, () => 0);
+        var ev = new[] { new RawConsoleEvent("log", new[] { "x" }, null, null, null, null, null, null) };
+        c.Ingest(new ConsoleIngestBatch(c.Token, "pl-A", ev, null, "tabA"));
+        c.Ingest(new ConsoleIngestBatch(c.Token, "pl-B", ev, null, "tabB"));
+
+        Assert.Equal("pl-A", c.CurrentPageLoadIdFor("tabA"));
+        Assert.Equal("pl-B", c.CurrentPageLoadIdFor("tabB"));
+        Assert.Null(c.CurrentPageLoadIdFor("unknown-tab"));
+    }
+
     // ── ConsoleEventLog ──
 
     [Fact]

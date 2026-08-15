@@ -168,7 +168,7 @@ internal static class Program
         // back to us) is templated AFTER we bind, since the port is OS-assigned.
         var collector = new ConsoleCollector(BufferCapacity, () => Interlocked.Read(ref Capture.BuildSeq));
         Capture.Collector = collector;
-        var eval = new EvalChannel(collector.Token);
+        var eval = new TabRegistry(collector.Token);
         Capture.Eval = eval;
         var snippet = "";   // assigned after bind, before inject (no request can arrive until then)
 
@@ -188,23 +188,26 @@ internal static class Program
         });
 
         // ── control API: what the hub's BrowserTools forward to (loopback-only) ──
-        app.MapGet("/status", () => Results.Content(JsonSerializer.Serialize(new
+        app.MapGet("/status", () =>
         {
-            name = instanceName,
-            attachedTo = ngName,
-            running = true,
-            pageConnected = eval.PageConnected,
-            interactionActive = eval.InteractionActive,
-            paused = eval.Paused,
-            killed = eval.Killed,
-            holdReload = eval.HoldReload,
-            reloadReleased = eval.ReloadReleased,
-            buildSeq = Interlocked.Read(ref Capture.BuildSeq),
-        }, EvalJson), "application/json"));
-        app.MapGet("/console/tail", (int? lines, string? level, long? sinceSeq, string? grep, string? pageLoad, bool? compact, bool? appOnly, bool? dropFrameworkNoise, bool? currentPageOnly) =>
+            var snap = eval.StatusSnapshot();
+            // Instance identity + the per-tab breakdown (snap carries pageConnected/interaction/paused/
+            // killed/holdReload aggregates plus a `tabs` array with per-tab owner/lease/flags).
+            var payload = new Dictionary<string, object?>
+            {
+                ["name"] = instanceName,
+                ["attachedTo"] = ngName,
+                ["running"] = true,
+                ["buildSeq"] = Interlocked.Read(ref Capture.BuildSeq),
+            };
+            foreach (var pr in JsonSerializer.SerializeToElement(snap, EvalJson).EnumerateObject())
+                payload[pr.Name] = pr.Value.Clone();
+            return Results.Content(JsonSerializer.Serialize(payload, EvalJson), "application/json");
+        });
+        app.MapGet("/console/tail", (int? lines, string? level, long? sinceSeq, string? grep, string? pageLoad, bool? compact, bool? appOnly, bool? dropFrameworkNoise, bool? currentPageOnly, string? tab) =>
             Results.Content(collector.TailJson("browser", enabled: true,
                 lines is null or <= 0 ? 200 : lines.Value, level, sinceSeq ?? 0, sinceBuildSeq: 0,
-                grep, pageLoad, compact ?? false, appOnly ?? false, dropFrameworkNoise ?? false, currentPageOnly ?? false), "application/json"));
+                grep, pageLoad, compact ?? false, appOnly ?? false, dropFrameworkNoise ?? false, currentPageOnly ?? false, tab), "application/json"));
         app.MapPost("/console/clear", () =>
         {
             collector.Clear();
@@ -215,17 +218,18 @@ internal static class Program
         // human's go-ahead instead of retrying start_interaction itself. A kill is stronger than a pause
         // and is never worth waiting out (WaitForResumeAsync returns false immediately for one), so the
         // response calls that out explicitly instead of just looking like an ordinary timeout.
-        app.MapPost("/wait-for-resume", async (HttpContext ctx, int? timeout) =>
+        app.MapPost("/wait-for-resume", async (HttpContext ctx, int? timeout, string? tab) =>
         {
-            var cleared = await eval.WaitForResumeAsync(timeout ?? 60_000, ctx.RequestAborted);
-            var killed = eval.Killed;
+            var agent = ctx.Request.Headers[AgentContext.Header].ToString();
+            var (cleared, ch) = await eval.WaitForResumeAsync(agent, tab, timeout ?? 60_000, ctx.RequestAborted);
+            var killed = ch?.Killed ?? false;
             return Results.Content(JsonSerializer.Serialize(new
             {
                 ok = cleared,
                 timedOut = !cleared && !killed,
                 killed,
-                paused = eval.Paused,
-                interactionActive = eval.InteractionActive,
+                paused = ch?.Paused ?? false,
+                interactionActive = ch?.InteractionActive ?? false,
                 error = killed
                     ? "the user stopped the session completely (not just paused) — do not call this again; wait for them in chat instead"
                     : cleared ? null : "still paused — call wait_for_resume again to keep waiting",
@@ -233,7 +237,7 @@ internal static class Program
         });
         // Every page action arrives here as an EvalRequest the hub already built from the MCP args.
         // InstanceEval owns the interaction gate (its flag lives on the channel), then queues + awaits.
-        app.MapPost("/eval", async (HttpContext ctx, int? waitMs) =>
+        app.MapPost("/eval", async (HttpContext ctx, int? waitMs, string? tab) =>
         {
             EvalRequest? req;
             try { req = await JsonSerializer.DeserializeAsync<EvalRequest>(ctx.Request.Body, IngestJson, ctx.RequestAborted); }
@@ -241,8 +245,12 @@ internal static class Program
             if (req is null || string.IsNullOrEmpty(req.Kind))
                 return Results.Content(JsonSerializer.Serialize(new { ok = false, error = "eval requires a request body" }, EvalJson), "application/json");
 
+            // agent = who is calling (stamped by their connect bridge, forwarded by the hub); tab = an
+            // explicit target when the agent drives several tabs. The registry resolves the tab, enforces
+            // ownership, and runs the interaction gate.
+            var agent = ctx.Request.Headers[AgentContext.Header].ToString();
             var budget = waitMs ?? (req.TimeoutMs + 1500);
-            var result = await InstanceEval.DispatchAsync(eval, req, budget);
+            var result = await eval.DispatchAsync(req, budget, agent, tab);
             return Results.Content(result, "application/json");
         });
 
@@ -275,13 +283,27 @@ internal static class Program
         {
             Cors(ctx);
             if (!string.Equals(ctx.Request.Query["token"], collector.Token, StringComparison.Ordinal))
-                return Results.Json(new { requests = Array.Empty<EvalRequest>(), interactionActive = false, paused = false, killed = false, holdReload = false }, EvalJson);   // foreign tab — hand it nothing
-            var reqs = await eval.PollAsync(EvalPollWindowMs, ctx.RequestAborted);
-            // interactionActive/paused/killed let a (re)loaded page restore the overlay/paused/killed pill on its own.
-            // holdReload drives the page's dev-server reload suppression; paused/killed additionally tell it
-            // whether a release should force a catch-up reload (they mean a human is looking at the page, so it
-            // must not be disturbed — see the reloadHold module in console-capture.js).
-            return Results.Json(new { requests = reqs, interactionActive = eval.InteractionActive, paused = eval.Paused, killed = eval.Killed, holdReload = eval.HoldReload }, EvalJson);
+                return Results.Json(new { requests = Array.Empty<EvalRequest>(), interactionActive = false, paused = false, killed = false, holdReload = false, tabId = (string?)null, claimed = false, handoff = (object?)null }, EvalJson);   // foreign tab — hand it nothing
+            var tabId = ctx.Request.Query["tabId"].ToString();
+            var claim = ctx.Request.Query["claim"].ToString();
+            var pageLoadId = ctx.Request.Query["pageLoadId"].ToString();
+            var poll = await eval.PollAsync(tabId, claim, pageLoadId, EvalPollWindowMs, ctx.RequestAborted);
+            // interactionActive/paused/killed/holdReload are THIS TAB's now (same field names as before, so the
+            // snippet reconciles unchanged) and let a (re)loaded tab restore its own overlay/paused/killed/held
+            // state. claimed acks a presented claim ticket; handoff asks this tab to show the "another agent
+            // wants in" prompt.
+            return Results.Json(new
+            {
+                requests = poll.Requests,
+                interactionActive = poll.InteractionActive,
+                paused = poll.Paused,
+                killed = poll.Killed,
+                holdReload = poll.HoldReload,
+                tabId = poll.TabId,
+                claimed = poll.Claimed,
+                handoff = poll.Handoff,
+                reassignTabId = poll.ReassignTabId,   // non-null ⇒ duplicate tab: snippet re-keys to this id
+            }, EvalJson);
         });
         app.MapMethods("/__kyai/eval/result", new[] { "OPTIONS" }, (HttpContext ctx) =>
         {
@@ -298,7 +320,8 @@ internal static class Program
                 var token = root.TryGetProperty("token", out var t) ? t.GetString() : null;
                 var id = root.TryGetProperty("id", out var i) ? i.GetString() : null;
                 var payload = root.TryGetProperty("payload", out var p) ? p.GetRawText() : null;
-                return Results.Json(new { ok = eval.Complete(token, id, payload) });
+                var tabId = root.TryGetProperty("tabId", out var tb) ? tb.GetString() : null;
+                return Results.Json(new { ok = eval.Complete(tabId, token, id, payload) });
             }
             catch { return Results.Json(new { ok = false }); }
         });
@@ -317,8 +340,9 @@ internal static class Program
         app.MapPost("/__kyai/interaction/pause", async (HttpContext ctx) =>
         {
             Cors(ctx);
-            if (!await HasValidTokenAsync(ctx, collector.Token)) return Results.Json(new { ok = false });
-            eval.SetPaused(true);
+            var body = await ReadBodyAsync(ctx);
+            if (!TokenOk(body, collector.Token)) return Results.Json(new { ok = false });
+            eval.SetPaused(Str(body, "tabId"), true);
             return Results.Json(new { ok = true, paused = true });
         });
         app.MapMethods("/__kyai/interaction/resume", new[] { "OPTIONS" }, (HttpContext ctx) =>
@@ -329,8 +353,9 @@ internal static class Program
         app.MapPost("/__kyai/interaction/resume", async (HttpContext ctx) =>
         {
             Cors(ctx);
-            if (!await HasValidTokenAsync(ctx, collector.Token)) return Results.Json(new { ok = false });
-            eval.SetPaused(false);
+            var body = await ReadBodyAsync(ctx);
+            if (!TokenOk(body, collector.Token)) return Results.Json(new { ok = false });
+            eval.SetPaused(Str(body, "tabId"), false);
             return Results.Json(new { ok = true, paused = false });
         });
         app.MapMethods("/__kyai/interaction/kill", new[] { "OPTIONS" }, (HttpContext ctx) =>
@@ -341,9 +366,44 @@ internal static class Program
         app.MapPost("/__kyai/interaction/kill", async (HttpContext ctx) =>
         {
             Cors(ctx);
-            if (!await HasValidTokenAsync(ctx, collector.Token)) return Results.Json(new { ok = false });
-            eval.SetKilled(true);
-            return Results.Json(new { ok = true, killed = true });
+            var body = await ReadBodyAsync(ctx);
+            if (!TokenOk(body, collector.Token)) return Results.Json(new { ok = false });
+            // scope:"all" stops every agent's tab at once (the overlay's "stop all" control); otherwise
+            // just the tab whose Stop icon was clicked.
+            var scopeAll = string.Equals(Str(body, "scope"), "all", StringComparison.Ordinal);
+            eval.SetKilled(Str(body, "tabId"), true, scopeAll);
+            return Results.Json(new { ok = true, killed = true, scope = scopeAll ? "all" : "tab" });
+        });
+        // ── handoff: the "another agent wants in" prompt's Share / Deny buttons (Open-a-new-tab needs no
+        //    server call — it's window.open in the click handler, and the new tab presents its claim on
+        //    its first poll). Token-guarded like the rest. ──
+        app.MapMethods("/__kyai/handoff/share", new[] { "OPTIONS" }, (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            return Results.StatusCode(StatusCodes.Status204NoContent);
+        });
+        app.MapPost("/__kyai/handoff/share", async (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            var body = await ReadBodyAsync(ctx);
+            if (!TokenOk(body, collector.Token)) return Results.Json(new { ok = false });
+            var ticket = Str(body, "ticket");
+            var ok = ticket is not null && eval.ShareTab(Str(body, "tabId"), ticket);
+            return Results.Json(new { ok });
+        });
+        app.MapMethods("/__kyai/handoff/deny", new[] { "OPTIONS" }, (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            return Results.StatusCode(StatusCodes.Status204NoContent);
+        });
+        app.MapPost("/__kyai/handoff/deny", async (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            var body = await ReadBodyAsync(ctx);
+            if (!TokenOk(body, collector.Token)) return Results.Json(new { ok = false });
+            var ticket = Str(body, "ticket");
+            var ok = ticket is not null && eval.DenyHandoff(ticket);
+            return Results.Json(new { ok });
         });
         // The held-reload pill's click: hand the Angular dev server's live-reload back for THIS session
         // without ending the agent's session (unlike Pause, which does end it). Deliberately one-way and
@@ -358,8 +418,9 @@ internal static class Program
         app.MapPost("/__kyai/reload/release", async (HttpContext ctx) =>
         {
             Cors(ctx);
-            if (!await HasValidTokenAsync(ctx, collector.Token)) return Results.Json(new { ok = false });
-            eval.SetReloadReleased(true);
+            var body = await ReadBodyAsync(ctx);
+            if (!TokenOk(body, collector.Token)) return Results.Json(new { ok = false });
+            eval.SetReloadReleased(Str(body, "tabId"));
             return Results.Json(new { ok = true, holdReload = false });
         });
         app.Urls.Add($"http://127.0.0.1:{restPort}");
@@ -397,7 +458,7 @@ internal static class Program
         {
             if (!await HubLifecycle.HubReachableAsync(hubUrl))
                 HubLifecycle.TryLaunchHub("ky-ai-browser", hubPort);
-            _ = RegisterLoopAsync(hubUrl, instanceName, selfUrl, stopping.Token);
+            _ = RegisterLoopAsync(hubUrl, instanceName, selfUrl, eval, stopping.Token);
         }
 
         if (!await InjectAsync(ngControlUrl, scriptTag))
@@ -434,17 +495,23 @@ internal static class Program
         ctx.Response.Headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS";
     }
 
-    // Same {token} body shape as /__kyai/eval/result, factored out for the stop/resume routes.
-    private static async Task<bool> HasValidTokenAsync(HttpContext ctx, string expectedToken)
+    // The human-override routes (pause/resume/kill/reload-release/handoff) all POST a small {token, …}
+    // body. Read it once (it can only be read once), then pull fields off the parsed element.
+    private static async Task<JsonElement?> ReadBodyAsync(HttpContext ctx)
     {
         try
         {
             using var doc = await JsonDocument.ParseAsync(ctx.Request.Body, cancellationToken: ctx.RequestAborted);
-            var token = doc.RootElement.TryGetProperty("token", out var t) ? t.GetString() : null;
-            return string.Equals(token, expectedToken, StringComparison.Ordinal);
+            return doc.RootElement.Clone();
         }
-        catch { return false; }
+        catch { return null; }
     }
+
+    private static bool TokenOk(JsonElement? body, string expected) =>
+        body is { } b && b.TryGetProperty("token", out var t) && string.Equals(t.GetString(), expected, StringComparison.Ordinal);
+
+    private static string? Str(JsonElement? body, string prop) =>
+        body is { } b && b.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
     private static string? GetBoundUrl(WebApplication app)
     {
@@ -496,11 +563,12 @@ internal static class Program
 
     // ── browser-hub registration (mirrors SupervisorHost/TerminalHost) ──
 
-    private static async Task RegisterLoopAsync(string hubUrl, string name, string controlUrl, CancellationToken ct)
+    private static async Task RegisterLoopAsync(string hubUrl, string name, string controlUrl, TabRegistry eval, CancellationToken ct)
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(4) };
         var body = JsonSerializer.Serialize(new { name, controlUrl });
         var url = hubUrl.TrimEnd('/') + "/register";
+        var bridgesUrl = hubUrl.TrimEnd('/') + "/bridges";
         while (!ct.IsCancellationRequested)
         {
             var ok = false;
@@ -511,6 +579,18 @@ internal static class Program
                 ok = resp.IsSuccessStatusCode;
             }
             catch { /* hub not up yet */ }
+            // Same cadence: pull the hub's live bridge ids so tab leases release on agent DISCONNECT
+            // rather than idleness. Best-effort — if the hub can't answer, the registry's liveness data
+            // goes stale and it falls back to the sliding-lease rule on its own.
+            if (ok)
+            {
+                try
+                {
+                    var ids = JsonSerializer.Deserialize<string[]>(await http.GetStringAsync(bridgesUrl, ct));
+                    if (ids is not null) eval.SetLiveAgents(ids);
+                }
+                catch { /* hub answered /register but not /bridges (older hub) — lease rule covers it */ }
+            }
             try { await Task.Delay(TimeSpan.FromSeconds(ok ? 15 : 2), ct); }
             catch { break; }
         }

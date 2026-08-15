@@ -27,6 +27,16 @@ public static class HubHost
         var app = builder.Build();
         Hub.ShutdownHook = () => app.Lifetime.StopApplication();
 
+        // Lift the calling agent's id (stamped by its `connect` bridge) into AgentContext for the life
+        // of the request. The streamable-HTTP tool handler runs under this request's ExecutionContext,
+        // so the AsyncLocal is visible inside the tool → Hub.ForwardAsync re-attaches it downstream.
+        app.Use(async (ctx, next) =>
+        {
+            var agent = ctx.Request.Headers[AgentContext.Header].ToString();
+            AgentContext.Current = string.IsNullOrEmpty(agent) ? null : agent;
+            await next();
+        });
+
         app.MapMcp("/mcp");
         app.MapGet("/health", () => Results.Text("ok"));
         app.MapPost("/register", (RegisterRequest req) =>
@@ -52,6 +62,9 @@ public static class HubHost
             Hub.Bridges.Remove(req.Id);
             return Results.Ok();
         });
+        // The live bridge ids (= agent ids). Supervisors poll this to tell a DISCONNECTED agent from a
+        // merely idle one — ky-ai-browser releases a tab lease only when its owner drops off this list.
+        app.MapGet("/bridges", () => Results.Json(Hub.Bridges.LiveIds(Hub.BridgeLiveWindow)));
         // Tear down the whole stack (every supervisor, then the hub). Mapped for both verbs so it's
         // trivial to hit by hand; this is what `<tool> shutdown` calls.
         app.MapMethods("/shutdown", new[] { "GET", "POST" },

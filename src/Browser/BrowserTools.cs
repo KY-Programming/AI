@@ -69,6 +69,7 @@ internal static class BrowserTools
         [Description("Slim payload: drop args when text exists, truncate stacks to a few frames")] bool compact = false,
         [Description("Drop transport churn (SignalR/WebSocket negotiation, [vite] HMR socket noise)")] bool appOnly = false,
         [Description("Drop known-benign framework banners (Inferno/Angular/router noise); separate from appOnly")] bool dropFrameworkNoise = false,
+        [Description("Only this tab's console (tab id from start_interaction/list); omit for the interleaved all-tabs view")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         var q = $"/console/tail?lines={(lines <= 0 ? 200 : lines)}";
@@ -80,6 +81,7 @@ internal static class BrowserTools
         if (compact) q += "&compact=true";
         if (appOnly) q += "&appOnly=true";
         if (dropFrameworkNoise) q += "&dropFrameworkNoise=true";
+        if (!string.IsNullOrEmpty(tab)) q += $"&tab={Uri.EscapeDataString(tab)}";
         return Hub.ForwardAsync(project, HttpMethod.Get, q, 5);
     }
 
@@ -110,12 +112,13 @@ internal static class BrowserTools
         [Description("Await a returned promise/thenable before serializing (default false)")] bool awaitPromise = false,
         [Description("Return the result as structured JSON (in `json`) instead of a string in `value` (default false)")] bool json = false,
         [Description("Max ms to wait for the page to return a result (default 5000)")] int timeoutMs = 5000,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(expression)) return Task.FromResult(Bad("expression is required"));
         var budget = Clamp(timeoutMs);
         return Eval(project, budget + 1500, new EvalRequest
-        { Id = "", Kind = "eval", Expression = expression, AwaitPromise = awaitPromise, AsJson = json, TimeoutMs = budget });
+        { Id = "", Kind = "eval", Expression = expression, AwaitPromise = awaitPromise, AsJson = json, TimeoutMs = budget }, tab);
     }
 
     [McpServerTool(Name = "query_dom"), Description(
@@ -133,12 +136,13 @@ internal static class BrowserTools
         [Description("Max elements to describe when all=true (default 20)")] int limit = 20,
         [Description("Full description (default true); false slims each match to {tag, id?, text}")] bool detail = true,
         [Description("Max ms to wait for the page to return a result (default 5000)")] int timeoutMs = 5000,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(selector)) return Task.FromResult(Bad("selector is required"));
         var budget = Clamp(timeoutMs);
         return Eval(project, budget + 1500, new EvalRequest
-        { Id = "", Kind = "query", Selector = selector, All = all, Limit = Math.Clamp(limit, 1, 200), Detail = detail, TimeoutMs = budget });
+        { Id = "", Kind = "query", Selector = selector, All = all, Limit = Math.Clamp(limit, 1, 200), Detail = detail, TimeoutMs = budget }, tab);
     }
 
     [McpServerTool(Name = "read_component"), Description(
@@ -167,12 +171,13 @@ internal static class BrowserTools
         [Description("Only serialize these state fields (by name) in full; omit for all (large values summarized)")] string[]? fields = null,
         [Description("Max nesting depth for serialized values (default 3, max 6)")] int depth = 3,
         [Description("Max ms to wait for the page to return a result (default 5000)")] int timeoutMs = 5000,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(selector)) return Task.FromResult(Bad("selector is required"));
         var budget = Clamp(timeoutMs);
         return Eval(project, budget + 1500, new EvalRequest
-        { Id = "", Kind = "component", Selector = selector, Fields = fields, Depth = depth, TimeoutMs = budget });
+        { Id = "", Kind = "component", Selector = selector, Fields = fields, Depth = depth, TimeoutMs = budget }, tab);
     }
 
     [McpServerTool(Name = "get_styles"), Description(
@@ -186,12 +191,13 @@ internal static class BrowserTools
         [Description("CSS selector of the element to read")] string selector,
         [Description("Computed-style property names (kebab-case); omit for a default set")] string[]? props = null,
         [Description("Max ms to wait for the page (default 5000)")] int timeoutMs = 5000,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(selector)) return Task.FromResult(Bad("selector is required"));
         var budget = Clamp(timeoutMs);
         return Eval(project, budget + 1500, new EvalRequest
-        { Id = "", Kind = "styles", Selector = selector, Props = props, TimeoutMs = budget });
+        { Id = "", Kind = "styles", Selector = selector, Props = props, TimeoutMs = budget }, tab);
     }
 
     // ── interaction (synthetic; see the type header) ──
@@ -204,15 +210,25 @@ internal static class BrowserTools
         "Open supervised interaction — REQUIRED before click/move/send_key/type_text/scroll/focus/navigate. It draws " +
         "a fixed, non-interactable red frame over the app with a cursor icon, so the user can plainly see the " +
         "agent is driving the page; each action then animates that cursor (ripple on click, key cap on a key " +
-        "press, the cursor gliding on move). Call stop_interaction when you're finished. Returns {ok, " +
-        "shown}. The overlay restores itself if the page reloads while interaction is open. " +
-        "Omit project when only one capture is registered.")]
+        "press, the cursor gliding on move). Call stop_interaction when you're finished. Returns {ok, shown, tabId} " +
+        "— the tabId names the tab you were given; pass it as `tab` to later tools if you drive more than one. " +
+        "The overlay restores itself if the page reloads while interaction is open. " +
+        "MULTIPLE AGENTS: several agents can drive the same app in parallel, each in its own tab. If another " +
+        "agent already holds the only tab, THIS CALL BLOCKS while the user is shown a prompt to open a new tab " +
+        "for you (or share the current one when it's free); it then returns your tab, or a refusal " +
+        "(handoffTimedOut/handoffDenied) you should not blindly retry. Note tabs of the same app SHARE cookies, " +
+        "localStorage and the backend — you get input isolation, not a clean-room: coordinate if you touch shared " +
+        "state. Omit project when only one capture is registered.")]
     public static Task<string> StartInteraction(
-        [Description("Max ms to wait for the page (default 3000)")] int timeoutMs = 3000,
+        [Description("Max ms to wait — generous default because the call may park while the user opens/shares a tab; the fast path answers in <1s regardless (default 60000)")] int timeoutMs = 60_000,
+        [Description("Reopen/attach a specific tab by id; omit to be given a tab (yours if you have one, else a free or new one)")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
-        var budget = Math.Clamp(timeoutMs, 250, 30_000);
-        return Eval(project, budget, new EvalRequest { Id = "", Kind = "overlay", Show = true, TimeoutMs = budget });
+        // Generous default + raised ceiling: with a free tab this returns immediately, and when all tabs
+        // are busy the budget is how long the human has to answer the open/share prompt — 3s would time
+        // the handoff out before they could even read it.
+        var budget = Math.Clamp(timeoutMs, 250, 120_000);
+        return Eval(project, budget, new EvalRequest { Id = "", Kind = "overlay", Show = true, TimeoutMs = budget }, tab);
     }
 
     [McpServerTool(Name = "stop_interaction"), Description(
@@ -221,10 +237,11 @@ internal static class BrowserTools
         "start_interaction. Returns {ok, shown:false}. Omit project when only one capture is registered.")]
     public static Task<string> StopInteraction(
         [Description("Max ms to wait for the page (default 3000)")] int timeoutMs = 3000,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         var budget = Math.Clamp(timeoutMs, 250, 30_000);
-        return Eval(project, budget, new EvalRequest { Id = "", Kind = "overlay", Show = false, TimeoutMs = budget });
+        return Eval(project, budget, new EvalRequest { Id = "", Kind = "overlay", Show = false, TimeoutMs = budget }, tab);
     }
 
     [McpServerTool(Name = "wait_for_resume"), Description(
@@ -237,10 +254,13 @@ internal static class BrowserTools
         "is registered.")]
     public static Task<string> WaitForResume(
         [Description("Max ms to wait (default 60000)")] int timeoutMs = 60_000,
+        [Description("Wait on a specific tab by id; omit to use the tab you're driving")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         var sec = Math.Clamp(timeoutMs / 1000 + 5, 5, 124);
-        return Hub.ForwardAsync(project, HttpMethod.Post, $"/wait-for-resume?timeout={timeoutMs}", sec);
+        var q = $"/wait-for-resume?timeout={timeoutMs}";
+        if (!string.IsNullOrEmpty(tab)) q += $"&tab={Uri.EscapeDataString(tab)}";
+        return Hub.ForwardAsync(project, HttpMethod.Post, q, sec);
     }
 
     [McpServerTool(Name = "click"), Description(
@@ -268,13 +288,14 @@ internal static class BrowserTools
         [Description("Hold Meta/Cmd/Win")] bool meta = false,
         [Description("Return the full target element (classes/attributes/rect/outerHTML) instead of {tag, id?, text}")] bool detail = false,
         [Description("Max ms to wait for the page (default 5000)")] int timeoutMs = 5000,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(selector) && string.IsNullOrWhiteSpace(text) && (x is null || y is null))
             return Task.FromResult(Bad("click requires a selector, text, or both x and y"));
         var budget = Clamp(timeoutMs);
         return Eval(project, budget + 1500, new EvalRequest
-        { Id = "", Kind = "click", Selector = selector, Text = text, Within = within, Exact = exact, X = x, Y = y, Button = button, Ctrl = ctrl, Shift = shift, Alt = alt, Meta = meta, Detail = detail, TimeoutMs = budget });
+        { Id = "", Kind = "click", Selector = selector, Text = text, Within = within, Exact = exact, X = x, Y = y, Button = button, Ctrl = ctrl, Shift = shift, Alt = alt, Meta = meta, Detail = detail, TimeoutMs = budget }, tab);
     }
 
     [McpServerTool(Name = "move"), Description(
@@ -293,13 +314,14 @@ internal static class BrowserTools
         [Description("Number of move steps (default: ~1 per 16ms, capped)")] int? steps = null,
         [Description("Return the full finalTarget element instead of {tag, id?, text}")] bool detail = false,
         [Description("Max ms to wait for the page (default: durationMs + headroom)")] int timeoutMs = 0,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         var dur = Math.Clamp(durationMs, 0, 120_000);
         var effective = Math.Max(timeoutMs > 0 ? Clamp(timeoutMs) : 0, dur);
         var budget = effective + 2000;
         return Eval(project, budget, new EvalRequest
-        { Id = "", Kind = "move", FromX = fromX, FromY = fromY, ToX = toX, ToY = toY, DurationMs = dur, Steps = steps is null ? null : Math.Clamp(steps.Value, 1, 500), Detail = detail, TimeoutMs = budget });
+        { Id = "", Kind = "move", FromX = fromX, FromY = fromY, ToX = toX, ToY = toY, DurationMs = dur, Steps = steps is null ? null : Math.Clamp(steps.Value, 1, 500), Detail = detail, TimeoutMs = budget }, tab);
     }
 
     [McpServerTool(Name = "send_key"), Description(
@@ -318,12 +340,13 @@ internal static class BrowserTools
         [Description("Hold Meta/Cmd/Win")] bool meta = false,
         [Description("Return the full target element instead of {tag, id?, text}")] bool detail = false,
         [Description("Max ms to wait for the page (default 5000)")] int timeoutMs = 5000,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrEmpty(key)) return Task.FromResult(Bad("key is required"));
         var budget = Clamp(timeoutMs);
         return Eval(project, budget + 1500, new EvalRequest
-        { Id = "", Kind = "key", Key = key, Code = code, Selector = selector, Ctrl = ctrl, Shift = shift, Alt = alt, Meta = meta, Detail = detail, TimeoutMs = budget });
+        { Id = "", Kind = "key", Key = key, Code = code, Selector = selector, Ctrl = ctrl, Shift = shift, Alt = alt, Meta = meta, Detail = detail, TimeoutMs = budget }, tab);
     }
 
     [McpServerTool(Name = "type_text"), Description(
@@ -338,12 +361,13 @@ internal static class BrowserTools
         [Description("Append to the current value instead of replacing it (default false)")] bool append = false,
         [Description("Return the full target element instead of {tag, id?, text}")] bool detail = false,
         [Description("Max ms to wait for the page (default 5000)")] int timeoutMs = 5000,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(selector)) return Task.FromResult(Bad("selector is required"));
         var budget = Clamp(timeoutMs);
         return Eval(project, budget + 1500, new EvalRequest
-        { Id = "", Kind = "type", Selector = selector, Text = text ?? "", Append = append, Detail = detail, TimeoutMs = budget });
+        { Id = "", Kind = "type", Selector = selector, Text = text ?? "", Append = append, Detail = detail, TimeoutMs = budget }, tab);
     }
 
     [McpServerTool(Name = "scroll"), Description(
@@ -357,11 +381,12 @@ internal static class BrowserTools
         [Description("Target scroll Y (CSS px)")] int? y = null,
         [Description("Return the full target element instead of {tag, id?, text}")] bool detail = false,
         [Description("Max ms to wait for the page (default 5000)")] int timeoutMs = 5000,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         var budget = Clamp(timeoutMs);
         return Eval(project, budget + 1500, new EvalRequest
-        { Id = "", Kind = "scroll", Selector = selector, X = x, Y = y, Detail = detail, TimeoutMs = budget });
+        { Id = "", Kind = "scroll", Selector = selector, X = x, Y = y, Detail = detail, TimeoutMs = budget }, tab);
     }
 
     [McpServerTool(Name = "focus"), Description(
@@ -373,12 +398,13 @@ internal static class BrowserTools
         [Description("Blur instead of focus (selector optional → the active element)")] bool blur = false,
         [Description("Return the full target element instead of {tag, id?, text}")] bool detail = false,
         [Description("Max ms to wait for the page (default 5000)")] int timeoutMs = 5000,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(selector) && !blur) return Task.FromResult(Bad("focus requires a selector (or set blur=true)"));
         var budget = Clamp(timeoutMs);
         return Eval(project, budget + 1500, new EvalRequest
-        { Id = "", Kind = "focus", Selector = selector, Blur = blur, Detail = detail, TimeoutMs = budget });
+        { Id = "", Kind = "focus", Selector = selector, Blur = blur, Detail = detail, TimeoutMs = budget }, tab);
     }
 
     [McpServerTool(Name = "wait_for"), Description(
@@ -393,13 +419,14 @@ internal static class BrowserTools
         [Description("JS expression to wait for (truthy); evaluated in global scope")] string? expression = null,
         [Description("Max ms to wait before giving up (default 5000)")] int timeoutMs = 5000,
         [Description("Poll interval in ms (default 100)")] int pollMs = 100,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(selector) && string.IsNullOrWhiteSpace(expression))
             return Task.FromResult(Bad("wait_for requires a selector or an expression"));
         var wait = Clamp(timeoutMs);
         return Eval(project, wait + 2000, new EvalRequest
-        { Id = "", Kind = "wait", Selector = selector, Expression = expression, PollMs = Math.Clamp(pollMs, 20, 5000), TimeoutMs = wait });
+        { Id = "", Kind = "wait", Selector = selector, Expression = expression, PollMs = Math.Clamp(pollMs, 20, 5000), TimeoutMs = wait }, tab);
     }
 
     [McpServerTool(Name = "reload_page"), Description(
@@ -412,10 +439,11 @@ internal static class BrowserTools
         "Returns pageConnected:false if no page is open. Omit project when only one capture is registered.")]
     public static Task<string> ReloadPage(
         [Description("Max ms to wait for the page to pick up the reload (default 3000)")] int timeoutMs = 3000,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         var budget = Math.Clamp(timeoutMs, 250, 30_000);
-        return Eval(project, budget, new EvalRequest { Id = "", Kind = "reload", TimeoutMs = budget });
+        return Eval(project, budget, new EvalRequest { Id = "", Kind = "reload", TimeoutMs = budget }, tab);
     }
 
     [McpServerTool(Name = "navigate"), Description(
@@ -433,12 +461,13 @@ internal static class BrowserTools
         [Description("Target route/URL to navigate to, e.g. \"/orders/42\" (router path or same-origin URL)")] string path,
         [Description("Use replaceState instead of pushState in the History fallback (no new history entry)")] bool replace = false,
         [Description("Max ms to wait for the navigation to settle (default 5000)")] int timeoutMs = 5000,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(path)) return Task.FromResult(Bad("path is required"));
         var budget = Clamp(timeoutMs);
         return Eval(project, budget + 1500, new EvalRequest
-        { Id = "", Kind = "navigate", Path = path, Replace = replace, TimeoutMs = budget });
+        { Id = "", Kind = "navigate", Path = path, Replace = replace, TimeoutMs = budget }, tab);
     }
 
     [McpServerTool(Name = "batch"), Description(
@@ -454,6 +483,7 @@ internal static class BrowserTools
     public static Task<string> Batch(
         [Description("Ordered steps; each is { action, plus that action's fields }")] BatchStep[] steps,
         [Description("Max ms for the whole sequence (default: derived from the steps' own waits/durations/sleeps)")] int timeoutMs = 0,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (steps is null || steps.Length == 0) return Task.FromResult(Bad("batch requires at least one step"));
@@ -467,7 +497,7 @@ internal static class BrowserTools
             s.Action == "sleep" ? (s.DurationMs ?? 500) + 100 :
             s.Action is "click" or "focus" ? 800 : 500);
         var budget = Math.Clamp(timeoutMs > 0 ? timeoutMs : derived, 1000, 300_000);
-        return Eval(project, budget + 1500, new EvalRequest { Id = "", Kind = "batch", Actions = steps, TimeoutMs = budget });
+        return Eval(project, budget + 1500, new EvalRequest { Id = "", Kind = "batch", Actions = steps, TimeoutMs = budget }, tab);
     }
 
     [McpServerTool(Name = "shutdown"), Description(
@@ -476,19 +506,23 @@ internal static class BrowserTools
         "POST/GET /shutdown do the same.")]
     public static Task<string> Shutdown() => Hub.ShutdownAllAsync();
 
-    // Test seam: when set, eval forwards are routed here (capturing the EvalRequest + waitMs) instead
-    // of going out over HTTP — letting tests assert the request a tool builds, and run it through the
-    // real instance dispatcher, without a live hub. Null in production.
-    internal static Func<string?, int, EvalRequest, Task<string>>? ForwardHook;
+    // Test seam: when set, eval forwards are routed here (capturing the EvalRequest + waitMs + tab)
+    // instead of going out over HTTP — letting tests assert the request a tool builds, and run it through
+    // the real instance dispatcher, without a live hub. Null in production.
+    internal static Func<string?, int, EvalRequest, string?, Task<string>>? ForwardHook;
 
     // Package an EvalRequest and forward it to the resolved capture instance's /eval. waitMs is how long
-    // the instance parks the call waiting on the page; the HTTP timeout sits a few seconds above it.
-    private static Task<string> Eval(string? project, int waitMs, EvalRequest req)
+    // the instance parks the call waiting on the page; the HTTP timeout sits a few seconds above it. `tab`
+    // (when set) names an explicit target tab for an agent driving more than one; the calling agent's id
+    // travels out-of-band as an HTTP header (added by the hub), never as a tool argument.
+    private static Task<string> Eval(string? project, int waitMs, EvalRequest req, string? tab = null)
     {
-        if (ForwardHook is { } hook) return hook(project, waitMs, req);
+        if (ForwardHook is { } hook) return hook(project, waitMs, req, tab);
         var body = JsonSerializer.Serialize(req, Wire);
         var sec = Math.Clamp(waitMs / 1000 + 5, 5, 320);
-        return Hub.ForwardAsync(project, HttpMethod.Post, $"/eval?waitMs={waitMs}", sec, body);
+        var q = $"/eval?waitMs={waitMs}";
+        if (!string.IsNullOrEmpty(tab)) q += $"&tab={Uri.EscapeDataString(tab)}";
+        return Hub.ForwardAsync(project, HttpMethod.Post, q, sec, body);
     }
 
     private static int Clamp(int timeoutMs) => Math.Clamp(timeoutMs, 250, 120_000);

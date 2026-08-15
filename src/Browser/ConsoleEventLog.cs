@@ -62,10 +62,11 @@ internal sealed class ConsoleEventLog
     //   pageLoadId   — keep only events from this page load (segment one reload/HMR boundary)
     //   dropTransportNoise — drop SignalR/WebSocket negotiation + [vite] HMR socket churn (see TransportNoise)
     //   dropFrameworkNoise — drop known-benign framework boilerplate (Inferno/Angular banners, …; see FrameworkNoise)
+    //   tabId        — keep only events from this browser tab (per-tab tail across N tabs of one app)
     public IReadOnlyList<ConsoleEvent> Tail(
         int count, string? minLevel = null, long sinceSeq = 0, long sinceBuildSeq = 0,
         string? grep = null, string? pageLoadId = null, bool dropTransportNoise = false,
-        bool dropFrameworkNoise = false)
+        bool dropFrameworkNoise = false, string? tabId = null)
     {
         lock (_sync)
         {
@@ -76,6 +77,7 @@ internal sealed class ConsoleEventLog
             if (sinceSeq > 0) q = q.Where(e => e.Seq >= sinceSeq);
             if (sinceBuildSeq > 0) q = q.Where(e => e.BuildSeq >= sinceBuildSeq);
             if (!string.IsNullOrEmpty(pageLoadId)) q = q.Where(e => e.PageLoadId == pageLoadId);
+            if (!string.IsNullOrEmpty(tabId)) q = q.Where(e => e.TabId == tabId);
             if (dropTransportNoise) q = q.Where(e => !TransportNoise.IsNoise(e));
             if (dropFrameworkNoise) q = q.Where(e => !FrameworkNoise.IsNoise(e));
             if (!string.IsNullOrEmpty(grep))

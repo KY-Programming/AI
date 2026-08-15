@@ -21,7 +21,7 @@ public class BrowserToolsTests
     {
         var ch = new EvalChannel("t");
         ch.SetInteraction(true);
-        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        BrowserTools.ForwardHook = (_, waitMs, req, _tab) => InstanceEval.DispatchAsync(ch, req, waitMs);
         try
         {
             var task = call();
@@ -200,7 +200,7 @@ public class BrowserToolsTests
     {
         // sleep touches nothing, so it must not be gated like a manipulation step.
         var ch = new EvalChannel("t");   // interaction NOT opened
-        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        BrowserTools.ForwardHook = (_, waitMs, req, _tab) => InstanceEval.DispatchAsync(ch, req, waitMs);
         try
         {
             var task = BrowserTools.Batch(new[] { new BatchStep { Action = "sleep", DurationMs = 10 } });
@@ -216,7 +216,7 @@ public class BrowserToolsTests
     public async Task Batch_with_a_manipulation_step_is_gated()
     {
         var ch = new EvalChannel("t");   // interaction NOT opened
-        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        BrowserTools.ForwardHook = (_, waitMs, req, _tab) => InstanceEval.DispatchAsync(ch, req, waitMs);
         try
         {
             var blocked = await BrowserTools.Batch(new[] { new BatchStep { Action = "click", Selector = "x" } });
@@ -230,7 +230,7 @@ public class BrowserToolsTests
     public async Task Batch_of_reads_only_runs_without_interaction()
     {
         var ch = new EvalChannel("t");   // interaction NOT opened
-        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        BrowserTools.ForwardHook = (_, waitMs, req, _tab) => InstanceEval.DispatchAsync(ch, req, waitMs);
         try
         {
             var task = BrowserTools.Batch(new[] { new BatchStep { Action = "query", Selector = "a" } });
@@ -247,7 +247,7 @@ public class BrowserToolsTests
     {
         var ch = new EvalChannel("t");
         ch.SetInteraction(true);
-        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        BrowserTools.ForwardHook = (_, waitMs, req, _tab) => InstanceEval.DispatchAsync(ch, req, waitMs);
         try
         {
             var json = await BrowserTools.Click();   // no selector, text, or coordinates
@@ -261,7 +261,7 @@ public class BrowserToolsTests
     public async Task Tools_report_not_running_when_capture_is_off()
     {
         // No capture instance behind the hub → the instance dispatcher reports capture off.
-        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(null, req, waitMs);
+        BrowserTools.ForwardHook = (_, waitMs, req, _tab) => InstanceEval.DispatchAsync(null, req, waitMs);
         try
         {
             Assert.Contains("\"enabled\":false", await BrowserTools.Click(selector: "x"));
@@ -276,7 +276,7 @@ public class BrowserToolsTests
     public async Task Manipulation_is_blocked_until_start_interaction()
     {
         var ch = new EvalChannel("t");   // interaction NOT opened
-        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        BrowserTools.ForwardHook = (_, waitMs, req, _tab) => InstanceEval.DispatchAsync(ch, req, waitMs);
         try
         {
             var blocked = await BrowserTools.Click(selector: "button.go");
@@ -291,7 +291,7 @@ public class BrowserToolsTests
     public async Task Start_interaction_opens_the_gate_and_shows_the_overlay()
     {
         var ch = new EvalChannel("t");
-        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        BrowserTools.ForwardHook = (_, waitMs, req, _tab) => InstanceEval.DispatchAsync(ch, req, waitMs);
         try
         {
             var task = BrowserTools.StartInteraction();
@@ -318,7 +318,7 @@ public class BrowserToolsTests
     {
         var ch = new EvalChannel("t");
         ch.SetInteraction(true);
-        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        BrowserTools.ForwardHook = (_, waitMs, req, _tab) => InstanceEval.DispatchAsync(ch, req, waitMs);
         try
         {
             var task = BrowserTools.StopInteraction();
@@ -342,7 +342,7 @@ public class BrowserToolsTests
         var ch = new EvalChannel("t");
         ch.SetInteraction(true);
         ch.SetPaused(true);   // the human clicked Pause on the badge
-        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        BrowserTools.ForwardHook = (_, waitMs, req, _tab) => InstanceEval.DispatchAsync(ch, req, waitMs);
         try
         {
             Assert.False(ch.InteractionActive);   // pausing closed the gate immediately
@@ -365,7 +365,7 @@ public class BrowserToolsTests
         var ch = new EvalChannel("t");
         ch.SetPaused(true);
         ch.SetPaused(false);   // the human clicked "resume" on the paused pill
-        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        BrowserTools.ForwardHook = (_, waitMs, req, _tab) => InstanceEval.DispatchAsync(ch, req, waitMs);
         try
         {
             var task = BrowserTools.StartInteraction();
@@ -389,7 +389,7 @@ public class BrowserToolsTests
         var ch = new EvalChannel("t");
         ch.SetInteraction(true);
         ch.SetKilled(true);   // the human clicked a Stop icon
-        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        BrowserTools.ForwardHook = (_, waitMs, req, _tab) => InstanceEval.DispatchAsync(ch, req, waitMs);
         try
         {
             Assert.False(ch.InteractionActive);
@@ -423,7 +423,7 @@ public class BrowserToolsTests
     {
         var ch = new EvalChannel("t");
         ch.SetKilled(true);
-        BrowserTools.ForwardHook = (_, waitMs, req) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        BrowserTools.ForwardHook = (_, waitMs, req, _tab) => InstanceEval.DispatchAsync(ch, req, waitMs);
         try
         {
             // Only a fresh (show:true) start_interaction clears a kill — a stray stop_interaction
