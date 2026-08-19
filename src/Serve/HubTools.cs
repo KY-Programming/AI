@@ -46,8 +46,12 @@ internal static class HubTools
         "templates/styles) and a hot reload may have kept already-created objects on the old version — " +
         "`staleHint` explains it; reload the page (ky-ai-browser's reload_page) if runtime state looks " +
         "stale. Use this after editing files to verify deterministically instead of polling tail. Returns " +
-        "timedOut:true if it doesn't settle within the timeout. Omit project when only one dev server is " +
-        "registered.")]
+        "timedOut:true if it doesn't settle within the timeout. This verdict — not a build you run " +
+        "yourself — is authoritative: the dev server already rebuilds on every save, so never invoke the " +
+        "underlying build directly (`dotnet build`, `ng build`, `npm run build`) while it is running. On " +
+        ".NET that build fails with MSB3021/MSB3027 (`being used by another process`) because the running " +
+        "app holds its own output assemblies locked; that lock says nothing about your code, and it is not " +
+        "a reason to `restart`. Omit project when only one dev server is registered.")]
     public static Task<string> WaitForBuild(
         [Description("Project name; omit when only one is registered")] string? project = null,
         [Description("Max ms to wait (default 60000)")] int timeoutMs = 60000)
@@ -59,9 +63,12 @@ internal static class HubTools
     [McpServerTool(Name = "restart"), Description(
         "Restart a dev server and wait for the rebuild; returns the build verdict (status, error/warning " +
         "counts, duration, diagnostics) plus a noise-free `summary` of the build's key lines. Only needed " +
-        "for changes the dev server does not hot-reload (config/build files, new dependencies) or when it " +
-        "is wedged. Use this instead of killing and relaunching the process yourself. Omit project when " +
-        "only one is registered.")]
+        "for changes the dev server does not hot-reload (config/build files, new dependencies), when the " +
+        "dev server itself reports it cannot apply a change (e.g. `dotnet watch ⚠ Press \"Ctrl + R\" to " +
+        "restart` after a new type or a rude edit), or when it is wedged. A build error you produced by " +
+        "running a build yourself is never the reason — read `status`/`tail` for what the dev server " +
+        "already reported and act on that. Use this instead of killing and relaunching the process " +
+        "yourself. Omit project when only one is registered.")]
     public static Task<string> Restart([Description("Project name; omit when only one is registered")] string? project = null)
         => Hub.ForwardAsync(project, HttpMethod.Post, "/restart", 124);
 

@@ -1393,7 +1393,12 @@
           try { if (el.focus) el.focus(); } catch (e) {}
           fire(el, "pointerup", x, y, opts); fire(el, "mouseup", x, y, opts);
           if (btn === 2) { fire(el, "contextmenu", x, y, opts); }
-          else if (typeof el.click === "function") { try { el.click(); } catch (e) { fire(el, "click", x, y, opts); } } // click() runs default actions
+          // Dispatch the click ourselves instead of calling el.click(): the native method synthesizes its
+          // own event with clientX/clientY/screenX/screenY/pageX/pageY all 0, so a menu or popover that
+          // positions itself from the click event opens in the viewport corner rather than at the target --
+          // even though every other event in this sequence carries the resolved point. el.click() was used
+          // here to get default actions, but a dispatched cancelable click runs activation behavior too
+          // (checkbox toggle, form submit, link navigation), so nothing is lost by firing it like the rest.
           else { fire(el, "click", x, y, opts); }
           return { ok: true, action: "click", button: req.button || "left", point: { x: x, y: y }, target: describeEl(el, req.detail) };
         } catch (e) { return errPayload(e); }

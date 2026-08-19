@@ -209,8 +209,16 @@ For routine edits, just call `wait_for_build` — its verdict adds `warnings`/`d
 landed). Stored log lines are ANSI-stripped and all ky-ai-dotnet-emitted timestamps are ISO-8601
 with offset.
 
+**Never run `dotnet build` yourself** while the dev server is up. `dotnet watch` already rebuilds on
+every save, so a manual build is redundant — and it fails anyway with `MSB3021`/`MSB3027`
+(*being used by another process*) as soon as there is something to recompile, because the running app
+holds its own `.exe`/`.dll` locked. That lock error says nothing about your code. `wait_for_build` is
+the verdict.
+
 **When to `restart`:** `dotnet watch` hot-reloads code, so restart only for changes it can't apply
-(new files, `.csproj` / config changes, rude edits) or a wedged process.
+(new files, `.csproj` / config changes, rude edits) or a wedged process. The signal is `dotnet watch`
+itself saying so — `⚠ Press "Ctrl + R" to restart`, visible via `status`/`tail` — not a locked-output
+error from a build you ran on the side.
 
 ## Build verdict
 
