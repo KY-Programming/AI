@@ -1,0 +1,58 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- Plain net10.0, NOT net10.0-windows: PackAsTool rejects a target-platform TFM, and every tool
+         in this suite ships as a .NET global tool. Windows-only at runtime all the same (UI
+         Automation, GDI, COM) — same shape as ky-ai-terminal with ConPTY. The assembly says so with
+         [assembly: SupportedOSPlatform("windows")]; Program.Main refuses to start elsewhere. -->
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>KY.AI.Wpf</RootNamespace>
+    <AssemblyName>ky-ai-wpf</AssemblyName>
+    <Version>1.0.0</Version>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- Packed and published as a .NET global tool: dotnet tool install KY.AI.Wpf.
+         Portable (no RuntimeIdentifier); Serve ships bundled inside the package.
+         The Web SDK disables packaging by default, so opt back in. -->
+    <IsPackable>true</IsPackable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>ky-ai-wpf</ToolCommandName>
+    <PackageId>KY.AI.Wpf</PackageId>
+    <Authors>KY-Programming</Authors>
+    <Company>KY-Programming</Company>
+    <Product>KY.AI</Product>
+    <Copyright>2026 - KY-Programming</Copyright>
+    <Description>Focus-free UI Automation for AI agents: read and drive a running WPF/WinForms/Win32 window over MCP — tree, find, invoke/set-value/toggle/expand/select, text and PrintWindow screenshots — without ever taking the user's focus, mouse or keyboard.</Description>
+    <PackageTags>KY-AI;wpf;uiautomation;desktop;mcp;ai;testing</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/KY-Programming/AI</PackageProjectUrl>
+    <PackageIcon>icon.png</PackageIcon>
+    <RepositoryUrl>https://github.com/KY-Programming/AI</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <!-- Ship this README as the package readme (rendered on nuget.org). Use Update,
+       not Include: the SDK already globs README.md as a None item. -->
+  <ItemGroup>
+    <None Update="README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\assets\icon.png" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.4.0" />
+    <!-- The PNG encoder for the PrintWindow capture. The WPF one (PngBitmapEncoder) would mean a
+         WindowsDesktop framework reference, which is unavailable on a non-platform TFM — and which
+         would also put the managed UI Automation client back in reach, the one thing this tool must
+         never touch (see UiaCom.cs). -->
+    <PackageReference Include="System.Drawing.Common" Version="10.0.12" />
+  </ItemGroup>
+  <!-- For the shared `init` / `shutdown` / hub plumbing (they live in Serve). One-directional:
+       Serve does not reference Wpf. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Serve\KY.AI.Serve.csproj" />
+  </ItemGroup>
+</Project>

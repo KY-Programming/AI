@@ -11,7 +11,7 @@
 //   (scripts\bump.cmd replaces "dotnet run scripts/bump.cs --"; pass args for scripted use.)
 //
 // Versioning scheme — independent per project, no central props:
-//   * KY.AI.Serve, KY.AI.Browser, KY.AI.Terminal and KY.AI.Updater are plain SemVer: --part major|minor|patch increments them.
+//   * KY.AI.Serve, KY.AI.Browser, KY.AI.Terminal, KY.AI.Wpf and KY.AI.Updater are plain SemVer: --part major|minor|patch increments them.
 //   * KY.AI.Ng / KY.AI.Net are leaf tools whose MAJOR is pinned to the
 //     framework they target (Ng major = Angular major; Net major = the .NET
 //     *SDK* major whose build output it parses — not its own TFM). So their
@@ -197,7 +197,7 @@ static BumpRequest ParseArgs(string[] args)
         }
     }
 
-    if (project is null) throw new BumpError("no project given (Serve, Ng, Net, Browser, Terminal or Updater)");
+    if (project is null) throw new BumpError("no project given (Serve, Ng, Net, Browser, Terminal, Wpf or Updater)");
     project = project.ToLowerInvariant() switch
     {
         "serve" => "Serve",
@@ -205,8 +205,9 @@ static BumpRequest ParseArgs(string[] args)
         "net" => "Net",
         "browser" => "Browser",
         "terminal" => "Terminal",
+        "wpf" => "Wpf",
         "updater" => "Updater",
-        _ => throw new BumpError($"project must be Serve, Ng, Net, Browser, Terminal or Updater (got '{project}')"),
+        _ => throw new BumpError($"project must be Serve, Ng, Net, Browser, Terminal, Wpf or Updater (got '{project}')"),
     };
 
     int? setMajor = null;
@@ -233,7 +234,7 @@ static List<BumpRequest>? Interactive(string root)
     Console.WriteLine("Interactive version bump — select project(s), then one bump part applied to all.");
     Console.WriteLine();
 
-    string[] projects = ["Serve", "Ng", "Net", "Browser", "Terminal", "Updater"];
+    string[] projects = ["Serve", "Ng", "Net", "Browser", "Terminal", "Wpf", "Updater"];
     var curVers = projects.Select(p => TryCurrentVersion(root, p)).ToArray();
     // Pad the "(current X.Y.Z)" token to a common width so the commit counter lines up across rows.
     var verTokens = curVers.Select(v => $"(current {v?.ToString() ?? "?"})").ToArray();
@@ -270,7 +271,7 @@ static List<BumpRequest>? Interactive(string root)
     {
         var project = projects[idx];
 
-        if (part == "major" && project is not "Serve" and not "Browser" and not "Terminal" and not "Updater")
+        if (part == "major" && project is not "Serve" and not "Browser" and not "Terminal" and not "Wpf" and not "Updater")
         {
             Console.WriteLine($"  KY.AI.{project} — major is framework-pinned; skipped (use --set-major).");
             continue;
@@ -452,10 +453,10 @@ static Ver Compute(string project, Ver cur, string? part, int? setMajor)
 {
     part = part?.ToLowerInvariant();
 
-    if (project is "Serve" or "Browser" or "Terminal" or "Updater")
+    if (project is "Serve" or "Browser" or "Terminal" or "Wpf" or "Updater")
     {
         if (setMajor is not null)
-            throw new BumpError("--set-major is for the framework-pinned tools (Ng, Net); Serve/Browser/Terminal/Updater use --part major|minor|patch");
+            throw new BumpError("--set-major is for the framework-pinned tools (Ng, Net); Serve/Browser/Terminal/Wpf/Updater use --part major|minor|patch");
         return part switch
         {
             "major" => new Ver(cur.Major + 1, 0, 0),
@@ -571,10 +572,11 @@ static void PrintUsage()
           dotnet run scripts/bump.cs                       (no args -> interactive: select project(s) w/ arrows+space, bump each)
           dotnet run scripts/bump.cs -- <project> <bump> [--dry-run]
 
-        Serve / Browser / Terminal / Updater (plain SemVer):
+        Serve / Browser / Terminal / Wpf / Updater (plain SemVer):
           -- Serve    --part major|minor|patch
           -- Browser  --part major|minor|patch
           -- Terminal --part major|minor|patch
+          -- Wpf      --part major|minor|patch
           -- Updater  --part major|minor|patch
 
         Ng / Net (leaf tools; major is pinned to the framework):

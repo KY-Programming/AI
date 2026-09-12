@@ -54,6 +54,7 @@ static int PackNuget(string root, string artifacts)
         Path.Combine(root, "src", "Browser", "KY.AI.Browser.csproj"),
         Path.Combine(root, "src", "Terminal", "KY.AI.Terminal.csproj"),
         Path.Combine(root, "src", "Updater", "KY.AI.Updater.csproj"),
+        Path.Combine(root, "src", "Wpf", "KY.AI.Wpf.csproj"),
     ];
 
     foreach (var proj in projects)
@@ -65,7 +66,7 @@ static int PackNuget(string root, string artifacts)
 
     var packages = Directory.GetFiles(artifacts, "*.nupkg").OrderBy(f => f).ToArray();
     // dotnet pack only warns (exit 0) when packaging is disabled, so confirm each one landed.
-    string[] expected = ["KY.AI.Serve", "KY.AI.Ng", "KY.AI.Net", "KY.AI.Browser", "KY.AI.Terminal", "KY.AI.Updater"];
+    string[] expected = ["KY.AI.Serve", "KY.AI.Ng", "KY.AI.Net", "KY.AI.Browser", "KY.AI.Terminal", "KY.AI.Updater", "KY.AI.Wpf"];
     var missing = expected
         .Where(id => !packages.Any(p => Path.GetFileName(p).StartsWith(id + ".", StringComparison.OrdinalIgnoreCase)))
         .ToArray();

@@ -6,12 +6,12 @@
 //
 // Builds a runnable, framework-dependent copy of the tools into dist\ so you
 // can put that one folder on PATH and exercise ky-ai-ng / ky-ai-dotnet /
-// ky-ai-terminal / ky-ai-browser locally without installing them from NuGet.
+// ky-ai-terminal / ky-ai-browser / ky-ai-wpf locally without installing them from NuGet.
 // They share the output folder, so the Serve DLL lands once. dist\ is cleared
 // first (publish never prunes). Needs the .NET 10 runtime to run the result.
 //
 // Pass a single tool name (ky-ai-ng / ky-ai-dotnet / ky-ai-terminal /
-// ky-ai-browser) to stop and rebuild only that tool while the others keep
+// ky-ai-browser / ky-ai-wpf) to stop and rebuild only that tool while the others keep
 // running. dist\ is NOT cleared in that mode (clearing would delete the other
 // tools and the shared Serve DLL is locked by them); publish overwrites just
 // that tool's files in place. If the shared Serve DLL changed it is locked by
@@ -46,6 +46,7 @@ var dist = Path.Combine(root, "dist");
     ("ky-ai-terminal", 5103, Path.Combine(root, "src", "Terminal", "KY.AI.Terminal.csproj"), "ky-ai-terminal.exe"),
     ("ky-ai-browser",  5104, Path.Combine(root, "src", "Browser",  "KY.AI.Browser.csproj"),  "ky-ai-browser.exe"),
     ("ky-ai-updater",  5105, Path.Combine(root, "src", "Updater",  "KY.AI.Updater.csproj"),  "ky-ai-updater.exe"),
+    ("ky-ai-wpf",      5106, Path.Combine(root, "src", "Wpf",      "KY.AI.Wpf.csproj"),      "ky-ai-wpf.exe"),
 ];
 
 // Narrow to the requested tool, or the whole suite when none was named.

@@ -29,6 +29,7 @@ var projects = new (string Csproj, string Prefix)[]
     ("src/Net/KY.AI.Net.csproj",           "dotnet"),
     ("src/Browser/KY.AI.Browser.csproj",   "browser"),
     ("src/Terminal/KY.AI.Terminal.csproj", "terminal"),
+    ("src/Wpf/KY.AI.Wpf.csproj", "wpf"),
     ("src/Updater/KY.AI.Updater.csproj",   "updater"),
     ("src/Serve/KY.AI.Serve.csproj",       "serve"),
 };
@@ -174,6 +175,7 @@ static string DisplayName(string prefix) => prefix switch
     "dotnet" => ".NET",
     "browser" => "Browser",
     "terminal" => "Terminal",
+    "wpf" => "WPF",
     "updater" => "Updater",
     "serve" => "Serve",
     _ => prefix,
@@ -412,6 +414,7 @@ static void PrintUsage()
           KY.AI.Net      -> dotnet-v<version>
           KY.AI.Browser  -> browser-v<version>
           KY.AI.Terminal -> terminal-v<version>
+          KY.AI.Wpf      -> wpf-v<version>
           KY.AI.Updater  -> updater-v<version>
           KY.AI.Serve    -> serve-v<version>
 

@@ -11,5 +11,7 @@
   <Project Path="Net/KY.AI.Net.csproj" />
   <Project Path="Terminal/KY.AI.Terminal.csproj" />
   <Project Path="Terminal.Tests/KY.AI.Terminal.Tests.csproj" />
+  <Project Path="Wpf/KY.AI.Wpf.csproj" />
+  <Project Path="Wpf.Tests/KY.AI.Wpf.Tests.csproj" />
   <Project Path="Updater/KY.AI.Updater.csproj" />
 </Solution>

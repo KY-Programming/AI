@@ -12,6 +12,7 @@ poke the live page.
 | [`KY.AI.Net`](src/Net/README.md)     | `ky-ai-dotnet`   | the .NET CLI (`dotnet watch run` / `build`) — **backends** |
 | [`KY.AI.Terminal`](src/Terminal/README.md) | `ky-ai-terminal` | a **shared interactive shell** you drive while the agent rides along |
 | [`KY.AI.Browser`](src/Browser/README.md)   | `ky-ai-browser`  | a served app's **browser console + live runtime** (attaches to `ky-ai-ng`) |
+| [`KY.AI.Wpf`](src/Wpf/README.md)           | `ky-ai-wpf`      | a running **WPF desktop window** — read and driven focus-free via UI Automation |
 | [`KY.AI.Updater`](src/Updater/README.md)   | `ky-ai-updater`  | **updates the whole suite** — itself first, then every other installed tool |
 | [`KY.AI.Serve`](src/Serve/README.md) | —                | the shared hub / supervisor / MCP engine the tools build on |
 
@@ -72,6 +73,7 @@ dotnet tool install --global KY.AI.Ng         # Angular frontends — ng serve /
 dotnet tool install --global KY.AI.Net        # .NET backends — dotnet watch run / build, mirrored for agents
 dotnet tool install --global KY.AI.Terminal   # shared interactive shell — you drive it, the agent rides along
 dotnet tool install --global KY.AI.Browser    # browser/runtime console capture for ky-ai-ng
+dotnet tool install --global KY.AI.Wpf        # WPF desktop windows — see and steer one without taking your focus
 dotnet tool install --global KY.AI.Updater    # one command to update the whole suite — itself, then the rest
 ```
 
@@ -104,6 +106,7 @@ ky-ai-ng init
 ky-ai-dotnet init
 ky-ai-terminal init
 ky-ai-browser init
+ky-ai-wpf init
 ```
 
 To wire an agent by hand instead, each tool's README has the exact MCP entry, the full tool
@@ -137,6 +140,7 @@ product version.
 | `KY.AI.Net`      | 10.x | .NET 10 SDK | major **=** the .NET **SDK** major whose build output it parses (not its own TFM) |
 | `KY.AI.Browser`  | 1.x  | —           | console-capture add-on for `ky-ai-ng` |
 | `KY.AI.Terminal` | 1.x  | —           | shared interactive shell you and the agent both drive |
+| `KY.AI.Wpf`      | 1.x  | —           | UI-Automation access to a running desktop window; Windows-only |
 | `KY.AI.Updater`  | 1.x  | —           | suite updater; own product version |
 | `KY.AI.Serve`    | 1.x  | —           | shared engine; own product version |
 
@@ -171,15 +175,16 @@ A `dotnet tool install --tool-path <dir>` install (or the copy in the NuGet glob
 ## Repository Layout
 
 ```
-src/        tool projects: Serve (shared engine) · Ng · Net · Browser · Terminal · Updater (+ *.Tests)
+src/        tool projects: Serve (shared engine) · Ng · Net · Browser · Terminal · Wpf · Updater (+ *.Tests)
 scripts/    pack / publish / dist / version automation (dependency-free C# scripts)
 artifacts/  packed NuGet + npm packages — scripts\pack.cmd output (git-ignored)
 dist/       runnable local build for testing — scripts\dist.cmd output (git-ignored; put on PATH)
 ```
 
 The **`Serve`** library holds the hub, supervisor, rolling log, build tracker, MCP plumbing and the
-shared `init` / `shutdown` / `update` commands; each framework tool (`Ng`, `Net`, `Browser`,
-`Terminal`) is a thin seam on top that supplies its CLI wiring and a build/output matcher.
+shared `init` / `shutdown` / `update` commands; each tool on top of it (`Ng`, `Net`, `Browser`,
+`Terminal`, `Wpf`) is a thin seam that supplies its own CLI wiring and MCP surface. `Wpf` is the one
+that supervises nothing — you start your desktop app yourself and it attaches to the window.
 
 ## Building from source
 
