@@ -911,7 +911,69 @@
       root.appendChild(menuWrap);
       cursor = document.createElement("div"); cursor.className = "kyai-cursor"; cursor.innerHTML = CURSOR_SVG; root.appendChild(cursor);
       put(Math.round(vw() / 2), Math.round(vh() / 2), 0);
-      (document.body || document.documentElement).appendChild(host);
+      if (canPopover) {
+        host.setAttribute("popover", "manual");
+        // Undo the UA [popover] look (Canvas background, auto overflow) — the host must stay a bare,
+        // transparent, full-viewport layer exactly as it is without the attribute.
+        s.background = "transparent"; s.overflow = "visible"; s.color = "inherit";
+        s.maxWidth = "none"; s.maxHeight = "none";
+      }
+      raise(true);
+      installRaiseTriggers();
+    }
+
+    /*
+     * Staying in front of the page's own top layer. A native modal <dialog>, a popover or a fullscreen
+     * element lives in the browser's top layer, which paints above EVERY z-index — so the badge (and its
+     * Pause/Stop icons) ended up hidden under a user's dialog and its ::backdrop. The host is therefore a
+     * manual popover itself, and gets re-shown (= moved to the top of the top layer) whenever the page
+     * puts something new up there.
+     *
+     * Being on top isn't enough while a modal dialog is open: everything outside it is inert, so the icons
+     * would be visible but unclickable (verified live — clicks fall through to the dialog). Hence the host
+     * is re-parented INTO the topmost modal dialog for as long as it's open, and back to <body> after.
+     * Position is unaffected: a top-layer element is laid out against the viewport, not its parent.
+     */
+    var canPopover = typeof HTMLElement !== "undefined" && HTMLElement.prototype.hasOwnProperty("popover");
+    function topModalDialog() {
+      try {
+        var open = document.querySelectorAll("dialog[open]");
+        for (var i = open.length - 1; i >= 0; i--) if (open[i].matches(":modal")) return open[i];
+      } catch (e) {}
+      return null;
+    }
+    // restack=false only repairs the parent (e.g. the dialog we lived in got closed or removed);
+    // restack=true also re-shows the popover because something else just entered the top layer.
+    function raise(restack) {
+      try {
+        var parent = topModalDialog() || document.body || document.documentElement;
+        var moved = host.parentNode !== parent;
+        if (moved) parent.appendChild(host);   // removal from the old parent closes the popover
+        if (!canPopover || !(moved || restack)) return;
+        if (host.matches(":popover-open")) host.hidePopover();
+        host.showPopover();
+      } catch (e) {}
+    }
+    function installRaiseTriggers() {
+      try {
+        // Page popovers (and, in newer browsers, dialogs) announce opening via a non-bubbling toggle
+        // event — capture on document still sees it.
+        document.addEventListener("toggle", function (e) {
+          if (e.target !== host && e.newState === "open") raise(true);
+        }, true);
+        document.addEventListener("close", function (e) { if (e.target !== host) raise(false); }, true);
+        document.addEventListener("fullscreenchange", function () { raise(true); }, true);
+        // showModal() fires no event in older browsers, and a dialog can be removed from the DOM while
+        // open (taking the host with it) — both only show up as mutations.
+        new MutationObserver(function (records) {
+          var restack = false;
+          for (var i = 0; i < records.length; i++) {
+            var t = records[i].target;
+            if (records[i].type === "attributes" && t.nodeName === "DIALOG" && t.hasAttribute("open")) restack = true;
+          }
+          raise(restack);
+        }).observe(document.documentElement, { attributes: true, attributeFilter: ["open"], childList: true, subtree: true });
+      } catch (e) {}
     }
 
     /*
