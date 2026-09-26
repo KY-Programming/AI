@@ -215,9 +215,15 @@ saving file after file while you test by hand. Move the mouse to the **middle of
   time — a hold with no sign of it would just look like a broken dev server.
 - **Reload page now** — pick up what the dev server has built *without* lifting the hold: the page
   resyncs and then goes on swallowing further updates.
+- **Reserve that tab for me** (✓ while on) — keep every agent out of this tab. An agent driving it is
+  evicted on the spot: its session ends and its next call is refused with `tabReserved:true`, telling it
+  to `start_interaction` again for another tab. Reserved tabs are skipped when an agent looks for a free
+  one; if none is left it gets the usual handoff prompt ("another agent wants in"), which also shows in
+  reserved tabs — and **Share this tab** there is you handing the tab over: the reservation is lifted and
+  the agent gets the tab immediately. Survives a reload; click the entry again to lift it.
 
 The bar takes no pointer events until it is actually visible, so nothing of ours can swallow your app's
-clicks while it's hidden. The hold is per tab.
+clicks while it's hidden. The hold and the reservation are per tab.
 
 ## Recipes
 

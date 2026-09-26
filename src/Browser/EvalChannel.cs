@@ -46,6 +46,7 @@ internal sealed class EvalChannel
     private volatile bool _killed;
     private volatile bool _reloadReleased;
     private volatile bool _userHoldReload;
+    private volatile bool _reserved;
 
     // Duplicate-tab (fork) detection — see AdmitPoll. tabId lives in sessionStorage, which the browser
     // COPIES into a duplicated tab (right-click → Duplicate) and into window.open children, so two
@@ -142,6 +143,19 @@ internal sealed class EvalChannel
     // "Angular reload paused" pill while it is on, even with no session — a silent hold would be a trap.
     public bool UserHoldReload => _userHoldReload;
     public void SetUserHoldReload(bool hold) => _userHoldReload = hold;
+
+    // The human's "Reserve that tab for me" from the overlay menu: this tab is theirs, and no agent may open
+    // a session in it — not the one that was driving it (the registry evicts that owner), not a new one
+    // looking for a free tab, not one naming it explicitly. Like the manual reload hold it is the human's
+    // own and session-independent: only their menu click, or "Share this tab" on a handoff prompt shown in
+    // this tab (an explicit hand-over), lifts it. Reserving ends any session here and drops a pause — the
+    // reservation is the stronger "I'm using this tab" and a waiting paused pill would contradict it.
+    public bool Reserved => _reserved;
+    public void SetReserved(bool reserved)
+    {
+        _reserved = reserved;
+        if (reserved) { _interactionActive = false; _paused = false; }
+    }
 
     // Whether the human clicked "continue reloading" for this session. Kept distinct from HoldReload
     // because the page reads it to decide whether releasing the hold should force a catch-up reload:

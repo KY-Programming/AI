@@ -395,4 +395,93 @@ public class TabRegistryTests
         Assert.False(poll.HoldReload);
         Assert.False(poll.UserHoldReload);
     }
+
+    // ── the human's "Reserve that tab for me" (the top-edge menu) ──
+
+    [Fact]
+    public async Task A_reserved_tab_is_skipped_when_looking_for_a_free_one()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A"); await Connect(reg, "B");
+        reg.SetReserved("A", true);
+
+        var task = reg.DispatchAsync(Overlay(true), 2000, "a1", null);
+        await Pump(reg, "B");
+        Assert.Contains("\"tabId\":\"B\"", await task);
+        Assert.True((await reg.PollAsync("A", null, null, 1, default)).Reserved);
+    }
+
+    [Fact]
+    public async Task A_reserved_tab_refuses_an_explicit_start_and_manipulation()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A");
+        reg.SetReserved("A", true);
+
+        Assert.Contains("tabReserved", await reg.DispatchAsync(Overlay(true), 500, "a1", "A"));
+        Assert.Contains("tabReserved", await reg.DispatchAsync(Click(), 500, "a1", "A"));
+    }
+
+    [Fact]
+    public async Task Reserving_evicts_the_driving_agent_and_tells_it_why()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A");
+        await OpenOn(reg, "a1", "A");
+
+        reg.SetReserved("A", true);
+
+        var poll = await reg.PollAsync("A", null, null, 1, default);
+        Assert.False(poll.InteractionActive);                                             // overlay goes away
+        Assert.Contains("tabReserved", await reg.DispatchAsync(Click(), 500, "a1", null));
+        Assert.Contains("\"ok\":true", await reg.DispatchAsync(Overlay(false), 500, "a1", null));   // stop is a no-op
+    }
+
+    [Fact]
+    public async Task With_only_reserved_tabs_the_agent_parks_and_the_handoff_prompt_shows()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A");
+        reg.SetReserved("A", true);
+
+        var parked = reg.DispatchAsync(Overlay(true), 5000, "a1", null);
+        Assert.False(parked.IsCompleted);
+
+        var poll = await reg.PollAsync("A", null, null, 1000, default);
+        Assert.NotNull(poll.Handoff);                 // the reserved tab hosts the prompt
+
+        reg.DenyHandoff(poll.Handoff!.Ticket);
+        Assert.Contains("handoffDenied", await parked);
+    }
+
+    [Fact]
+    public async Task Sharing_a_reserved_tab_lifts_the_reservation_and_grants_it_at_once()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A");
+        reg.SetReserved("A", true);
+
+        var parked = reg.DispatchAsync(Overlay(true), 5000, "a1", null);
+        var ticket = (await reg.PollAsync("A", null, null, 1000, default)).Handoff!.Ticket;
+        Assert.True(reg.ShareTab("A", ticket));
+
+        await Pump(reg, "A");                         // no owner to wait for — a1's session opens on A now
+        Assert.Contains("\"shown\":true", await parked);
+        Assert.False((await reg.PollAsync("A", null, null, 1, default)).Reserved);
+    }
+
+    [Fact]
+    public async Task Unreserving_hands_the_tab_to_a_parked_agent()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A");
+        reg.SetReserved("A", true);
+
+        var parked = reg.DispatchAsync(Overlay(true), 5000, "a1", null);
+        await reg.PollAsync("A", null, null, 200, default);   // let it register as parked
+
+        reg.SetReserved("A", false);
+        await Pump(reg, "A");
+        Assert.Contains("\"shown\":true", await parked);
+    }
 }

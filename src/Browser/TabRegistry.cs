@@ -42,6 +42,10 @@ internal sealed class TabRegistry
     private readonly Dictionary<string, EvalChannel> _tabs = new(StringComparer.Ordinal);
     private readonly List<Waiter> _waiters = new();                 // FIFO: agents parked in start_interaction
     private readonly Dictionary<string, int> _agentOrdinal = new(StringComparer.Ordinal);
+    // agentId → the tab a human reservation evicted it from. Only there so that agent's next action gets a
+    // "the user reserved your tab" refusal instead of a puzzling "call start_interaction first"; cleared by
+    // its next start_interaction.
+    private readonly Dictionary<string, string> _displaced = new(StringComparer.Ordinal);
     private int _nextAgentOrdinal = 1;
     private long _nextTicket;
 
@@ -119,7 +123,7 @@ internal sealed class TabRegistry
         {
             string reassign;
             lock (_sync) reassign = MintTabId();
-            return new TabPoll(Array.Empty<EvalRequest>(), false, false, false, false, false, ch.TabId, false, null, reassign);
+            return new TabPoll(Array.Empty<EvalRequest>(), false, false, false, false, false, false, ch.TabId, false, null, reassign);
         }
 
         if (!string.IsNullOrEmpty(pageLoadId)) ch.CurrentPageLoadId = pageLoadId;
@@ -135,7 +139,7 @@ internal sealed class TabRegistry
             var reqs = await ch.PollAsync(waitMs, ct);
             var handoff = HandoffFor(ch);
             return new TabPoll(reqs, ch.InteractionActive, ch.Paused, ch.Killed, ch.HoldReload,
-                ch.UserHoldReload, ch.TabId, claimed, handoff, null);
+                ch.UserHoldReload, ch.Reserved, ch.TabId, claimed, handoff, null);
         }
         finally
         {
@@ -170,15 +174,35 @@ internal sealed class TabRegistry
         if (isOverlay && req.Show == true)
             return OpenSessionAsync(req, waitMs, agentId, string.IsNullOrEmpty(tabId) ? null : tabId);
 
+        var mutates = isOverlay || InstanceEval.IsManipulationKind(req.Kind) || IsManipulationBatch(req);
+        var isStop = isOverlay && req.Show == false;
+
+        // The human reserved the tab this agent was driving: say so, rather than letting the action fall
+        // through to a generic "no session" (or, for a stop, to whatever other tab happens to resolve).
+        if (string.IsNullOrEmpty(tabId) && mutates)
+        {
+            string? displacedFrom = null;
+            lock (_sync)
+                if (FindOwned(agentId) is null && _displaced.TryGetValue(agentId, out var d))
+                {
+                    displacedFrom = d;
+                    if (isStop) _displaced.Remove(agentId);
+                }
+            if (displacedFrom is not null)
+                return Task.FromResult(isStop ? SessionEndedByReservation(displacedFrom) : TabReserved(displacedFrom, evicted: true));
+        }
+
         // Everything else acts on an already-resolved tab.
         var ch = ResolveForAction(agentId, string.IsNullOrEmpty(tabId) ? null : tabId, req, out var error);
         if (ch is null) return Task.FromResult(error!);
 
         // A manipulation (or a stop) may only touch a tab the caller owns — naming another agent's tab with
         // the tab argument must not let you drive or close their session. Reads on another tab are allowed.
-        var mutates = isOverlay || InstanceEval.IsManipulationKind(req.Kind) || IsManipulationBatch(req);
         if (mutates && OwnerAliveLocked(ch) && !string.Equals(ch.OwnerAgentId, agentId, StringComparison.Ordinal))
             return Task.FromResult(TabBusy(ch.TabId));
+        // Nobody drives a reserved tab (a stop is let through — it only hides an overlay that's already gone).
+        if (mutates && !isStop && ch.Reserved)
+            return Task.FromResult(TabReserved(ch.TabId));
 
         if (isOverlay && req.Show == false)
             return StopSessionAsync(ch, req, waitMs, agentId);
@@ -199,13 +223,16 @@ internal sealed class TabRegistry
         lock (_sync)
         {
             Label(agentId);   // register the agent's ordinal on first interaction so "agent N" is arrival order
+            _displaced.Remove(agentId);   // it's looking for a new tab now — the eviction notice has done its job
 
-            // Explicit tab: honour it if it's the agent's own or is free; refuse if another agent holds it.
+            // Explicit tab: honour it if it's the agent's own or is free; refuse if another agent holds it
+            // or the human reserved it.
             if (explicitTabId is not null)
             {
                 if (!_tabs.TryGetValue(explicitTabId, out var ex)) return UnknownTab(explicitTabId);
                 if (OwnerAlive(ex) && !string.Equals(ex.OwnerAgentId, agentId, StringComparison.Ordinal))
                     return TabBusy(explicitTabId);
+                if (ex.Reserved) return TabReserved(explicitTabId);
                 if (ex.Paused) return InstanceEval.Paused();
                 ex.Assign(agentId, _lease);
                 target = ex;
@@ -226,7 +253,7 @@ internal sealed class TabRegistry
             {
                 return NoPage();
             }
-            else                                        // all tabs busy → park for a handoff
+            else                                        // all tabs busy or reserved → park for a handoff
             {
                 waiter = new Waiter
                 {
@@ -338,17 +365,53 @@ internal sealed class TabRegistry
         return true;
     }
 
+    // The overlay menu's "Reserve that tab for me" toggle. Reserving evicts the agent driving this tab on
+    // the spot (its session ends; its next call is told why); un-reserving makes the tab free again, so an
+    // agent parked for a tab gets it right away.
+    public bool SetReserved(string? tabId, bool reserved)
+    {
+        var ch = Get(tabId);
+        if (ch is null) return false;
+        lock (_sync)
+        {
+            if (reserved && ch.OwnerAgentId is not null)
+            {
+                if (OwnerAlive(ch)) _displaced[ch.OwnerAgentId] = ch.TabId;
+                ch.Unassign();
+            }
+            ch.SetReserved(reserved);
+        }
+        if (!reserved && !ch.Paused) ReleaseAndPromote(ch);
+        return true;
+    }
+
     // Human clicked "share this tab" on the handoff prompt: pin the ticket's waiter to this tab so it is
-    // granted the moment this tab's owner releases (rather than opening a new tab).
+    // granted the moment this tab's owner releases (rather than opening a new tab). Shown in a RESERVED tab
+    // it is the human handing that tab over: the reservation is lifted, and — the tab having no owner to
+    // wait for — the waiter gets it immediately.
     public bool ShareTab(string? tabId, string ticket)
     {
+        Waiter? granted = null;
+        EvalChannel? ch;
         lock (_sync)
         {
             var w = _waiters.FirstOrDefault(x => x.Ticket == ticket);
             if (w is null) return false;
             w.PinnedTabId = tabId ?? LegacyTab;
-            return true;
+            _tabs.TryGetValue(w.PinnedTabId, out ch);
+            if (ch is not null && ch.Reserved)
+            {
+                ch.SetReserved(false);
+                if (ch.PageConnected && !OwnerAlive(ch))
+                {
+                    _waiters.Remove(w);
+                    ch.Assign(w.AgentId, _lease);
+                    granted = w;
+                }
+            }
         }
+        granted?.Tcs.TrySetResult(new Grant(ch!.TabId, "granted"));
+        return true;
     }
 
     public bool DenyHandoff(string ticket)
@@ -396,6 +459,7 @@ internal sealed class TabRegistry
                     killed = t.Killed,
                     holdReload = t.HoldReload,
                     userHoldReload = t.UserHoldReload,
+                    reserved = t.Reserved,
                     currentPageLoadId = t.CurrentPageLoadId,
                 }).ToArray();
             return new
@@ -407,6 +471,7 @@ internal sealed class TabRegistry
                 killed = _tabs.Values.Any(t => t.Killed),
                 holdReload = _tabs.Values.Any(t => t.HoldReload),
                 userHoldReload = _tabs.Values.Any(t => t.UserHoldReload),
+                reserved = _tabs.Values.Any(t => t.Reserved),
                 tabCount = tabs.Length,
                 tabs,
             };
@@ -496,7 +561,7 @@ internal sealed class TabRegistry
     private EvalChannel? FindFreeConnected()   // caller holds _sync
     {
         foreach (var t in _tabs.Values)
-            if (t.PageConnected && !OwnerAlive(t) && !t.Paused) return t;
+            if (t.PageConnected && !OwnerAlive(t) && !t.Paused && !t.Reserved) return t;
         return null;
     }
 
@@ -510,7 +575,7 @@ internal sealed class TabRegistry
         lock (_sync)
         {
             ch.Unassign();
-            if (ch.PageConnected)
+            if (ch.PageConnected && !ch.Reserved)
             {
                 promoted = _waiters.FirstOrDefault(w => w.PinnedTabId is null || w.PinnedTabId == ch.TabId);
                 if (promoted is not null)
@@ -549,7 +614,7 @@ internal sealed class TabRegistry
                     // Owner's session ended but the page is alive → free it, then hand it to a waiter (case 2).
                     t.Unassign();
                     var w = _waiters.FirstOrDefault(x => x.PinnedTabId is null || x.PinnedTabId == t.TabId);
-                    if (w is not null) { _waiters.Remove(w); t.Assign(w.AgentId, _lease); grants.Add((w, t)); }
+                    if (w is not null && !t.Reserved) { _waiters.Remove(w); t.Assign(w.AgentId, _lease); grants.Add((w, t)); }
                 }
                 else if (ownerGone && !t.PageConnected)
                 {
@@ -600,6 +665,24 @@ internal sealed class TabRegistry
         error = $"tab '{tabId}' is being driven by another agent. Call start_interaction with no tab to get your own.",
     }, Json);
 
+    // evicted: the caller was driving this tab when the user reserved it (vs. just naming a reserved tab).
+    private static string TabReserved(string tabId, bool evicted = false) => JsonSerializer.Serialize(new
+    {
+        ok = false,
+        tabReserved = true,
+        error = $"tab '{tabId}' is reserved by the user — no agent may drive it" +
+                (evicted ? ", and your session there has ended" : "") +
+                ". Call start_interaction with no tab to get another one (the user may be asked to open it).",
+    }, Json);
+
+    // stop_interaction from an agent whose session a reservation already ended: nothing left to stop.
+    private static string SessionEndedByReservation(string tabId) => JsonSerializer.Serialize(new
+    {
+        ok = true,
+        shown = false,
+        note = $"your session on tab '{tabId}' had already ended — the user reserved that tab.",
+    }, Json);
+
     private static string AmbiguousTab(IEnumerable<string> tabs) => JsonSerializer.Serialize(new
     {
         ok = false,
@@ -646,6 +729,7 @@ internal sealed record TabPoll(
     bool Killed,
     bool HoldReload,
     bool UserHoldReload,
+    bool Reserved,
     string TabId,
     bool Claimed,
     HandoffInfo? Handoff,

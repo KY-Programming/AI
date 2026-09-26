@@ -283,7 +283,7 @@ internal static class Program
         {
             Cors(ctx);
             if (!string.Equals(ctx.Request.Query["token"], collector.Token, StringComparison.Ordinal))
-                return Results.Json(new { requests = Array.Empty<EvalRequest>(), interactionActive = false, paused = false, killed = false, holdReload = false, userHoldReload = false, tabId = (string?)null, claimed = false, handoff = (object?)null }, EvalJson);   // foreign tab — hand it nothing
+                return Results.Json(new { requests = Array.Empty<EvalRequest>(), interactionActive = false, paused = false, killed = false, holdReload = false, userHoldReload = false, reserved = false, tabId = (string?)null, claimed = false, handoff = (object?)null }, EvalJson);   // foreign tab — hand it nothing
             var tabId = ctx.Request.Query["tabId"].ToString();
             var claim = ctx.Request.Query["claim"].ToString();
             var pageLoadId = ctx.Request.Query["pageLoadId"].ToString();
@@ -300,6 +300,7 @@ internal static class Program
                 killed = poll.Killed,
                 holdReload = poll.HoldReload,
                 userHoldReload = poll.UserHoldReload,   // the hold is the human's own ⇒ the menu shows it toggled on
+                reserved = poll.Reserved,               // the human reserved this tab ⇒ the menu shows it checked
                 tabId = poll.TabId,
                 claimed = poll.Claimed,
                 handoff = poll.Handoff,
@@ -441,6 +442,22 @@ internal static class Program
             var hold = Bool(body, "hold") ?? true;
             eval.SetUserHoldReload(Str(body, "tabId"), hold);
             return Results.Json(new { ok = true, userHoldReload = hold });
+        });
+        // The overlay menu's "Reserve that tab for me" toggle — keeps every agent out of this tab (the one
+        // driving it is evicted; see TabRegistry.SetReserved). The human's own, like the manual reload hold.
+        app.MapMethods("/__kyai/tab/reserve", new[] { "OPTIONS" }, (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            return Results.StatusCode(StatusCodes.Status204NoContent);
+        });
+        app.MapPost("/__kyai/tab/reserve", async (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            var body = await ReadBodyAsync(ctx);
+            if (!TokenOk(body, collector.Token)) return Results.Json(new { ok = false });
+            var reserved = Bool(body, "reserved") ?? true;
+            eval.SetReserved(Str(body, "tabId"), reserved);
+            return Results.Json(new { ok = true, reserved });
         });
         app.Urls.Add($"http://127.0.0.1:{restPort}");
 

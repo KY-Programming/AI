@@ -308,6 +308,8 @@
   // not tied to an agent session at all: the case it exists for is an agent saving file after file while
   // the human is testing by hand, with the dev server reloading the tab out from under them.
   var RELOAD_HOLD = INGEST.replace(/\/console$/, "/reload/hold");
+  // The top-edge menu's "Reserve that tab for me" — keeps every agent out of this tab (see tabReserve).
+  var TAB_RESERVE = INGEST.replace(/\/console$/, "/tab/reserve");
   // Multi-agent handoff: the "another agent wants in" prompt's Share / Deny buttons post here. (Open-a-
   // new-tab is a pure client action — window.open in the click handler — so it has no server route.)
   var HANDOFF_BASE = INGEST.replace(/\/console$/, "/handoff");
@@ -1399,6 +1401,31 @@
   // `update`s leave vite's client module graph behind the server's, and only a full reload fixes that.)
   function onUserReloadNow() { try { location.reload(); } catch (e) {} }
 
+  /*
+   * "Reserve that tab for me" — the human claims this tab: no agent may start a session in it, and one
+   * that is driving it right now is evicted (the server ends its session and tells it why). An agent that
+   * then finds no free tab gets the usual handoff prompt, and "Share this tab" there lifts the reservation.
+   * Server-side per tab (it survives a reload); the poll's `reserved` flag drives the menu's check mark.
+   */
+  var tabReserve = (function () {
+    var reserved = false;
+    var pending = false;   // our click hasn't been echoed by a poll yet ⇒ we're authoritative (see reloadHold)
+    return {
+      reconcile: function (serverReserved) {
+        var sr = !!serverReserved;
+        if (pending) { if (sr === reserved) pending = false; }
+        else reserved = sr;
+      },
+      toggle: function () {
+        reserved = !reserved; pending = true;
+        // Reflect the eviction right away instead of a poll window later — as Pause does.
+        if (reserved) { try { overlay.hide(); overlay.clearPaused(); } catch (e) {} }
+        postInteractionOverride(TAB_RESERVE, { reserved: reserved });
+      },
+      isReserved: function () { return reserved; }
+    };
+  })();
+
   // The top-edge menu's entries, top to bottom. Declarative and re-read on every open, so adding a control
   // later is one entry here and a toggle always renders its current direction.
   function menuItems() {
@@ -1406,7 +1433,8 @@
       reloadHold.isUserHolding()
         ? { label: "Continue Angular reloads", run: onUserContinueReload }
         : { label: "Stop Angular reloads", run: onUserHoldReloads },
-      { label: "Reload page now", run: onUserReloadNow }
+      { label: "Reload page now", run: onUserReloadNow },
+      { label: (tabReserve.isReserved() ? "✓ " : "") + "Reserve that tab for me", run: tabReserve.toggle }
     ];
   }
 
@@ -1820,9 +1848,11 @@
         reconcileOverlay(data && data.interactionActive);  // restore/clear the overlay (e.g. after a reload)
         reconcilePaused(data && data.paused);                // restore/clear the paused pill likewise
         reconcileKilled(data && data.killed);                // restore/clear the killed pill likewise
+        tabReserve.reconcile(data && data.reserved);
         // Engage/release the dev-server reload hold. Ordered after the three above so a release that
-        // force-reloads sees the overlay state already settled.
-        reloadHold.reconcile(data && data.holdReload, data && data.paused, data && data.killed, data && data.userHoldReload);
+        // force-reloads sees the overlay state already settled. A reservation counts as "the human is
+        // looking" like a pause: the session it ended must not trigger the catch-up reload.
+        reloadHold.reconcile(data && data.holdReload, (data && data.paused) || tabReserve.isReserved(), data && data.killed, data && data.userHoldReload);
         reconcileHandoff(data && data.handoff);              // show/hide the "another agent wants in" prompt
         var reqs = (data && data.requests) || [];
         for (var i = 0; i < reqs.length; i++) dispatchEval(reqs[i]);
