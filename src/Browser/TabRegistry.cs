@@ -110,8 +110,10 @@ internal sealed class TabRegistry
 
     // The long-poll for one tab. Creates the tab's channel on first sight, binds a presented claim ticket
     // to its waiting agent, and returns that tab's queued work + its own interaction flags + any handoff
-    // prompt this tab should show. `claim` is sent only on a freshly-opened tab's first poll.
-    public async Task<TabPoll> PollAsync(string? tabId, string? claim, string? pageLoadId, int waitMs, CancellationToken ct)
+    // prompt this tab should show. `claim` is sent only on a freshly-opened tab's first poll. url/title are
+    // the page the tab is showing (see EvalChannel.Url).
+    public async Task<TabPoll> PollAsync(string? tabId, string? claim, string? pageLoadId, int waitMs, CancellationToken ct,
+        string? url = null, string? title = null)
     {
         var ch = GetOrCreate(tabId);
 
@@ -127,6 +129,7 @@ internal sealed class TabRegistry
         }
 
         if (!string.IsNullOrEmpty(pageLoadId)) ch.CurrentPageLoadId = pageLoadId;
+        ch.NotePage(url, title);   // after the fork check: a duplicate must not relabel the tab it was copied from
 
         var claimed = false;
         if (!string.IsNullOrEmpty(claim))
@@ -159,6 +162,16 @@ internal sealed class TabRegistry
         EvalChannel? ch;
         lock (_sync) _tabs.TryGetValue(tabId ?? LegacyTab, out ch);
         return ch is not null && ch.Complete(token, id, payload);
+    }
+
+    // The page reporting a change of what it shows between polls (in-app navigation, a new title). A tab
+    // we don't know yet is ignored — its poll creates it, and carries the same info.
+    public bool SetPage(string? tabId, string? url, string? title)
+    {
+        var ch = Get(tabId);
+        if (ch is null) return false;
+        ch.NotePage(url, title);
+        return true;
     }
 
     // ── agent-facing: dispatch an EvalRequest the hub forwarded (from /eval) ──
@@ -451,6 +464,8 @@ internal sealed class TabRegistry
                 .Select(t => new
                 {
                     tabId = t.TabId,
+                    url = t.Url,
+                    title = t.Title,
                     owner = t.OwnerAgentId is null ? null : Label(t.OwnerAgentId),
                     leaseExpiresInMs = t.LeaseValid ? (int)Math.Max(0, (t.LeaseExpiresAt - DateTimeOffset.UtcNow).TotalMilliseconds) : (int?)null,
                     pageConnected = t.PageConnected,
@@ -529,7 +544,7 @@ internal sealed class TabRegistry
 
             var owned = _tabs.Values.Where(t => OwnerAlive(t) && string.Equals(t.OwnerAgentId, agentId, StringComparison.Ordinal)).ToList();
             if (owned.Count == 1) return owned[0];
-            if (owned.Count > 1) { error = AmbiguousTab(owned.Select(t => t.TabId)); return null; }
+            if (owned.Count > 1) { error = AmbiguousTab("you are driving more than one tab — pass tab to say which one.", owned); return null; }
 
             var manipulation = req is not null && (InstanceEval.IsManipulationKind(req.Kind) || IsManipulationBatch(req));
             if (manipulation) { error = InstanceEval.NeedsInteraction(); return null; }
@@ -543,7 +558,8 @@ internal sealed class TabRegistry
                 if (!_tabs.TryGetValue(LegacyTab, out var legacy)) { legacy = new EvalChannel(_token, LegacyTab); _tabs[LegacyTab] = legacy; }
                 return legacy;
             }
-            error = AmbiguousTab(connected.Select(t => t.TabId));
+            error = AmbiguousTab("the app is open in more than one tab — pass tab to say which one (each tab's url/title " +
+                "is below; if the user named a page, it's the tab showing that).", connected);
             return null;
         }
     }
@@ -683,12 +699,13 @@ internal sealed class TabRegistry
         note = $"your session on tab '{tabId}' had already ended — the user reserved that tab.",
     }, Json);
 
-    private static string AmbiguousTab(IEnumerable<string> tabs) => JsonSerializer.Serialize(new
+    // The candidates carry what each tab shows, so the agent can pick the right one from this answer alone.
+    private static string AmbiguousTab(string error, IEnumerable<EvalChannel> tabs) => JsonSerializer.Serialize(new
     {
         ok = false,
         ambiguousTab = true,
-        error = "you are driving more than one tab — pass tab to say which one.",
-        tabs = tabs.ToArray(),
+        error,
+        tabs = tabs.Select(t => new { tabId = t.TabId, url = t.Url, title = t.Title }).ToArray(),
     }, Json);
 
     private static string NoPage() => JsonSerializer.Serialize(new

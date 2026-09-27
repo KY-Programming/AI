@@ -310,6 +310,8 @@
   var RELOAD_HOLD = INGEST.replace(/\/console$/, "/reload/hold");
   // The top-edge menu's "Reserve that tab for me" — keeps every agent out of this tab (see tabReserve).
   var TAB_RESERVE = INGEST.replace(/\/console$/, "/tab/reserve");
+  // What this tab shows changed between polls (see reportPageIfChanged).
+  var TAB_PAGE = INGEST.replace(/\/console$/, "/tab/page");
   // Multi-agent handoff: the "another agent wants in" prompt's Share / Deny buttons post here. (Open-a-
   // new-tab is a pure client action — window.open in the click handler — so it has no server route.)
   var HANDOFF_BASE = INGEST.replace(/\/console$/, "/handoff");
@@ -2049,10 +2051,37 @@
     }
   }
 
+  /*
+   * What this tab is showing (URL + title), so `list` can tell an agent which tab is which: the user says
+   * "check /orders" and the agent finds that tab's id instead of taking whichever tab is free — possibly
+   * the one the user is working in. Every poll carries it (so a restarted ky-ai-browser relearns it), but a
+   * long-poll can sit for its whole window while in-app navigation changes the URL without a reload —
+   * hence the once-a-second check that reports a change right away. One cheap comparison covers every way
+   * the two can change (router pushState, back/forward, hash, a Title service), where hooking each of
+   * those plus watching <title> would be several patches with the same effect.
+   */
+  var reportedPage = null;   // "url\ntitle" the server was last told
+  function currentPage() {
+    // Capped (the server caps too): the poll carries these in its query string.
+    return { url: short(location.href, 2000), title: short(document.title, 200) };
+  }
+  function reportPageIfChanged() {
+    try {
+      var p = currentPage(), key = p.url + "\n" + p.title;
+      if (key === reportedPage) return;
+      reportedPage = key;
+      postInteractionOverride(TAB_PAGE, p);
+    } catch (e) {}
+  }
+  setInterval(reportPageIfChanged, 1000);
+
   var lastPollOkAt = Date.now();
   function pollEvalOnce() {
+    var page = currentPage();
+    reportedPage = page.url + "\n" + page.title;
     var url = EVAL_POLL + "?token=" + encodeURIComponent(TOKEN) +
-      "&tabId=" + encodeURIComponent(tabId) + "&pageLoadId=" + encodeURIComponent(pageLoadId);
+      "&tabId=" + encodeURIComponent(tabId) + "&pageLoadId=" + encodeURIComponent(pageLoadId) +
+      "&url=" + encodeURIComponent(page.url) + "&title=" + encodeURIComponent(page.title);
     if (pendingClaim) url += "&claim=" + encodeURIComponent(pendingClaim);
     fetch(url, {
       method: "GET",

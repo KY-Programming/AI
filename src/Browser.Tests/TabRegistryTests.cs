@@ -17,6 +17,10 @@ public class TabRegistryTests
 
     private static EvalRequest Overlay(bool show) => new() { Id = "", Kind = "overlay", Show = show, TimeoutMs = 1000 };
     private static EvalRequest Click() => new() { Id = "", Kind = "click", Selector = "x", TimeoutMs = 1000 };
+    private static EvalRequest Query() => new() { Id = "", Kind = "query", Selector = "x", TimeoutMs = 1000 };
+
+    // /status as the hub's `list` serves it (default JSON, camelCase anonymous members).
+    private static string StatusJson(TabRegistry reg) => System.Text.Json.JsonSerializer.Serialize(reg.StatusSnapshot());
 
     // Register a tab and mark it connected (a poll within the freshness window). Returns after the empty
     // long-poll window elapses.
@@ -231,6 +235,70 @@ public class TabRegistryTests
         var onA = reg.DispatchAsync(Click(), 2000, "a1", "A");
         await Pump(reg, "A");
         Assert.DoesNotContain("ambiguousTab", await onA);
+    }
+
+    [Fact]
+    public async Task A_read_with_several_tabs_open_and_none_driven_asks_which_and_names_each_tabs_page()
+    {
+        var reg = new TabRegistry(Tok);
+        await reg.PollAsync("A", null, null, 1, default, "http://localhost:4200/orders", "Orders");
+        await reg.PollAsync("B", null, null, 1, default, "http://localhost:4200/users", "Users");
+
+        var answer = await reg.DispatchAsync(Query(), 500, "a1", null);
+        Assert.Contains("ambiguousTab", answer);
+        Assert.Contains("open in more than one tab", answer);   // not "you are driving…" — a1 drives nothing
+        Assert.Contains("http://localhost:4200/orders", answer);
+        Assert.Contains("\"title\":\"Users\"", answer);
+    }
+
+    // ── what each tab shows (url/title), so an agent can find "the tab at /orders" in list ──
+
+    [Fact]
+    public async Task Status_names_the_page_each_tab_last_reported()
+    {
+        var reg = new TabRegistry(Tok);
+        await reg.PollAsync("A", null, null, 1, default, "http://localhost:4200/orders", "Orders");
+        await Connect(reg, "B");                                                    // a snippet that reports nothing
+
+        var status = StatusJson(reg);
+        Assert.Contains("\"tabId\":\"A\",\"url\":\"http://localhost:4200/orders\",\"title\":\"Orders\"", status);
+        Assert.Contains("\"tabId\":\"B\",\"url\":null,\"title\":null", status);
+    }
+
+    [Fact]
+    public async Task A_page_change_between_polls_updates_the_tab_and_a_poll_without_page_keeps_it()
+    {
+        var reg = new TabRegistry(Tok);
+        await reg.PollAsync("A", null, null, 1, default, "http://localhost:4200/orders", "Orders");
+
+        Assert.True(reg.SetPage("A", "http://localhost:4200/orders/7", "Order 7"));   // in-app navigation
+        Assert.Contains("\"url\":\"http://localhost:4200/orders/7\",\"title\":\"Order 7\"", StatusJson(reg));
+
+        await Connect(reg, "A");                                                    // no page info on this poll
+        Assert.Contains("\"url\":\"http://localhost:4200/orders/7\"", StatusJson(reg));
+
+        Assert.False(reg.SetPage("unknown", "http://x/", "X"));                     // its poll creates the tab
+    }
+
+    [Fact]
+    public async Task A_duplicate_tab_does_not_relabel_the_tab_it_was_copied_from()
+    {
+        var reg = new TabRegistry(Tok);
+        var primary = reg.PollAsync("A", null, "p1", 400, default, "http://localhost:4200/orders", "Orders");
+        await Task.Delay(60);
+        var dup = await reg.PollAsync("A", null, "p2", 200, default, "http://localhost:4200/users", "Users");
+        Assert.NotNull(dup.ReassignTabId);
+        Assert.Contains("\"tabId\":\"A\",\"url\":\"http://localhost:4200/orders\"", StatusJson(reg));
+        await primary;
+    }
+
+    [Fact]
+    public void A_reported_page_is_capped()
+    {
+        var ch = new EvalChannel(Tok, "A");
+        ch.NotePage("http://x/" + new string('a', 5000), new string('t', 1000));
+        Assert.Equal(2048, ch.Url!.Length);
+        Assert.Equal(256, ch.Title!.Length);
     }
 
     [Fact]

@@ -287,7 +287,8 @@ internal static class Program
             var tabId = ctx.Request.Query["tabId"].ToString();
             var claim = ctx.Request.Query["claim"].ToString();
             var pageLoadId = ctx.Request.Query["pageLoadId"].ToString();
-            var poll = await eval.PollAsync(tabId, claim, pageLoadId, EvalPollWindowMs, ctx.RequestAborted);
+            var poll = await eval.PollAsync(tabId, claim, pageLoadId, EvalPollWindowMs, ctx.RequestAborted,
+                ctx.Request.Query["url"].ToString(), ctx.Request.Query["title"].ToString());
             // interactionActive/paused/killed/holdReload are THIS TAB's now (same field names as before, so the
             // snippet reconciles unchanged) and let a (re)loaded tab restore its own overlay/paused/killed/held
             // state. claimed acks a presented claim ticket; handoff asks this tab to show the "another agent
@@ -458,6 +459,20 @@ internal static class Program
             var reserved = Bool(body, "reserved") ?? true;
             eval.SetReserved(Str(body, "tabId"), reserved);
             return Results.Json(new { ok = true, reserved });
+        });
+        // The page reporting that what it shows changed between polls (in-app navigation keeps the tab but
+        // changes its URL) — so `list` names each tab's current page right away, not a poll window later.
+        app.MapMethods("/__kyai/tab/page", new[] { "OPTIONS" }, (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            return Results.StatusCode(StatusCodes.Status204NoContent);
+        });
+        app.MapPost("/__kyai/tab/page", async (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            var body = await ReadBodyAsync(ctx);
+            if (!TokenOk(body, collector.Token)) return Results.Json(new { ok = false });
+            return Results.Json(new { ok = eval.SetPage(Str(body, "tabId"), Str(body, "url"), Str(body, "title")) });
         });
         app.Urls.Add($"http://127.0.0.1:{restPort}");
 

@@ -72,6 +72,21 @@ internal sealed class EvalChannel
     public bool LeaseValid => OwnerAgentId is not null && DateTimeOffset.UtcNow < LeaseExpiresAt;
     public string? CurrentPageLoadId { get; set; }
 
+    // What this tab is showing right now, as the page last reported it (on every poll, and the moment it
+    // changes — in-app navigation changes the URL without a reload). It's how an agent finds "the tab at
+    // /orders" in `list` instead of grabbing whichever tab happens to be free. Null until a snippet that
+    // reports it has polled. Capped (above the snippet's own caps — this is only the guard): it is echoed
+    // into every status/list response.
+    public string? Url { get; private set; }
+    public string? Title { get; private set; }
+    private const int MaxUrl = 2048, MaxTitle = 256;
+    internal void NotePage(string? url, string? title)
+    {
+        if (string.IsNullOrEmpty(url)) return;   // an older snippet reports nothing — keep what we know
+        Url = url.Length > MaxUrl ? url[..MaxUrl] : url;
+        Title = title is { Length: > MaxTitle } ? title[..MaxTitle] : title;
+    }
+
     public EvalChannel(string token, string? tabId = null)
     {
         _token = token;

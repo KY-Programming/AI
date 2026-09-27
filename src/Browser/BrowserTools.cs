@@ -40,7 +40,11 @@ internal static class BrowserTools
         "List the capture instances currently registered with the hub — each ky-ai-browser is attached " +
         "to one ky-ai-ng frontend and registered under that frontend's name. Call this first to learn " +
         "the project names the other tools expect; each entry carries the instance's status (attached " +
-        "frontend, whether a page is connected, whether supervised interaction is open, buffered events).")]
+        "frontend, whether a page is connected, whether supervised interaction is open, buffered events) " +
+        "and its open browser tabs, each with its tabId and the url/title it currently shows. When the user " +
+        "points you at a page (\"check /orders in project X\"), find the tab showing it here and pass its " +
+        "tabId as `tab` — to start_interaction especially, which otherwise hands you any free tab, possibly " +
+        "the one the user is working in.")]
     public static Task<string> List() => Hub.ListAsync(detail: true);
 
     [McpServerTool(Name = "console_tail"), Description(
@@ -221,7 +225,7 @@ internal static class BrowserTools
         "state. Omit project when only one capture is registered.")]
     public static Task<string> StartInteraction(
         [Description("Max ms to wait — generous default because the call may park while the user opens/shares a tab; the fast path answers in <1s regardless (default 60000)")] int timeoutMs = 60_000,
-        [Description("Reopen/attach a specific tab by id; omit to be given a tab (yours if you have one, else a free or new one)")] string? tab = null,
+        [Description("Claim a specific tab by id (list shows each tab's url/title); omit to be given a tab (yours if you have one, else a free or new one). When the user named a page to work in, pass the id of the tab showing it — omitted, you may get a different free tab, such as the one the user is using")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         // Generous default + raised ceiling: with a free tab this returns immediately, and when all tabs

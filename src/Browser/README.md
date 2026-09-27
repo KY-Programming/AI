@@ -233,6 +233,14 @@ alongside any of them). Idle, or after a Stop, the icon is the app's own again. 
 the app's own `<link rel="icon">` elements is swapped (in place), so an app that changes its favicon at
 runtime keeps working — the mark moves onto its new icon, and the app's current icon is what comes back.
 
+**Several tabs of one app.** Each browser tab is its own target, and every tool takes an optional `tab`
+(a tabId). `list` shows each project's open tabs with the `url` and `title` they're showing right now —
+so when the user says *"check /orders in project X while I work on /users"*, find the tab showing
+`/orders` there and pass its id, above all to `start_interaction`: without one it takes your own tab, or
+else any free one — which may be the tab the user is working in. After that your calls go to your tab by
+default. A read that names no tab, while you drive none and several are open, is refused with
+`ambiguousTab:true` and the candidates' `tabId`/`url`/`title`, never guessed.
+
 ## Recipes
 
 ky-ai-browser is a **read → act → verify** loop over the live page.
