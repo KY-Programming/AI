@@ -256,7 +256,13 @@ internal sealed class TabRegistry
                 mine.Assign(agentId, _lease);
                 target = mine;
             }
-            else if (FindFreeConnected() is { } free)  // an unowned live tab → claim it, no popup (reuse)
+            else if (FindLastUsed(agentId) is { Paused: true, PageConnected: true })
+            {
+                // The user paused this agent in its own tab: it waits for them there (wait_for_resume)
+                // rather than moving on to another free tab — possibly the very one they're working in.
+                return InstanceEval.Paused();
+            }
+            else if (FindFreeConnected(agentId) is { } free)  // an unowned live tab → claim it, no popup (reuse)
             {
                 if (free.Paused) return InstanceEval.Paused();
                 free.Assign(agentId, _lease);
@@ -456,16 +462,22 @@ internal sealed class TabRegistry
 
     public bool AnyPageConnected { get { lock (_sync) return _tabs.Values.Any(t => t.PageConnected); } }
 
-    public object StatusSnapshot()
+    // agentId is who's asking (list forwards the caller): their own tab — the one they drive or drove
+    // last, which a tab-less start_interaction hands back to them — is marked `yours`.
+    public object StatusSnapshot(string? agentId = null)
     {
+        agentId = string.IsNullOrEmpty(agentId) ? SoloAgent : agentId!;
         lock (_sync)
         {
+            var own = FindLastUsed(agentId);
             var tabs = _tabs.Values.Where(t => t.TabId.Length > 0 || t.PageConnected || t.OwnerAgentId is not null)
                 .Select(t => new
                 {
                     tabId = t.TabId,
                     url = t.Url,
                     title = t.Title,
+                    yours = t == own ? true : (bool?)null,
+                    lastUsedBy = t.LastAgentId is null ? null : Label(t.LastAgentId),
                     owner = t.OwnerAgentId is null ? null : Label(t.OwnerAgentId),
                     leaseExpiresInMs = t.LeaseValid ? (int)Math.Max(0, (t.LeaseExpiresAt - DateTimeOffset.UtcNow).TotalMilliseconds) : (int?)null,
                     pageConnected = t.PageConnected,
@@ -528,8 +540,9 @@ internal sealed class TabRegistry
         return true;
     }
 
-    // Resolve the tab a manipulation/read acts on: an explicit tab, else the agent's own tab, else — for
-    // reads only — the sole connected tab (so single-agent reads work before any start_interaction).
+    // Resolve the tab a manipulation/read acts on: an explicit tab, else the tab the agent drives, else —
+    // for reads — the tab it drove last (tab affinity: between two tests it's still the agent's own), else
+    // the sole connected tab (so single-agent reads work before any start_interaction).
     private EvalChannel? ResolveForAction(string agentId, string? explicitTabId, EvalRequest? req, out string? error)
     {
         error = null;
@@ -546,8 +559,17 @@ internal sealed class TabRegistry
             if (owned.Count == 1) return owned[0];
             if (owned.Count > 1) { error = AmbiguousTab("you are driving more than one tab — pass tab to say which one.", owned); return null; }
 
+            var last = FindLastUsed(agentId);
             var manipulation = req is not null && (InstanceEval.IsManipulationKind(req.Kind) || IsManipulationBatch(req));
-            if (manipulation) { error = InstanceEval.NeedsInteraction(); return null; }
+            if (manipulation)
+            {
+                // Driving needs a session — except that an agent the user paused in its own tab should hear
+                // exactly that (the gate refuses with paused:true), not "call start_interaction first".
+                if (last is { Paused: true }) return last;
+                error = InstanceEval.NeedsInteraction();
+                return null;
+            }
+            if (last is { PageConnected: true }) return last;
 
             var connected = _tabs.Values.Where(t => t.PageConnected).ToList();
             if (connected.Count == 1) return connected[0];
@@ -574,12 +596,39 @@ internal sealed class TabRegistry
         return null;
     }
 
-    private EvalChannel? FindFreeConnected()   // caller holds _sync
+    // An agent's own tab: the one it drives now or drove last (the most recently used, if it drove
+    // several). Null once another agent has taken it, or it was closed.
+    private EvalChannel? FindLastUsed(string agentId)   // caller holds _sync
     {
+        EvalChannel? last = null;
         foreach (var t in _tabs.Values)
-            if (t.PageConnected && !OwnerAlive(t) && !t.Paused && !t.Reserved) return t;
-        return null;
+            if (string.Equals(t.LastAgentId, agentId, StringComparison.Ordinal) && (last is null || t.LastUsedAt > last.LastUsedAt))
+                last = t;
+        return last;
     }
+
+    // A free tab for an agent that holds none, by TAB AFFINITY: its own last tab first; then one that is
+    // no other agent's (never driven, or its last agent has disconnected); only then another agent's idle
+    // tab. Without this the first free tab won, so two sessions testing turn about kept trading tabs.
+    private EvalChannel? FindFreeConnected(string agentId)   // caller holds _sync
+    {
+        bool Free(EvalChannel t) => t.PageConnected && !OwnerAlive(t) && !t.Paused && !t.Reserved;
+        if (FindLastUsed(agentId) is { } own && Free(own)) return own;
+        EvalChannel? othersIdle = null;
+        foreach (var t in _tabs.Values)
+        {
+            if (!Free(t)) continue;
+            if (t.LastAgentId is null || !MayComeBack(t.LastAgentId)) return t;
+            othersIdle ??= t;
+        }
+        return othersIdle;
+    }
+
+    // Whether an agent may still come back for its tab: a bridge-backed agent exactly while it's connected.
+    // One we have no liveness signal for (a header-only caller, or the feed is stale) gets the benefit of
+    // the doubt — the same split OwnerAlive makes.
+    private bool MayComeBack(string agentId) =>   // caller holds _sync
+        !(LivenessFresh && _everLive.Contains(agentId)) || _liveAgents.Contains(agentId);
 
     private bool AnyConnectedLocked() => _tabs.Values.Any(t => t.PageConnected);
 

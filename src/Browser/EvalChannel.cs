@@ -93,12 +93,21 @@ internal sealed class EvalChannel
         TabId = tabId ?? "";
     }
 
+    // The agent that drove this tab last, and when. Unlike the owner it outlives the session, so an agent
+    // that stops and later starts again gets this same tab back instead of whichever is free (the
+    // registry's tab affinity), and `list` can show each agent which tab is its own. It only changes when
+    // another agent takes the tab. Mutated under the registry's lock, like the owner.
+    public string? LastAgentId { get; private set; }
+    public DateTimeOffset LastUsedAt { get; private set; }
+
     // Bind this tab to an agent with a fresh lease. Called by the registry under its lock when an agent
     // claims a tab (start_interaction on a free tab, a granted waitlist tab, or a window.open claim).
     internal void Assign(string agentId, TimeSpan lease)
     {
         OwnerAgentId = agentId;
         LeaseExpiresAt = DateTimeOffset.UtcNow + lease;
+        LastAgentId = agentId;
+        LastUsedAt = DateTimeOffset.UtcNow;
     }
 
     // Slide the lease while the owning agent is still driving (renewed on each dispatch it makes and on
@@ -106,7 +115,9 @@ internal sealed class EvalChannel
     // fixing the old "InteractionActive sticks forever" wedge.
     internal void Renew(TimeSpan lease)
     {
-        if (OwnerAgentId is not null) LeaseExpiresAt = DateTimeOffset.UtcNow + lease;
+        if (OwnerAgentId is null) return;
+        LeaseExpiresAt = DateTimeOffset.UtcNow + lease;
+        LastUsedAt = DateTimeOffset.UtcNow;
     }
 
     // Release ownership and close the session — the overlay auto-hides on the next reconcile. Called on

@@ -41,10 +41,12 @@ internal static class BrowserTools
         "to one ky-ai-ng frontend and registered under that frontend's name. Call this first to learn " +
         "the project names the other tools expect; each entry carries the instance's status (attached " +
         "frontend, whether a page is connected, whether supervised interaction is open, buffered events) " +
-        "and its open browser tabs, each with its tabId and the url/title it currently shows. When the user " +
-        "points you at a page (\"check /orders in project X\"), find the tab showing it here and pass its " +
-        "tabId as `tab` — to start_interaction especially, which otherwise hands you any free tab, possibly " +
-        "the one the user is working in.")]
+        "and its open browser tabs, each with its tabId and the url/title it currently shows. `yours:true` " +
+        "marks YOUR tab — the one you drive or drove last; start_interaction without a tab hands it back to " +
+        "you when it's free, so between tests you keep your tab without passing its id. When the user points " +
+        "you at a different page (\"check /orders in project X\"), find the tab showing it here and pass its " +
+        "tabId as `tab` — to start_interaction especially, which otherwise gives you your own tab or any free " +
+        "one, possibly the one the user is working in.")]
     public static Task<string> List() => Hub.ListAsync(detail: true);
 
     [McpServerTool(Name = "console_tail"), Description(
@@ -116,7 +118,7 @@ internal static class BrowserTools
         [Description("Await a returned promise/thenable before serializing (default false)")] bool awaitPromise = false,
         [Description("Return the result as structured JSON (in `json`) instead of a string in `value` (default false)")] bool json = false,
         [Description("Max ms to wait for the page to return a result (default 5000)")] int timeoutMs = 5000,
-        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(expression)) return Task.FromResult(Bad("expression is required"));
@@ -140,7 +142,7 @@ internal static class BrowserTools
         [Description("Max elements to describe when all=true (default 20)")] int limit = 20,
         [Description("Full description (default true); false slims each match to {tag, id?, text}")] bool detail = true,
         [Description("Max ms to wait for the page to return a result (default 5000)")] int timeoutMs = 5000,
-        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(selector)) return Task.FromResult(Bad("selector is required"));
@@ -175,7 +177,7 @@ internal static class BrowserTools
         [Description("Only serialize these state fields (by name) in full; omit for all (large values summarized)")] string[]? fields = null,
         [Description("Max nesting depth for serialized values (default 3, max 6)")] int depth = 3,
         [Description("Max ms to wait for the page to return a result (default 5000)")] int timeoutMs = 5000,
-        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(selector)) return Task.FromResult(Bad("selector is required"));
@@ -195,7 +197,7 @@ internal static class BrowserTools
         [Description("CSS selector of the element to read")] string selector,
         [Description("Computed-style property names (kebab-case); omit for a default set")] string[]? props = null,
         [Description("Max ms to wait for the page (default 5000)")] int timeoutMs = 5000,
-        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(selector)) return Task.FromResult(Bad("selector is required"));
@@ -225,7 +227,7 @@ internal static class BrowserTools
         "state. Omit project when only one capture is registered.")]
     public static Task<string> StartInteraction(
         [Description("Max ms to wait — generous default because the call may park while the user opens/shares a tab; the fast path answers in <1s regardless (default 60000)")] int timeoutMs = 60_000,
-        [Description("Claim a specific tab by id (list shows each tab's url/title); omit to be given a tab (yours if you have one, else a free or new one). When the user named a page to work in, pass the id of the tab showing it — omitted, you may get a different free tab, such as the one the user is using")] string? tab = null,
+        [Description("Claim a specific tab by id (list shows each tab's url/title); omit to be given your own tab (the one you drove last, marked yours:true in list) if it's free, else another free or a new one. When the user named a page to work in, pass the id of the tab showing it — omitted, you may get a different tab, such as the one the user is using")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         // Generous default + raised ceiling: with a free tab this returns immediately, and when all tabs
@@ -241,7 +243,7 @@ internal static class BrowserTools
         "start_interaction. Returns {ok, shown:false}. Omit project when only one capture is registered.")]
     public static Task<string> StopInteraction(
         [Description("Max ms to wait for the page (default 3000)")] int timeoutMs = 3000,
-        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         var budget = Math.Clamp(timeoutMs, 250, 30_000);
@@ -258,7 +260,7 @@ internal static class BrowserTools
         "is registered.")]
     public static Task<string> WaitForResume(
         [Description("Max ms to wait (default 60000)")] int timeoutMs = 60_000,
-        [Description("Wait on a specific tab by id; omit to use the tab you're driving")] string? tab = null,
+        [Description("Wait on a specific tab by id; omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         var sec = Math.Clamp(timeoutMs / 1000 + 5, 5, 124);
@@ -292,7 +294,7 @@ internal static class BrowserTools
         [Description("Hold Meta/Cmd/Win")] bool meta = false,
         [Description("Return the full target element (classes/attributes/rect/outerHTML) instead of {tag, id?, text}")] bool detail = false,
         [Description("Max ms to wait for the page (default 5000)")] int timeoutMs = 5000,
-        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(selector) && string.IsNullOrWhiteSpace(text) && (x is null || y is null))
@@ -318,7 +320,7 @@ internal static class BrowserTools
         [Description("Number of move steps (default: ~1 per 16ms, capped)")] int? steps = null,
         [Description("Return the full finalTarget element instead of {tag, id?, text}")] bool detail = false,
         [Description("Max ms to wait for the page (default: durationMs + headroom)")] int timeoutMs = 0,
-        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         var dur = Math.Clamp(durationMs, 0, 120_000);
@@ -344,7 +346,7 @@ internal static class BrowserTools
         [Description("Hold Meta/Cmd/Win")] bool meta = false,
         [Description("Return the full target element instead of {tag, id?, text}")] bool detail = false,
         [Description("Max ms to wait for the page (default 5000)")] int timeoutMs = 5000,
-        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrEmpty(key)) return Task.FromResult(Bad("key is required"));
@@ -365,7 +367,7 @@ internal static class BrowserTools
         [Description("Append to the current value instead of replacing it (default false)")] bool append = false,
         [Description("Return the full target element instead of {tag, id?, text}")] bool detail = false,
         [Description("Max ms to wait for the page (default 5000)")] int timeoutMs = 5000,
-        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(selector)) return Task.FromResult(Bad("selector is required"));
@@ -385,7 +387,7 @@ internal static class BrowserTools
         [Description("Target scroll Y (CSS px)")] int? y = null,
         [Description("Return the full target element instead of {tag, id?, text}")] bool detail = false,
         [Description("Max ms to wait for the page (default 5000)")] int timeoutMs = 5000,
-        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         var budget = Clamp(timeoutMs);
@@ -402,7 +404,7 @@ internal static class BrowserTools
         [Description("Blur instead of focus (selector optional → the active element)")] bool blur = false,
         [Description("Return the full target element instead of {tag, id?, text}")] bool detail = false,
         [Description("Max ms to wait for the page (default 5000)")] int timeoutMs = 5000,
-        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(selector) && !blur) return Task.FromResult(Bad("focus requires a selector (or set blur=true)"));
@@ -423,7 +425,7 @@ internal static class BrowserTools
         [Description("JS expression to wait for (truthy); evaluated in global scope")] string? expression = null,
         [Description("Max ms to wait before giving up (default 5000)")] int timeoutMs = 5000,
         [Description("Poll interval in ms (default 100)")] int pollMs = 100,
-        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(selector) && string.IsNullOrWhiteSpace(expression))
@@ -443,7 +445,7 @@ internal static class BrowserTools
         "Returns pageConnected:false if no page is open. Omit project when only one capture is registered.")]
     public static Task<string> ReloadPage(
         [Description("Max ms to wait for the page to pick up the reload (default 3000)")] int timeoutMs = 3000,
-        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         var budget = Math.Clamp(timeoutMs, 250, 30_000);
@@ -465,7 +467,7 @@ internal static class BrowserTools
         [Description("Target route/URL to navigate to, e.g. \"/orders/42\" (router path or same-origin URL)")] string path,
         [Description("Use replaceState instead of pushState in the History fallback (no new history entry)")] bool replace = false,
         [Description("Max ms to wait for the navigation to settle (default 5000)")] int timeoutMs = 5000,
-        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (string.IsNullOrWhiteSpace(path)) return Task.FromResult(Bad("path is required"));
@@ -487,7 +489,7 @@ internal static class BrowserTools
     public static Task<string> Batch(
         [Description("Ordered steps; each is { action, plus that action's fields }")] BatchStep[] steps,
         [Description("Max ms for the whole sequence (default: derived from the steps' own waits/durations/sleeps)")] int timeoutMs = 0,
-        [Description("Target a specific tab by id (from start_interaction/list); omit to use the tab you're driving")] string? tab = null,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         if (steps is null || steps.Length == 0) return Task.FromResult(Bad("batch requires at least one step"));

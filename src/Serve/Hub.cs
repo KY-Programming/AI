@@ -50,11 +50,7 @@ internal static class Hub
             try
             {
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSec));
-                using var req = new HttpRequestMessage(method, url);
-                // Pass the calling agent's id through to the supervisor (browser instances key per-tab
-                // ownership on it; ng/net supervisors simply ignore the header).
-                if (AgentContext.Current is { } agent)
-                    req.Headers.TryAddWithoutValidation(AgentContext.Header, agent);
+                using var req = NewRequest(method, url);
                 if (jsonBody is not null)
                     req.Content = new StringContent(jsonBody, System.Text.Encoding.UTF8, "application/json");
                 using var resp = await Http.SendAsync(req, cts.Token);
@@ -74,6 +70,16 @@ internal static class Hub
                 return Soft($"timed out after {timeoutSec}s waiting for the {Noun}", project, null);
             }
         }
+    }
+
+    // A request to a supervisor that carries the calling agent's id through (browser instances key per-tab
+    // ownership on it, and mark the caller's own tab in /status; ng/net supervisors simply ignore it).
+    private static HttpRequestMessage NewRequest(HttpMethod method, string url)
+    {
+        var req = new HttpRequestMessage(method, url);
+        if (AgentContext.Current is { } agent)
+            req.Headers.TryAddWithoutValidation(AgentContext.Header, agent);
+        return req;
     }
 
     // Resolve the target supervisor: an explicit name, or — when the name is omitted and exactly
@@ -117,7 +123,10 @@ internal static class Hub
             try
             {
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-                var body = await Http.GetStringAsync(r.ControlUrl.TrimEnd('/') + "/status", cts.Token);
+                using var req = NewRequest(HttpMethod.Get, r.ControlUrl.TrimEnd('/') + "/status");
+                using var resp = await Http.SendAsync(req, cts.Token);
+                resp.EnsureSuccessStatusCode();   // an unhealthy supervisor is pruned below, as before
+                var body = await resp.Content.ReadAsStringAsync(cts.Token);
                 using var doc = JsonDocument.Parse(body);
                 items.Add(detail
                     ? new { name = r.Name, controlUrl = r.ControlUrl, status = doc.RootElement.Clone() }

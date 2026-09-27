@@ -188,9 +188,10 @@ internal static class Program
         });
 
         // ── control API: what the hub's BrowserTools forward to (loopback-only) ──
-        app.MapGet("/status", () =>
+        app.MapGet("/status", (HttpContext ctx) =>
         {
-            var snap = eval.StatusSnapshot();
+            // The hub forwards the calling agent (list), so its own tab can be marked `yours`.
+            var snap = eval.StatusSnapshot(ctx.Request.Headers[AgentContext.Header].ToString());
             // Instance identity + the per-tab breakdown (snap carries pageConnected/interaction/paused/
             // killed/holdReload aggregates plus a `tabs` array with per-tab owner/lease/flags).
             var payload = new Dictionary<string, object?>

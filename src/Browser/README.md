@@ -234,11 +234,20 @@ the app's own `<link rel="icon">` elements is swapped (in place), so an app that
 runtime keeps working — the mark moves onto its new icon, and the app's current icon is what comes back.
 
 **Several tabs of one app.** Each browser tab is its own target, and every tool takes an optional `tab`
-(a tabId). `list` shows each project's open tabs with the `url` and `title` they're showing right now —
-so when the user says *"check /orders in project X while I work on /users"*, find the tab showing
-`/orders` there and pass its id, above all to `start_interaction`: without one it takes your own tab, or
-else any free one — which may be the tab the user is working in. After that your calls go to your tab by
-default. A read that names no tab, while you drive none and several are open, is refused with
+(a tabId). `list` shows each project's open tabs with the `url` and `title` they're showing right now.
+
+- **Your tab sticks to you.** The tab you drive, or drove last, is yours — `list` marks it `yours:true`.
+  Between tests it stays yours: `start_interaction` without a tab hands it back when it's free, and reads
+  without a tab go there. So two sessions testing turn about in one app each keep their own tab, with no
+  tab ids to remember. A tab only stops being yours when another agent takes it (or it's closed).
+- **A tab-less `start_interaction` picks** your own tab → else a tab that's no other agent's (never driven,
+  or its agent disconnected) → else another agent's idle tab → else it waits for the user to open or share
+  one. If the user paused you in your tab, it's refused with `paused:true` instead of moving you elsewhere.
+- **Pointed at a page** (*"check /orders in project X while I work on /users"*): find the tab showing
+  `/orders` in `list` and pass its id, above all to `start_interaction` — without one you get your own tab
+  or any free one, which may be the tab the user is working in.
+
+A read that names no tab, while you have no tab of your own and several are open, is refused with
 `ambiguousTab:true` and the candidates' `tabId`/`url`/`title`, never guessed.
 
 ## Recipes

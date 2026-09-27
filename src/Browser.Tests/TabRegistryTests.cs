@@ -54,6 +54,19 @@ public class TabRegistryTests
         return await task;
     }
 
+    // start_interaction with NO tab: plays the page on every candidate tab until the claim's overlay lands on
+    // one of them, and returns the tabId the registry chose.
+    private static async Task<string> OpenAny(TabRegistry reg, string agent, params string[] tabs)
+    {
+        var task = reg.DispatchAsync(Overlay(true), 2000, agent, null);
+        for (var i = 0; i < 50 && !task.IsCompleted; i++)
+            foreach (var t in tabs)
+                foreach (var r in (await reg.PollAsync(t, null, null, 20, default)).Requests)
+                    reg.Complete(t, Tok, r.Id, "{\"ok\":true,\"shown\":true}");
+        using var result = System.Text.Json.JsonDocument.Parse(await task);
+        return result.RootElement.GetProperty("tabId").GetString()!;
+    }
+
     // stop_interaction on an explicit tab, completing the overlay hide (releases the lease).
     private static async Task StopOn(TabRegistry reg, string agent, string tab)
     {
@@ -299,6 +312,113 @@ public class TabRegistryTests
         ch.NotePage("http://x/" + new string('a', 5000), new string('t', 1000));
         Assert.Equal(2048, ch.Url!.Length);
         Assert.Equal(256, ch.Title!.Length);
+    }
+
+    // ── tab affinity: an agent keeps its tab between sessions (two sessions testing turn about) ──
+
+    [Fact]
+    public async Task A_tabless_start_interaction_hands_an_agent_its_own_tab_back()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A"); await Connect(reg, "B");
+        await OpenOn(reg, "a2", "A"); await StopOn(reg, "a2", "A");   // A is a2's
+        await OpenOn(reg, "a1", "B"); await StopOn(reg, "a1", "B");   // B is a1's
+
+        // Both free now — the first free tab (A) used to win, so a1 would have landed in a2's tab.
+        Assert.Equal("B", await OpenAny(reg, "a1", "A", "B"));
+        Assert.Equal("A", await OpenAny(reg, "a2", "A", "B"));
+    }
+
+    [Fact]
+    public async Task A_new_agent_gets_a_tab_that_is_nobodys_before_another_agents_idle_one()
+    {
+        var reg = new TabRegistry(Tok);
+        reg.SetLiveAgents(new[] { "a1", "a3" });
+        await Connect(reg, "A"); await Connect(reg, "B");
+        await OpenOn(reg, "a1", "A"); await StopOn(reg, "a1", "A");   // a1 is between tests, still connected
+
+        Assert.Equal("B", await OpenAny(reg, "a3", "A", "B"));
+    }
+
+    [Fact]
+    public async Task A_disconnected_agents_old_tab_counts_as_nobodys()
+    {
+        var reg = new TabRegistry(Tok);
+        reg.SetLiveAgents(new[] { "a1", "a2" });
+        await Connect(reg, "B"); await Connect(reg, "A");             // B comes first in the registry
+        await OpenOn(reg, "a2", "B"); await StopOn(reg, "a2", "B");   // a2's, and a2 stays connected
+        await OpenOn(reg, "a1", "A"); await StopOn(reg, "a1", "A");
+        reg.SetLiveAgents(new[] { "a2", "a3" });                      // a1's session ended
+
+        Assert.Equal("A", await OpenAny(reg, "a3", "A", "B"));
+    }
+
+    [Fact]
+    public async Task Another_agents_idle_tab_is_still_taken_when_nothing_else_is_free()
+    {
+        var reg = new TabRegistry(Tok);
+        reg.SetLiveAgents(new[] { "a1", "a2" });
+        await Connect(reg, "A");
+        await OpenOn(reg, "a1", "A"); await StopOn(reg, "a1", "A");
+
+        Assert.Equal("A", await OpenAny(reg, "a2", "A"));
+    }
+
+    [Fact]
+    public async Task Reads_without_a_tab_go_to_the_agents_own_tab_between_sessions()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A"); await Connect(reg, "B");
+        await OpenOn(reg, "a1", "B"); await StopOn(reg, "a1", "B");
+
+        var read = reg.DispatchAsync(Query(), 2000, "a1", null);
+        var req = Assert.Single((await reg.PollAsync("B", null, null, 1000, default)).Requests);
+        reg.Complete("B", Tok, req.Id, "{\"ok\":true}");
+        Assert.DoesNotContain("ambiguousTab", await read);
+
+        // an agent with no tab of its own still has to say which
+        Assert.Contains("ambiguousTab", await reg.DispatchAsync(Query(), 500, "a9", null));
+    }
+
+    [Fact]
+    public async Task An_agent_paused_in_its_own_tab_is_told_so_instead_of_being_moved_to_another()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A"); await Connect(reg, "B");
+        await OpenOn(reg, "a1", "A");
+        reg.SetPaused("A", true);
+
+        Assert.Contains("\"paused\":true", await reg.DispatchAsync(Overlay(true), 500, "a1", null));   // not tab B
+        Assert.Contains("\"paused\":true", await reg.DispatchAsync(Click(), 500, "a1", null));         // not "needsInteraction"
+        var (cleared, ch) = await reg.WaitForResumeAsync("a1", null, 150, default);                    // waits on A
+        Assert.False(cleared);
+        Assert.Equal("A", ch!.TabId);
+    }
+
+    [Fact]
+    public async Task Status_marks_the_callers_own_tab_and_who_used_each_last()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A"); await Connect(reg, "B");
+        await OpenOn(reg, "a1", "A"); await StopOn(reg, "a1", "A");
+        await OpenOn(reg, "a2", "B");
+
+        var forA1 = System.Text.Json.JsonSerializer.Serialize(reg.StatusSnapshot("a1"));
+        Assert.Contains("\"tabId\":\"A\",\"url\":null,\"title\":null,\"yours\":true,\"lastUsedBy\":\"agent 1\"", forA1);
+        Assert.Contains("\"tabId\":\"B\",\"url\":null,\"title\":null,\"yours\":null,\"lastUsedBy\":\"agent 2\"", forA1);
+        Assert.Contains("\"tabId\":\"B\",\"url\":null,\"title\":null,\"yours\":true", System.Text.Json.JsonSerializer.Serialize(reg.StatusSnapshot("a2")));
+    }
+
+    [Fact]
+    public async Task A_tab_another_agent_takes_stops_being_yours()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A"); await Connect(reg, "B");
+        await OpenOn(reg, "a1", "A"); await StopOn(reg, "a1", "A");
+        await OpenOn(reg, "a2", "A");                                   // a2 names A explicitly
+
+        Assert.DoesNotContain("\"yours\":true", System.Text.Json.JsonSerializer.Serialize(reg.StatusSnapshot("a1")));
+        Assert.Equal("B", await OpenAny(reg, "a1", "A", "B"));
     }
 
     [Fact]
