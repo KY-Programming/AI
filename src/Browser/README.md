@@ -225,6 +225,14 @@ saving file after file while you test by hand. Move the mouse to the **middle of
 The bar takes no pointer events until it is actually visible, so nothing of ours can swallow your app's
 clicks while it's hidden. The hold and the reservation are per tab.
 
+**Tab icon.** The tab's favicon shows the same state from the tab strip, so with several tabs of the app
+open you can tell them apart without clicking through. A red mark sits on the app's own icon: a **dot**
+while an agent drives the tab, **⏸** while you've paused it, a **lock** while you've reserved it, and
+**⏹** while you've stopped Angular reloads (that one only when none of the others applies — it can be on
+alongside any of them). Idle, or after a Stop, the icon is the app's own again. Only the `href` of
+the app's own `<link rel="icon">` elements is swapped (in place), so an app that changes its favicon at
+runtime keeps working — the mark moves onto its new icon, and the app's current icon is what comes back.
+
 ## Recipes
 
 ky-ai-browser is a **read → act → verify** loop over the live page.

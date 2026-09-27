@@ -361,11 +361,11 @@
       })["catch"](function () { /* server gone — nothing to do */ });
     } catch (e) { /* never throw into the app */ }
   }
-  function onUserPause() { try { overlay.showPaused(); } catch (e) {} postInteractionOverride(INTERACTION_PAUSE); }
-  function onUserResume() { try { overlay.clearPaused(); } catch (e) {} postInteractionOverride(INTERACTION_RESUME); }
-  function onUserKill() { try { overlay.showKilled(); } catch (e) {} postInteractionOverride(INTERACTION_KILL); }
+  function onUserPause() { try { overlay.showPaused(); } catch (e) {} syncTabIcon(); postInteractionOverride(INTERACTION_PAUSE); }
+  function onUserResume() { try { overlay.clearPaused(); } catch (e) {} syncTabIcon(); postInteractionOverride(INTERACTION_RESUME); }
+  function onUserKill() { try { overlay.showKilled(); } catch (e) {} syncTabIcon(); postInteractionOverride(INTERACTION_KILL); }
   // Shift-click a Stop icon = stop EVERY agent's tab at once (handy when several are driving in parallel).
-  function onUserKillAll() { try { overlay.showKilled(); } catch (e) {} postInteractionOverride(INTERACTION_KILL, { scope: "all" }); }
+  function onUserKillAll() { try { overlay.showKilled(); } catch (e) {} syncTabIcon(); postInteractionOverride(INTERACTION_KILL, { scope: "all" }); }
 
   // Handoff prompt actions (shown when another agent is waiting for a tab):
   //   open a new tab — window.open MUST be inside this real click handler, or the browser blocks it; the
@@ -1393,8 +1393,8 @@
   })();
   reloadHold.install();
 
-  function onUserContinueReload() { reloadHold.release(); postInteractionOverride(RELOAD_RELEASE); }
-  function onUserHoldReloads() { reloadHold.engage(); postInteractionOverride(RELOAD_HOLD, { hold: true }); }
+  function onUserContinueReload() { reloadHold.release(); syncTabIcon(); postInteractionOverride(RELOAD_RELEASE); }
+  function onUserHoldReloads() { reloadHold.engage(); syncTabIcon(); postInteractionOverride(RELOAD_HOLD, { hold: true }); }
   // "Reload page now": pick up whatever the dev server has built, WITHOUT lifting the hold — after the
   // reload the page keeps swallowing further updates, so it's "give me the current state, then freeze
   // again" rather than an exit from the hold. (Also the resync a long hold eventually needs: swallowed
@@ -1420,6 +1420,7 @@
         reserved = !reserved; pending = true;
         // Reflect the eviction right away instead of a poll window later — as Pause does.
         if (reserved) { try { overlay.hide(); overlay.clearPaused(); } catch (e) {} }
+        syncTabIcon();
         postInteractionOverride(TAB_RESERVE, { reserved: reserved });
       },
       isReserved: function () { return reserved; }
@@ -1436,6 +1437,233 @@
       { label: "Reload page now", run: onUserReloadNow },
       { label: (tabReserve.isReserved() ? "✓ " : "") + "Reserve that tab for me", run: tabReserve.toggle }
     ];
+  }
+
+  /*
+   * Tab icon mark — the overlay's state, readable from the browser's tab strip. The overlay only shows
+   * inside the page, so with several tabs of the app open (one per agent, one the human reserved) you'd
+   * have to click through them to find out which is which. Instead each tab paints a red mark onto the
+   * app's OWN favicon, so it stays recognisable as this app:
+   *   ● dot   — an agent is driving this tab (a session is open)
+   *   ⏸       — the human paused the agent here
+   *   lock    — the human reserved this tab for themselves
+   *   ⏹       — the human stopped Angular reloads here (not ⏸: that would read as the agent pause above)
+   * One mark at a time. The first three never overlap; the reload hold can coexist with any of them, so it
+   * only shows when none of them does. Idle, or after a Stop, the tab wears the app's icon untouched.
+   *
+   * The mark goes onto the app's own <link rel="icon"> elements by rewriting their href IN PLACE — not
+   * by adding a link of ours on top (which one a browser picks among several is up to its size/type
+   * heuristics) nor by detaching the app's (an app that manages its favicon at runtime typically does
+   * `querySelector('link[rel*=icon]').href = …`, and would then write into OUR link). In place, such an
+   * app keeps working: the MutationObserver sees its new href, adopts that as the base and re-paints the
+   * mark onto it, and a restore puts back the app's CURRENT href rather than a stale boot-time copy.
+   * Only href is touched, never the link's `type`: the data: URL names its own format, which is what the
+   * image is decoded by — and a type of ours on the link would be mistaken for the app's on a restore.
+   */
+  var tabIcon = (function () {
+    var SIZE = 64;   // painted at 64px: the browser scales it down, and a HiDPI tab strip still gets a crisp mark
+    var RED = "#ef4444";   // the overlay's own red
+    // Glyphs are 24-unit SVG paths, drawn bare (no disc behind them) in the bottom-right corner.
+    var MARKS = {
+      driving: { dot: true },
+      paused: { path: "M5 3h5v18H5zM14 3h5v18h-5z" },   // bolder than a stock ⏸, to match the lock's weight
+      reserved: { path: "M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zM8.9 6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2H8.9V6z" },
+      reloadHeld: { path: "M6 4h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" }   // ⏹, rounded like the overlay's
+    };
+    var state = null;      // the mark this tab should wear (null ⇒ the app's own icon)
+    var applied = null;    // the data: URL our mark currently sits in the links as
+    var originals = [];    // { link, href } — the app's icon links with THEIR href
+    var ownLink = null;    // stand-in when the app declares no icon (the browser then uses /favicon.ico)
+    var observer = null;
+    var paintGen = 0;      // bumped per paint and per restore; a slower image load that lost the race is dropped
+    var cache = {};        // base URL + "|" + state → painted data: URL
+
+    function isAppIconLink(n) {
+      try {
+        if (!n || n.nodeType !== 1 || n.tagName !== "LINK" || n.hasAttribute("data-kyai-favicon")) return false;
+        return (n.getAttribute("rel") || "").toLowerCase().split(/\s+/).indexOf("icon") >= 0;
+      } catch (e) { return false; }
+    }
+    function indexOf(link) {
+      for (var i = 0; i < originals.length; i++) if (originals[i].link === link) return i;
+      return -1;
+    }
+    // Remember a link's own href — once. A link we already track carries OUR href by now.
+    function track(link) {
+      if (indexOf(link) >= 0) return false;
+      originals.push({ link: link, href: link.getAttribute("href") });
+      return true;
+    }
+    function untrack(link) {
+      var i = indexOf(link);
+      if (i < 0) return false;
+      originals.splice(i, 1);
+      return true;
+    }
+    function collect() {
+      var head = document.head;
+      if (!head) return;
+      var links = head.querySelectorAll("link[rel]");
+      for (var i = 0; i < links.length; i++) if (isAppIconLink(links[i])) track(links[i]);
+    }
+
+    // The icon to paint onto: the sharpest one the app declares (an SVG or sizes="any", else the largest
+    // sizes, else the last — the one a browser picks when nothing tells them apart). No link at all ⇒ the
+    // browser's implicit /favicon.ico.
+    function pickBase() {
+      var best = null, bestScore = -1;
+      for (var i = 0; i < originals.length; i++) {
+        var o = originals[i];
+        if (!o.href || !o.link.isConnected) continue;
+        var score = 0, m, dims = /(\d+)x\d+/g;
+        var sizes = (o.link.getAttribute("sizes") || "").toLowerCase();
+        if (sizes.indexOf("any") >= 0 || /svg/i.test(o.link.getAttribute("type") || "") || /\.svg(\?|#|$)/i.test(o.href)) score = Infinity;
+        else while ((m = dims.exec(sizes))) score = Math.max(score, parseInt(m[1], 10));
+        if (score >= bestScore) { best = o; bestScore = score; }
+      }
+      try { return new URL(best ? best.href : "/favicon.ico", document.baseURI).href; }
+      catch (e) { return location.origin + "/favicon.ico"; }
+    }
+
+    // Both kinds of mark get a thin white edge, which sets the red off both the app's icon and a dark tab
+    // strip. `alone` ⇒ there's no app icon under it, so the mark fills the whole icon instead of a corner.
+    function drawMark(ctx, mark, alone) {
+      if (mark.dot) {
+        var c = alone ? SIZE / 2 : SIZE * 0.7, r = alone ? SIZE * 0.4 : SIZE * 0.235;
+        ctx.beginPath(); ctx.arc(c, c, r * 1.25, 0, Math.PI * 2); ctx.fillStyle = "#fff"; ctx.fill();
+        ctx.beginPath(); ctx.arc(c, c, r, 0, Math.PI * 2); ctx.fillStyle = RED; ctx.fill();
+        return;
+      }
+      var box = alone ? SIZE : SIZE * 0.72, s = box / 24, p = new Path2D(mark.path);
+      ctx.save();
+      ctx.translate(SIZE - box, SIZE - box); ctx.scale(s, s);
+      ctx.lineJoin = "round";
+      ctx.lineWidth = 6 / s; ctx.strokeStyle = "#fff"; ctx.stroke(p);   // the white edge: 3px outside the glyph
+      ctx.fillStyle = RED; ctx.fill(p, "evenodd");
+      ctx.restore();
+    }
+
+    // Paint the mark onto the base icon (bottom-right corner). An icon we can't load or can't read back
+    // (a cross-origin one without CORS taints the canvas) still gets the state across: the mark alone,
+    // filling the whole icon.
+    function render(base, name, done) {
+      var key = base + "|" + name;
+      if (cache[key]) { done(cache[key]); return; }
+      function paint(img) {
+        var c = document.createElement("canvas");
+        c.width = c.height = SIZE;
+        var ctx = c.getContext("2d");
+        if (img) ctx.drawImage(img, 0, 0, SIZE, SIZE);
+        drawMark(ctx, MARKS[name], !img);
+        return c.toDataURL("image/png");
+      }
+      var img = new Image();
+      try {
+        var u = new URL(base);   // a CORS-enabled CDN icon stays readable; without CORS it errors → mark alone
+        if (/^https?:$/.test(u.protocol) && u.origin !== location.origin) img.crossOrigin = "anonymous";
+      } catch (e) {}
+      img.onload = function () {
+        var url;
+        try { url = paint(img); } catch (e) { try { url = paint(null); } catch (e2) { return; } }
+        cache[key] = url; done(url);
+      };
+      img.onerror = function () {
+        try { var url = paint(null); cache[key] = url; done(url); } catch (e) {}
+      };
+      img.src = base;
+    }
+
+    function apply(url) {
+      applied = url;
+      if (originals.length) {
+        if (ownLink) { try { ownLink.remove(); } catch (e) {} ownLink = null; }
+        for (var i = 0; i < originals.length; i++) originals[i].link.setAttribute("href", url);
+      } else {
+        if (!ownLink) {
+          ownLink = document.createElement("link");
+          ownLink.setAttribute("rel", "icon");
+          ownLink.setAttribute("data-kyai-favicon", "");
+          document.head.appendChild(ownLink);
+        }
+        ownLink.setAttribute("href", url);
+      }
+    }
+
+    function paint() {
+      var gen = ++paintGen, name = state;
+      render(pickBase(), name, function (url) {
+        try { if (gen === paintGen && state === name) apply(url); } catch (e) {}
+      });
+    }
+
+    function restore() {
+      paintGen++;   // drop any paint still loading
+      if (observer) { try { observer.disconnect(); } catch (e) {} observer = null; }
+      for (var i = 0; i < originals.length; i++) {
+        var o = originals[i];
+        try { if (o.href === null) o.link.removeAttribute("href"); else o.link.setAttribute("href", o.href); } catch (e) {}
+      }
+      originals = [];
+      if (ownLink) { try { ownLink.remove(); } catch (e) {} ownLink = null; }
+      applied = null;
+    }
+
+    // Only the app's changes reach here as changes: our own writes set href to `applied`, which is
+    // skipped. A link the app adds (or turns into an icon) is badged too; one it removes is forgotten.
+    function onMutations(records) {
+      try {
+        if (!state) return;
+        var dirty = false;
+        for (var i = 0; i < records.length; i++) {
+          var r = records[i], j;
+          if (r.type === "childList") {
+            for (j = 0; j < r.addedNodes.length; j++) if (isAppIconLink(r.addedNodes[j]) && track(r.addedNodes[j])) dirty = true;
+            for (j = 0; j < r.removedNodes.length; j++) if (untrack(r.removedNodes[j])) dirty = true;
+          } else if (isAppIconLink(r.target)) {
+            var k = indexOf(r.target);
+            if (k < 0) dirty = track(r.target) || dirty;
+            else if (r.attributeName === "href" && r.target.getAttribute("href") !== applied) {
+              originals[k].href = r.target.getAttribute("href");
+              dirty = true;
+            }
+          }
+        }
+        if (dirty) paint();
+      } catch (e) {}
+    }
+
+    return {
+      // Idempotent — called with the wanted mark on every poll and after every local state change.
+      set: function (next) {
+        try {
+          next = MARKS[next] ? next : null;
+          if (next === state) return;
+          if (next && !document.head) return;   // nowhere to put it yet — left unset, so the next call retries
+          state = next;
+          if (!state) { restore(); return; }
+          collect();
+          if (!observer && typeof MutationObserver === "function") {
+            observer = new MutationObserver(onMutations);
+            observer.observe(document.head, { childList: true, subtree: true, attributes: true, attributeFilter: ["href", "rel"] });
+          }
+          paint();
+        } catch (e) {}
+      }
+    };
+  })();
+
+  // Which mark the tab wears, read off the same local state the overlay renders — so a human's click
+  // shows in the tab strip right away, not a poll later. Reserved outranks the rest: the server ends the
+  // session/pause the moment a tab is reserved, but our local copies of those only catch up on a poll.
+  // The reload hold is the human's own switch and lives alongside all of them, hence last.
+  function syncTabIcon() {
+    try {
+      tabIcon.set(tabReserve.isReserved() ? "reserved"
+        : overlay.isPaused() ? "paused"
+        : overlay.shown() ? "driving"
+        : reloadHold.isUserHolding() ? "reloadHeld"
+        : null);
+    } catch (e) {}
   }
 
   // Mount the menu once, as early as the DOM allows (the snippet runs in <head>, before <body> exists).
@@ -1655,6 +1883,7 @@
 
   function doOverlay(req) {
     if (req.show) overlay.show(); else overlay.hide();
+    syncTabIcon();
     return { ok: true, action: "overlay", shown: overlay.shown() };
   }
 
@@ -1854,12 +2083,13 @@
         // looking" like a pause: the session it ended must not trigger the catch-up reload.
         reloadHold.reconcile(data && data.holdReload, (data && data.paused) || tabReserve.isReserved(), data && data.killed, data && data.userHoldReload);
         reconcileHandoff(data && data.handoff);              // show/hide the "another agent wants in" prompt
+        syncTabIcon();                                       // the tab's favicon mark follows all of the above
         var reqs = (data && data.requests) || [];
         for (var i = 0; i < reqs.length; i++) dispatchEval(reqs[i]);
         setTimeout(pollEvalOnce, 0);     // immediately re-open the long-poll
       })["catch"](function () {
         // ky-ai-browser unreachable for a while → it (or the agent) is gone; don't strand the overlay.
-        if (Date.now() - lastPollOkAt > 8000) overlay.hide();
+        if (Date.now() - lastPollOkAt > 8000) { overlay.hide(); syncTabIcon(); }
         setTimeout(pollEvalOnce, 2000);  // back off, keep trying
       });
   }
