@@ -33,10 +33,13 @@ internal sealed class DevServer : IDisposable
 
     // Inject liveness: while a tool (ky-ai-browser) has a tag injected it heartbeats us; the watchdog
     // auto-reverts index.html if those stop, so a crashed/killed driver never leaves the app modified.
+    // While it's alive the watchdog instead re-applies the tag whenever something else rewrote the file
+    // without it (e.g. a custom serve builder that regenerates index.html on every `ng serve` start).
     private readonly object _injectSync = new();
     private readonly Timer _injectWatchdog;
     private bool _injectActive;
     private DateTimeOffset _lastInjectHeartbeat;
+    private (string Target, string Path, string Content)? _injected;
 
     public DevServer(SupervisorOptions opt, SupervisorConfig cfg)
     {
@@ -283,12 +286,14 @@ internal sealed class DevServer : IDisposable
             return JsonSerializer.Serialize(new { ok = false, error = "no inject target (this tool has none, or index.html was not found)" }, Json);
         try
         {
-            var html = File.ReadAllText(target);
-            var updated = HtmlInjector.Apply(html, path, content, InjectMarker);
-            if (updated is null)
-                return JsonSerializer.Serialize(new { ok = false, error = $"unsupported path '{path}' (use /html/head or /html/body)", file = target }, Json);
-            if (updated != html) File.WriteAllText(target, updated);
-            lock (_injectSync) { _injectActive = true; _lastInjectHeartbeat = DateTimeOffset.UtcNow; }
+            lock (_injectSync)
+            {
+                if (!ApplyInject(target, path, content))
+                    return JsonSerializer.Serialize(new { ok = false, error = $"unsupported path '{path}' (use /html/head or /html/body)", file = target }, Json);
+                _injectActive = true;
+                _lastInjectHeartbeat = DateTimeOffset.UtcNow;
+                _injected = (target, path, content);
+            }
             return JsonSerializer.Serialize(new { ok = true, file = target, marker = InjectMarker }, Json);
         }
         catch (Exception ex)
@@ -311,28 +316,65 @@ internal sealed class DevServer : IDisposable
     // Public hook so the host can revert on shutdown / self-heal on startup.
     public void RevertInject() { try { Uninject(); } catch { /* best-effort */ } }
 
-    // Strip the marked block from the default target. Returns true if something was removed.
+    // Strip the marked block from the injected file (or the default target). Returns true if something was removed.
     private bool Uninject()
     {
-        lock (_injectSync) _injectActive = false;
-        var target = ResolveTarget(null);
-        if (target is null || !File.Exists(target)) return false;
+        lock (_injectSync)
+        {
+            var target = _injected?.Target ?? ResolveTarget(null);
+            _injectActive = false;
+            _injected = null;
+            if (target is null || !File.Exists(target)) return false;
+            var html = File.ReadAllText(target);
+            if (!HtmlInjector.Contains(html, InjectMarker)) return false;
+            File.WriteAllText(target, HtmlInjector.Remove(html, InjectMarker));
+            return true;
+        }
+    }
+
+    // Writes the marked block into `target` (a no-op write is skipped). False for an unsupported path.
+    // Caller holds _injectSync.
+    private static bool ApplyInject(string target, string path, string content)
+    {
         var html = File.ReadAllText(target);
-        if (!HtmlInjector.Contains(html, InjectMarker)) return false;
-        File.WriteAllText(target, HtmlInjector.Remove(html, InjectMarker));
+        var updated = HtmlInjector.Apply(html, path, content, InjectMarker);
+        if (updated is null) return false;
+        if (updated != html) File.WriteAllText(target, updated);
         return true;
     }
 
-    // Watchdog: if the injector stopped heartbeating (crash/kill), auto-revert so index.html is never
-    // left with a stranded capture <script>.
+    // Watchdog tick. If the injector stopped heartbeating (crash/kill), auto-revert so index.html is never
+    // left with a stranded capture <script>. While it's alive, re-apply the tag if the file lost it.
     private void CheckInjectStale()
     {
         bool stale;
         lock (_injectSync)
             stale = _injectActive && DateTimeOffset.UtcNow - _lastInjectHeartbeat > TimeSpan.FromSeconds(InjectStaleSeconds);
-        if (!stale) return;
-        RevertInject();   // clears _injectActive via Uninject
-        lock (_ioSync) Console.WriteLine($"{Name} · inject heartbeat lost — reverted index.html");
+        if (stale)
+        {
+            RevertInject();   // clears _injectActive via Uninject
+            lock (_ioSync) Console.WriteLine($"{Name} · inject heartbeat lost — reverted index.html");
+            return;
+        }
+        if (EnsureInjected())
+            WriteLocal($"{Name} · index.html was rewritten without the injected tag — re-applied it");
+    }
+
+    // Re-applies the active inject when something else rewrote the file without it — the injector still
+    // believes its tag is live, so without this its page silently loses the connection until a full
+    // restart. Returns true if it had to re-apply. Internal so tests can drive it without the timer.
+    internal bool EnsureInjected()
+    {
+        lock (_injectSync)
+        {
+            if (!_injectActive || _injected is not { } inj) return false;
+            try
+            {
+                if (!File.Exists(inj.Target) || HtmlInjector.Contains(File.ReadAllText(inj.Target), InjectMarker)) return false;
+                return ApplyInject(inj.Target, inj.Path, inj.Content);
+            }
+            catch { return false; }   // file mid-rewrite/locked — the next tick retries
+        }
     }
 
     private string? ResolveTarget(string? file)

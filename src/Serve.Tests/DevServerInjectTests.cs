@@ -95,4 +95,38 @@ public class DevServerInjectTests
         using (var d = JsonDocument.Parse(dev.InjectHeartbeatJson()))
             Assert.False(d.RootElement.GetProperty("active").GetBoolean());
     }
+
+    [Fact]
+    public void EnsureInjected_reapplies_the_tag_after_the_file_was_rewritten_without_it()
+    {
+        var dir = Directory.CreateTempSubdirectory().FullName;
+        var idx = Path.Combine(dir, "index.html");
+        File.WriteAllText(idx, "<html><head></head></html>");
+        using var dev = New(dir, idx);
+        dev.InjectJson(null, "/html/head", "<script src=\"x\"></script>");
+
+        // e.g. a custom serve builder regenerating index.html from its template on `ng serve` start
+        File.WriteAllText(idx, "<html><head><title>regenerated</title></head></html>");
+
+        Assert.True(dev.EnsureInjected());
+        var after = File.ReadAllText(idx);
+        Assert.Contains("<title>regenerated</title>", after);
+        Assert.Contains("<script src=\"x\"></script>", after);
+        Assert.False(dev.EnsureInjected());   // tag present again → nothing to do
+    }
+
+    [Fact]
+    public void EnsureInjected_leaves_the_file_alone_after_uninject()
+    {
+        var dir = Directory.CreateTempSubdirectory().FullName;
+        var idx = Path.Combine(dir, "index.html");
+        const string original = "<html><head></head></html>";
+        File.WriteAllText(idx, original);
+        using var dev = New(dir, idx);
+        dev.InjectJson(null, "/html/head", "<script></script>");
+        dev.UninjectJson();
+
+        Assert.False(dev.EnsureInjected());
+        Assert.Equal(original, File.ReadAllText(idx));
+    }
 }

@@ -20,6 +20,9 @@ add-on). This package exists so a new framework seam can reuse the same hub/supe
   stripping.
 - **`HtmlInjector`** — the reversible `index.html` inject/uninject mechanism (`POST /inject`,
   `ky-ai-ng-inject` markers, self-heal) that `ky-ai-browser` drives through the supervisor.
+  While the injector heartbeats, the supervisor re-applies the tag whenever the file lost it: some
+  projects' serve builders (e.g. `@ky/mantic:serve`) regenerate `index.html` on every `ng serve`
+  start, so a dev-server `restart` would otherwise silently disconnect the page for good.
 - **`InitCommand` / `ShutdownCommand` / `UpdateCommand`** — the shared CLI commands each exe
   dispatches: `<tool> init` wires the tool into a Claude Code workspace (merges its MCP server into
   the nearest `.mcp.json` and its command allow-list + `enabledMcpjsonServers` into
