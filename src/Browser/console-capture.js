@@ -1478,7 +1478,8 @@
     var ownLink = null;    // stand-in when the app declares no icon (the browser then uses /favicon.ico)
     var observer = null;
     var paintGen = 0;      // bumped per paint and per restore; a slower image load that lost the race is dropped
-    var cache = {};        // base URL + "|" + state → painted data: URL
+    var bases = {};        // candidate list → the first of them the canvas can read
+    var cache = {};        // candidate list + "|" + state → painted data: URL (only when painted onto an icon)
 
     function isAppIconLink(n) {
       try {
@@ -1509,11 +1510,11 @@
       for (var i = 0; i < links.length; i++) if (isAppIconLink(links[i])) track(links[i]);
     }
 
-    // The icon to paint onto: the sharpest one the app declares (an SVG or sizes="any", else the largest
-    // sizes, else the last — the one a browser picks when nothing tells them apart). No link at all ⇒ the
-    // browser's implicit /favicon.ico.
-    function pickBase() {
-      var best = null, bestScore = -1;
+    // The icons to paint onto, sharpest first: an SVG or sizes="any", then by largest sizes, ties going to
+    // the later link (the one a browser picks when nothing tells them apart). Several, because the best
+    // may not be usable (see loadBase). No link at all ⇒ the browser's implicit /favicon.ico.
+    function candidates() {
+      var list = [];
       for (var i = 0; i < originals.length; i++) {
         var o = originals[i];
         if (!o.href || !o.link.isConnected) continue;
@@ -1521,10 +1522,45 @@
         var sizes = (o.link.getAttribute("sizes") || "").toLowerCase();
         if (sizes.indexOf("any") >= 0 || /svg/i.test(o.link.getAttribute("type") || "") || /\.svg(\?|#|$)/i.test(o.href)) score = Infinity;
         else while ((m = dims.exec(sizes))) score = Math.max(score, parseInt(m[1], 10));
-        if (score >= bestScore) { best = o; bestScore = score; }
+        try { list.push({ src: new URL(o.href, document.baseURI).href, score: score, at: i }); } catch (e) {}
       }
-      try { return new URL(best ? best.href : "/favicon.ico", document.baseURI).href; }
-      catch (e) { return location.origin + "/favicon.ico"; }
+      list.sort(function (a, b) { return b.score - a.score || b.at - a.at; });
+      var srcs = [];
+      for (var j = 0; j < list.length; j++) if (srcs.indexOf(list[j].src) < 0) srcs.push(list[j].src);
+      if (!srcs.length) {
+        try { srcs.push(new URL("/favicon.ico", document.baseURI).href); } catch (e) { srcs.push(location.origin + "/favicon.ico"); }
+      }
+      return srcs;
+    }
+
+    // Resolve the first candidate the canvas can actually read back. An icon on another origin is only
+    // readable with CORS (a logo on a CDN without CORS headers, say): asked for with CORS it fails to load,
+    // otherwise it would taint the canvas — either way it's skipped for the next one, and apps often also
+    // ship a same-origin or inline copy. A found icon is kept per candidate list; "none readable" is not,
+    // so an icon server that was briefly unreachable gets another chance on the next change. done(img|null).
+    function loadBase(srcs, done) {
+      var key = srcs.join("\n");
+      if (bases[key]) { done(bases[key]); return; }
+      var i = 0;
+      (function next() {
+        if (i >= srcs.length) { done(null); return; }
+        var img = new Image();
+        try {
+          var u = new URL(srcs[i]);
+          if (/^https?:$/.test(u.protocol) && u.origin !== location.origin) img.crossOrigin = "anonymous";
+        } catch (e) {}
+        img.onload = function () { if (readable(img)) { bases[key] = img; done(img); } else next(); };
+        img.onerror = next;
+        img.src = srcs[i++];
+      })();
+    }
+    function readable(img) {
+      try {
+        var g = document.createElement("canvas").getContext("2d");
+        g.drawImage(img, 0, 0, 1, 1);
+        g.getImageData(0, 0, 1, 1);   // throws on a tainted canvas
+        return true;
+      } catch (e) { return false; }
     }
 
     // Both kinds of mark get a thin white edge, which sets the red off both the app's icon and a dark tab
@@ -1545,34 +1581,22 @@
       ctx.restore();
     }
 
-    // Paint the mark onto the base icon (bottom-right corner). An icon we can't load or can't read back
-    // (a cross-origin one without CORS taints the canvas) still gets the state across: the mark alone,
-    // filling the whole icon.
-    function render(base, name, done) {
-      var key = base + "|" + name;
-      if (cache[key]) { done(cache[key]); return; }
-      function paint(img) {
-        var c = document.createElement("canvas");
-        c.width = c.height = SIZE;
-        var ctx = c.getContext("2d");
-        if (img) ctx.drawImage(img, 0, 0, SIZE, SIZE);
-        drawMark(ctx, MARKS[name], !img);
-        return c.toDataURL("image/png");
+    // Paint the mark onto the app's icon (bottom-right corner). With no readable icon at all it still gets
+    // the state across: the mark alone, filling the whole icon.
+    function draw(img, name) {
+      var c = document.createElement("canvas");
+      c.width = c.height = SIZE;
+      var ctx = c.getContext("2d");
+      if (img) {
+        // A small raster icon (an inline 16px one, say) scaled up by a whole factor stays crisp with
+        // nearest-neighbour; smoothing would blur it, and the browser scales it back down anyway.
+        var w = img.naturalWidth;
+        ctx.imageSmoothingEnabled = !(w > 0 && w < SIZE && SIZE % w === 0);
+        ctx.drawImage(img, 0, 0, SIZE, SIZE);
+        ctx.imageSmoothingEnabled = true;
       }
-      var img = new Image();
-      try {
-        var u = new URL(base);   // a CORS-enabled CDN icon stays readable; without CORS it errors → mark alone
-        if (/^https?:$/.test(u.protocol) && u.origin !== location.origin) img.crossOrigin = "anonymous";
-      } catch (e) {}
-      img.onload = function () {
-        var url;
-        try { url = paint(img); } catch (e) { try { url = paint(null); } catch (e2) { return; } }
-        cache[key] = url; done(url);
-      };
-      img.onerror = function () {
-        try { var url = paint(null); cache[key] = url; done(url); } catch (e) {}
-      };
-      img.src = base;
+      drawMark(ctx, MARKS[name], !img);
+      return c.toDataURL("image/png");
     }
 
     function apply(url) {
@@ -1592,9 +1616,14 @@
     }
 
     function paint() {
-      var gen = ++paintGen, name = state;
-      render(pickBase(), name, function (url) {
-        try { if (gen === paintGen && state === name) apply(url); } catch (e) {}
+      var gen = ++paintGen, name = state, srcs = candidates();
+      loadBase(srcs, function (img) {
+        try {
+          if (gen !== paintGen || state !== name) return;
+          if (!img) { apply(draw(null, name)); return; }
+          var key = srcs.join("\n") + "|" + name;
+          apply(cache[key] || (cache[key] = draw(img, name)));
+        } catch (e) {}
       });
     }
 

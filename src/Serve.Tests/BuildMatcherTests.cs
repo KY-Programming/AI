@@ -55,6 +55,78 @@ public class BuildMatcherTests
     public void Ng_ignores_non_location_lines()
         => Assert.Null(new NgBuildMatcher().TryParseLocation("    at someStackFrame (thing.js:10:5)"));
 
+    // ── Angular / webpack (`:browser` builder, lines as captured from Angular CLI 18) ──
+
+    [Theory]
+    [InlineData("√ Compiled successfully.", LineKind.SettledSuccess)]
+    [InlineData("× Failed to compile.", LineKind.SettledFailed)]
+    [InlineData("Error: src/app/services/app.service.ts:7:35 - error TS2307: Cannot find module '@xws/ui' or its corresponding type declarations.", LineKind.Error)]
+    [InlineData("Warning: src/app/app.component.ts:9:29 - warning NG8107: The left side of this optional chain operation does not include 'null' or 'undefined' in its type.", LineKind.Warning)]
+    [InlineData("./node_modules/@syncfusion/ej2-angular-grids/fesm2020/syncfusion-ej2-angular-grids.mjs:527:50-54 - Error: export 'Grid' (imported as 'Grid') was not found in '@syncfusion/ej2-grids' (module has no exports)", LineKind.Error)]
+    [InlineData("./src/styles.css - Error: Module build failed (from ./node_modules/css-loader/dist/cjs.js):", LineKind.Error)]
+    [InlineData("Build at: 2026-10-01T15:38:09.690Z - Hash: b8fe39c7f216f4e7 - Time: 131ms", LineKind.None)]
+    [InlineData("- Generating browser application bundles (phase: setup)...", LineKind.None)]
+    public void Ng_webpack_classify(string line, LineKind expected)
+        => Assert.Equal(expected, new NgBuildMatcher().Classify(line, building: true));
+
+    [Fact]
+    public void Ng_webpack_bundle_complete_opens_a_cycle_but_never_settles_it()
+    {
+        var m = new NgBuildMatcher();
+        Assert.Equal(LineKind.BuildStart, m.Classify("√ Browser application bundle generation complete.", building: false));
+        Assert.Equal(LineKind.None, m.Classify("√ Browser application bundle generation complete.", building: true));
+    }
+
+    [Fact]
+    public void Ng_webpack_bare_error_line_counts_only_after_a_blank_line()
+    {
+        var m = new NgBuildMatcher();
+        Assert.Equal(LineKind.None, m.Classify("", building: true));
+        Assert.Equal(LineKind.Error, m.Classify("Error: bundle initial exceeded maximum budget.", building: true));
+        // A module error's continuation ("Module build failed (…):" ⏎ "Error: Can't resolve …").
+        Assert.Equal(LineKind.Error, m.Classify("./src/styles.css - Error: Module build failed (from ./node_modules/css-loader/dist/cjs.js):", building: true));
+        Assert.Equal(LineKind.None, m.Classify("Error: Can't resolve 'missing.css' in 'C:\\repo\\src'", building: true));
+    }
+
+    [Fact]
+    public void Ng_parses_webpack_compiler_diagnostic_with_inline_location()
+    {
+        var d = new NgBuildMatcher().TryParseDiagnostic(
+            "Error: src/app/services/app.service.ts:41:22 - error NG2003: No suitable injection token for parameter 'localizationService' of class 'AppService'.");
+
+        Assert.NotNull(d);
+        Assert.Equal("error", d!.Severity);
+        Assert.Equal("src/app/services/app.service.ts", d.File);
+        Assert.Equal(41, d.Line);
+        Assert.Equal(22, d.Column);
+        Assert.StartsWith("NG2003: No suitable injection token", d.Message);
+    }
+
+    [Fact]
+    public void Ng_parses_webpack_module_diagnostic_with_column_range()
+    {
+        var d = new NgBuildMatcher().TryParseDiagnostic(
+            "./node_modules/@syncfusion/ej2-angular-grids/fesm2020/syncfusion-ej2-angular-grids.mjs:527:50-54 - Error: export 'Grid' (imported as 'Grid') was not found in '@syncfusion/ej2-grids' (module has no exports)");
+
+        Assert.NotNull(d);
+        Assert.Equal("error", d!.Severity);
+        Assert.Equal("./node_modules/@syncfusion/ej2-angular-grids/fesm2020/syncfusion-ej2-angular-grids.mjs", d.File);
+        Assert.Equal(527, d.Line);
+        Assert.Equal(50, d.Column);
+        Assert.StartsWith("export 'Grid'", d.Message);
+    }
+
+    [Fact]
+    public void Ng_parses_webpack_module_diagnostic_without_location()
+    {
+        var d = new NgBuildMatcher().TryParseDiagnostic(
+            "./src/styles.css - Error: Module build failed (from ./node_modules/css-loader/dist/cjs.js):");
+
+        Assert.Equal("./src/styles.css", d!.File);
+        Assert.Null(d.Line);
+        Assert.StartsWith("Module build failed", d.Message);
+    }
+
     // ── .NET ──
 
     [Theory]

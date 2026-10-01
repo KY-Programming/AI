@@ -248,8 +248,12 @@ tool surface all live in the shared **[`KY.AI.Serve`](../Serve)** library.
 - `Program.cs` — arg parsing (`serve` / `run` / `nx` / `shutdown` / `init` / `update` / one-shot) and
   the Angular `SupervisorConfig` / `HubConfig`: CLI resolution (`node_modules\@angular\cli`,
   `node_modules\nx`), the npm-script and nx-target runners, watched extensions, port and names.
-- `NgBuildMatcher.cs` — maps ng/esbuild output lines to build-start / settle / error / warning
-  verdicts and parses esbuild's two-line diagnostics into `{severity, file, line, col, message}`.
+- `NgBuildMatcher.cs` — maps ng output lines (esbuild `:application` and webpack `:browser`) to
+  build-start / settle / error / warning verdicts and parses diagnostics into
+  `{severity, file, line, col, message}`. Webpack traps: its `Browser application bundle generation
+  complete` line comes *before* the errors and is printed on failure too, so it opens a cycle and
+  never settles one (webpack prints no other rebuild-start line); the verdict is `Compiled
+  successfully` / `Failed to compile` on stdout.
 - `NgIndexResolver.cs` — resolves the app's `index.html` (incl. `angular.json` custom-index) for the
   `ky-ai-browser` inject.
 

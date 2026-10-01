@@ -112,6 +112,87 @@ public class BuildTrackerTests
         Assert.Contains("Cannot find name 'foo'", d.Message);
     }
 
+    // webpack cold start (stderr and stdout lines in the order Angular CLI 18 emits them): the
+    // "bundle generation complete" marker precedes the errors and must not settle the build.
+    [Fact]
+    public void Webpack_cold_start_with_errors_settles_failed()
+    {
+        var t = new BuildTracker(new NgBuildMatcher());
+        t.MarkBuilding();
+        t.Observe("- Generating browser application bundles (phase: setup)...");
+        t.Observe("√ Browser application bundle generation complete.");
+
+        Assert.Equal("building", t.Snapshot().Status);
+
+        t.Observe("");
+        t.Observe("Error: src/app/services/app.service.ts:7:35 - error TS2307: Cannot find module '@xws/ui' or its corresponding type declarations.");
+        t.Observe("");
+        t.Observe("7 import { UiModule } from '@xws/ui';");
+        t.Observe("                                    ~~~~~~~~");
+        t.Observe("");
+        t.Observe("./node_modules/@syncfusion/ej2-angular-grids/fesm2020/syncfusion-ej2-angular-grids.mjs:527:50-54 - Error: export 'Grid' (imported as 'Grid') was not found in '@syncfusion/ej2-grids' (module has no exports)");
+        t.Observe("");
+        t.Observe("× Failed to compile.");
+
+        var r = t.Snapshot();
+        Assert.Equal("failed", r.Status);
+        Assert.Equal(2, r.Errors);
+        Assert.Equal(1, r.Seq);
+        Assert.Equal("× Failed to compile.", r.SettledBy);
+        var d = r.Diagnostics[0];
+        Assert.Equal("src/app/services/app.service.ts", d.File);
+        Assert.Equal(7, d.Line);
+        Assert.Equal(35, d.Column);
+    }
+
+    // A webpack rebuild prints no start line; the "bundle generation complete" marker opens the new
+    // cycle, so the previous build's errors are cleared and seq advances.
+    [Fact]
+    public void Webpack_rebuild_starts_a_new_cycle_at_the_bundle_marker()
+    {
+        var t = new BuildTracker(new NgBuildMatcher());
+        t.MarkBuilding();
+        t.Observe("√ Browser application bundle generation complete.");
+        t.Observe("");
+        t.Observe("Error: src/app/app.component.ts:3:19 - error TS2307: Cannot find module 'gibt-es-nicht' or its corresponding type declarations.");
+        t.Observe("× Failed to compile.");
+
+        t.Observe("√ Browser application bundle generation complete.");
+        t.Observe("");
+        t.Observe("Warning: src/app/app.component.ts:9:29 - warning NG8107: The left side of this optional chain operation does not include 'null' or 'undefined' in its type.");
+        t.Observe("√ Compiled successfully.");
+
+        var r = t.Snapshot();
+        Assert.Equal("success", r.Status);
+        Assert.Equal(2, r.Seq);
+        Assert.Equal(0, r.Errors);
+        Assert.Equal(1, r.Warnings);
+        Assert.Equal("√ Browser application bundle generation complete.", r.StartedBy);
+    }
+
+    // A multi-line webpack module error ("… - Error: Module build failed (…):" followed by
+    // "Error: Can't resolve …") is one diagnostic, not two.
+    [Fact]
+    public void Webpack_module_error_continuation_is_not_counted_twice()
+    {
+        var t = new BuildTracker(new NgBuildMatcher());
+        t.MarkBuilding();
+        t.Observe("√ Browser application bundle generation complete.");
+        t.Observe("");
+        t.Observe("./src/styles.css - Error: Module build failed (from ./node_modules/css-loader/dist/cjs.js):");
+        t.Observe("Error: Can't resolve 'missing-file.css' in 'C:\\repo\\src'");
+        t.Observe("");
+        t.Observe("./src/styles.css?ngGlobalStyle - Error: Module build failed (from ./node_modules/mini-css-extract-plugin/dist/loader.js):");
+        t.Observe("HookWebpackError: Module build failed (from ./node_modules/css-loader/dist/cjs.js):");
+        t.Observe("Error: Can't resolve 'missing-file.css' in 'C:\\repo\\src'");
+        t.Observe("");
+        t.Observe("× Failed to compile.");
+
+        var r = t.Snapshot();
+        Assert.Equal("failed", r.Status);
+        Assert.Equal(2, r.Errors);
+    }
+
     [Fact]
     public void A_new_build_clears_the_previous_diagnostics_and_warnings()
     {
