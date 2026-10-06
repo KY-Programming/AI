@@ -33,8 +33,14 @@ ky-ai-ng serve --after-start ky-ai-browser -y
 1. On start it finds the running `ky-ai-ng` frontend automatically and injects a tiny capture `<script>` into the app's `index.html`.
 2. The page reloads, and from then on the agent can read the browser console and inspect or drive
    the live page over MCP.
-3. On **Ctrl+C** the script is removed and `index.html` is restored — and if `ky-ai-browser` ever
-   dies without cleaning up, `ky-ai-ng` reverts the file on its own, so it's never left modified.
+3. On **Ctrl+C** (or `ky-ai-ng shutdown`) the script is removed and `index.html` is restored — and if
+   `ky-ai-browser` ever dies without cleaning up, `ky-ai-ng` reverts the file on its own.
+   `ky-ai-ng` itself can only clean up when it's *asked* to stop: hard-killing its process tree
+   (Task Manager, a launcher that terminates instead of sending Ctrl+C) leaves the script in
+   `index.html` until the next `ky-ai-ng serve` of that app, which strips it on start.
+4. After the machine sleeps, `ky-ai-ng` briefly takes `ky-ai-browser` for dead (the clock jumped past
+   its heartbeat window) and reverts; `ky-ai-browser` notices on its next heartbeat and re-injects, so
+   the page reconnects after the next reload.
 
 ## Usage
 

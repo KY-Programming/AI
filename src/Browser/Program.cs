@@ -477,13 +477,16 @@ internal static class Program
         });
         app.Urls.Add($"http://127.0.0.1:{restPort}");
 
-        // The heartbeat keeps ky-ai-ng from auto-reverting our inject; cancel it before we uninject so
-        // there's no race. On shutdown always revert and deregister — Ctrl+C or a crash mid-run leaves
-        // index.html clean and the hub's registry tidy.
+        // The heartbeat keeps ky-ai-ng from auto-reverting our inject (and re-injects if it did); stop it
+        // and wait it out before we uninject, so an in-flight re-inject can't land after the revert. On
+        // shutdown always revert and deregister — Ctrl+C or a crash mid-run leaves index.html clean and
+        // the hub's registry tidy.
         var stopping = new CancellationTokenSource();
+        Task? heartbeat = null;
         app.Lifetime.ApplicationStopping.Register(() =>
         {
             stopping.Cancel();
+            try { heartbeat?.Wait(TimeSpan.FromSeconds(5)); } catch { /* loop ended */ }
             try { if (useHub) DeregisterAsync(hubUrl, instanceName).GetAwaiter().GetResult(); } catch { /* hub gone */ }
             try { UninjectAsync(ngControlUrl).GetAwaiter().GetResult(); } catch { /* ng gone — it self-heals on next start */ }
         });
@@ -521,7 +524,7 @@ internal static class Program
         }
 
         // Keep the inject alive (and pull ng's build seq for correlation) until we shut down.
-        _ = HeartbeatLoopAsync(ngControlUrl, stopping.Token);
+        heartbeat = HeartbeatLoopAsync(ngControlUrl, scriptTag, stopping.Token);
 
         var rows = new List<string>
         {
@@ -685,7 +688,11 @@ internal static class Program
     // Ping ng every 5s so it knows we're alive (else it auto-reverts the inject), and pull the current
     // build seq back for console↔build correlation. Best-effort: if ng is briefly unreachable we keep
     // trying; if we stay gone, ng's watchdog reverts.
-    private static async Task HeartbeatLoopAsync(string controlUrl, CancellationToken ct)
+    // ng answers `active:false` once its watchdog has reverted the inject although we're still alive —
+    // typically after the machine slept: the wall clock jumps past the stale window, so on wake ng
+    // takes us for dead. Its watchdog only re-applies while the inject is active, so nothing else
+    // would ever bring the tag back; we re-inject ourselves.
+    private static async Task HeartbeatLoopAsync(string controlUrl, string scriptTag, CancellationToken ct)
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(4) };
         var url = controlUrl.TrimEnd('/') + "/inject/heartbeat";
@@ -700,6 +707,9 @@ internal static class Program
                     using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
                     if (doc.RootElement.TryGetProperty("buildSeq", out var bs) && bs.TryGetInt64(out var seq))
                         Interlocked.Exchange(ref Capture.BuildSeq, seq);
+                    if (doc.RootElement.TryGetProperty("active", out var active) && active.ValueKind == JsonValueKind.False
+                        && !ct.IsCancellationRequested && await InjectAsync(controlUrl, scriptTag))
+                        Console.WriteLine("ky-ai-browser · ky-ai-ng had reverted the inject (e.g. after sleep) — re-applied it");
                 }
             }
             catch (OperationCanceledException) { break; }

@@ -65,9 +65,12 @@ public static class SupervisorHost
         app.Lifetime.ApplicationStopping.Register(() =>
         {
             stopping.Cancel();
+            // Reap the --after-start child (ky-ai-browser) BEFORE reverting: alive, its heartbeat would
+            // re-inject. Revert before the network calls below, so a short shutdown window still
+            // leaves index.html clean.
             try { afterStart?.Dispose(); } catch { /* reap the --after-start child tree */ }
-            try { if (opt.UseHub) DeregisterAsync(opt.HubUrl, opt.Name).GetAwaiter().GetResult(); } catch { /* hub gone */ }
             try { server.RevertInject(); } catch { /* leave index.html clean even if ky-ai-browser died */ }
+            try { if (opt.UseHub) DeregisterAsync(opt.HubUrl, opt.Name).GetAwaiter().GetResult(); } catch { /* hub gone */ }
             try { server.StopAsync().GetAwaiter().GetResult(); } catch { /* shutting down */ }
         });
 
