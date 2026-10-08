@@ -227,6 +227,78 @@ public class BrowserToolsTests
     }
 
     [Fact]
+    public async Task Set_network_rules_carries_normalized_rules()
+    {
+        var r = await Enqueued(() => BrowserTools.SetNetworkRules(new[]
+        {
+            new NetworkRule { Url = "*/api/orders*", Method = " get ", DelayMs = 3000 },
+            new NetworkRule { Url = "/api/fail", Status = 503, Body = "{}" },
+        }));
+        Assert.Equal("network", r.Kind);
+        Assert.Equal(2, r.Rules!.Count);
+        Assert.Equal("GET", r.Rules[0].Method);
+        Assert.Equal(3000, r.Rules[0].DelayMs);
+        Assert.Equal(503, r.Rules[1].Status);
+    }
+
+    [Theory]
+    [InlineData("", null, false, null, null)]           // no url
+    [InlineData("/x", null, false, null, null)]         // does nothing
+    [InlineData("/x", 200_000, false, null, null)]      // delay too long
+    [InlineData("/x", null, true, 500, null)]           // block and status
+    [InlineData("/x", null, false, 99, null)]           // status out of range
+    [InlineData("/x", 100, false, null, "body")]        // body without status
+    public async Task Set_network_rules_rejects_invalid_rules(string url, int? delayMs, bool block, int? status, string? body)
+    {
+        var res = await BrowserTools.SetNetworkRules(new[] { new NetworkRule { Url = url, DelayMs = delayMs, Block = block, Status = status, Body = body } });
+        Assert.Contains("\"ok\":false", res);
+    }
+
+    [Fact]
+    public async Task Set_network_rules_is_gated_and_network_status_is_not()
+    {
+        var ch = new EvalChannel("t");   // interaction NOT opened
+        BrowserTools.ForwardHook = (_, waitMs, req, _tab) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        try
+        {
+            Assert.Contains("needsInteraction", await BrowserTools.SetNetworkRules(new[] { new NetworkRule { Url = "/x", Block = true } }));
+            Assert.Empty(ch.NetworkRules);
+
+            var task = BrowserTools.NetworkStatus();
+            Assert.Equal("networkStatus", Assert.Single(await ch.PollAsync(1000, default)).Kind);
+            ch.Complete("t", "1", "{\"ok\":true}");
+            await task;
+        }
+        finally { BrowserTools.ForwardHook = null; }
+    }
+
+    [Fact]
+    public async Task Network_rules_live_and_die_with_the_session()
+    {
+        var ch = new EvalChannel("t");
+        ch.SetInteraction(true);
+        BrowserTools.ForwardHook = (_, waitMs, req, _tab) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        try
+        {
+            var task = BrowserTools.SetNetworkRules(new[] { new NetworkRule { Url = "/api", DelayMs = 500 } });
+            var req = Assert.Single(await ch.PollAsync(1000, default));
+            Assert.Single(ch.NetworkRules);   // stored before the page ran it, so a reloading page still gets them
+            ch.Complete("t", req.Id, "{\"ok\":true}");
+            await task;
+
+            ch.SetInteraction(true);           // start_interaction again inside the session keeps them
+            Assert.Single(ch.NetworkRules);
+
+            ch.SetPaused(true);                // any way the session ends switches them off …
+            Assert.Empty(ch.NetworkRules);
+            ch.SetPaused(false);
+            ch.SetInteraction(true);           // … and the next session starts clean
+            Assert.Empty(ch.NetworkRules);
+        }
+        finally { BrowserTools.ForwardHook = null; }
+    }
+
+    [Fact]
     public async Task Reload_page_is_gated()
     {
         // A reload wipes whatever is on screen — possibly the user's own test — so it needs a session.

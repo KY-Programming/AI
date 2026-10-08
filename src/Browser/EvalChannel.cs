@@ -22,6 +22,8 @@ namespace KY.AI.Browser;
 //   read_component → kind "component" (snapshot the Angular component's bound state, signals resolved)
 //   batch       → kind "batch"  (run a sequence of the above in one page round-trip)
 //   start/stop_interaction → kind "overlay" (show/hide the supervision overlay)
+//   set_network_rules → kind "network" (replace the session's request rules; see NetworkRules)
+//   network_status    → kind "networkStatus" (the active rules with hit counts + in-flight requests)
 //
 // Interaction is gated: the manipulation tools require InteractionActive (set by start_interaction)
 // so the human always sees the supervision overlay while the agent drives the page. The flag is also
@@ -151,6 +153,9 @@ internal sealed class EvalChannel
     public bool InteractionActive => _interactionActive;
     public void SetInteraction(bool active)
     {
+        // A session opened from no session starts without request rules (see NetworkRules); a repeated
+        // start_interaction inside a running session keeps them.
+        if (active && !_interactionActive) _networkRules = Array.Empty<NetworkRule>();
         _interactionActive = active;
         // Opening a session is by definition a CLEAN one: a fresh start_interaction is how the human's
         // "ok, go ahead" (said in chat after a hard Stop, not clicked in the browser — there is no revive
@@ -174,6 +179,16 @@ internal sealed class EvalChannel
     // (SetReloadReleased) without ending the agent's session; the next one re-arms (see SetInteraction).
     // OR-ed with the human's own manual hold below, which is independent of any session.
     public bool HoldReload => (_interactionActive && !_reloadReleased) || _userHoldReload;
+
+    // The agent's request rules (set_network_rules): delay, block or fail requests matching a URL pattern,
+    // applied page-side by the snippet's fetch/XHR wrappers. They belong to the session — derived like the
+    // session hold above, so every way a session ends (stop_interaction, Pause, Stop, reservation, a lapsed
+    // lease) switches them off without each path having to clear them, and a fresh session starts clean
+    // (see SetInteraction). Echoed in every poll so a reload mid-session re-applies them; the snippet also
+    // keeps a sessionStorage copy, because the app's first requests go out before that poll returns.
+    private volatile IReadOnlyList<NetworkRule> _networkRules = Array.Empty<NetworkRule>();
+    public IReadOnlyList<NetworkRule> NetworkRules => _interactionActive ? _networkRules : Array.Empty<NetworkRule>();
+    public void SetNetworkRules(IReadOnlyList<NetworkRule>? rules) => _networkRules = rules ?? Array.Empty<NetworkRule>();
 
     // The human's own hold, toggled from the overlay menu ("Stop Angular reloads") — for the case the
     // session-scoped hold above can't cover: the human is testing something by hand while an agent keeps
@@ -435,6 +450,8 @@ internal enum PollAdmit { Proceed, Fork }
 //   component — Selector (read the Angular component's bound state on/above the element)
 //   batch  — Actions (a list of steps run in order, in one round-trip)
 //   overlay— Show (true ⇒ show the supervision overlay, false ⇒ hide it)
+//   network— Rules (the full replacement set; empty ⇒ clear)
+//   networkStatus — (none)
 internal sealed record EvalRequest
 {
     public required string Id { get; init; }
@@ -507,8 +524,26 @@ internal sealed record EvalRequest
     public IReadOnlyList<string>? Fields { get; init; }
     public int? Depth { get; init; }
 
+    // network — the session's request rules, replacing the previous set
+    public IReadOnlyList<NetworkRule>? Rules { get; init; }
+
     // advisory page-side budget (wait uses it as its poll deadline)
     public int TimeoutMs { get; init; } = 5000;
+}
+
+// One request rule of set_network_rules. Url is matched against the request's absolute URL, case-
+// insensitively: with a `*` it's a glob over the whole URL, without one a substring. Method (optional)
+// narrows it to one HTTP method. The first matching rule wins. A match waits DelayMs, then either goes
+// out unchanged, fails as a network error (Block), or is answered locally with Status (+ Body) without
+// reaching the server. Serialized camelCase to the page, which applies it in its fetch/XHR wrappers.
+public sealed record NetworkRule
+{
+    public required string Url { get; init; }
+    public string? Method { get; init; }
+    public int? DelayMs { get; init; }
+    public bool Block { get; init; }
+    public int? Status { get; init; }
+    public string? Body { get; init; }
 }
 
 // One step of a `batch`: an Action (click|move|key|type|wait|scroll|focus|styles|query|eval|sleep) plus

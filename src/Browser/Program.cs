@@ -308,6 +308,7 @@ internal static class Program
                 claimed = poll.Claimed,
                 handoff = poll.Handoff,
                 reassignTabId = poll.ReassignTabId,   // non-null ⇒ duplicate tab: snippet re-keys to this id
+                network = poll.Network,               // the session's request rules (empty outside a session)
             }, EvalJson);
         });
         app.MapMethods("/__kyai/eval/result", new[] { "OPTIONS" }, (HttpContext ctx) =>

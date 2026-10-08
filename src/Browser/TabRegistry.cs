@@ -144,7 +144,7 @@ internal sealed class TabRegistry
         {
             string reassign;
             lock (_sync) reassign = MintTabId();
-            return new TabPoll(Array.Empty<EvalRequest>(), false, false, false, false, false, false, ch.TabId, false, null, reassign);
+            return new TabPoll(Array.Empty<EvalRequest>(), false, false, false, false, false, false, ch.TabId, false, null, reassign, Array.Empty<NetworkRule>());
         }
 
         if (!string.IsNullOrEmpty(pageLoadId)) ch.CurrentPageLoadId = pageLoadId;
@@ -162,7 +162,7 @@ internal sealed class TabRegistry
             var reqs = await ch.PollAsync(waitMs, ct);
             var handoff = HandoffFor(ch);
             return new TabPoll(reqs, ch.InteractionActive, ch.Paused, ch.Killed, ch.HoldReload,
-                ch.UserHoldReload, ch.Reserved, ch.TabId, claimed, handoff, null);
+                ch.UserHoldReload, ch.Reserved, ch.TabId, claimed, handoff, null, ch.NetworkRules);
         }
         finally
         {
@@ -874,7 +874,8 @@ internal sealed class TabRegistry
 // "this tab's". `claimed` acks a presented claim ticket; `handoff` asks this tab to show the prompt.
 // ReassignTabId is set only when this poll came from a DUPLICATE tab colliding on a shared tabId: the
 // snippet must overwrite its sessionStorage tabId with this value and re-poll under it (see the snippet's
-// pollEvalOnce). Null on every normal poll.
+// pollEvalOnce). Null on every normal poll. Network is the session's request rules (empty outside a
+// session), so a reloaded tab re-applies them (see EvalChannel.NetworkRules).
 internal sealed record TabPoll(
     IReadOnlyList<EvalRequest> Requests,
     bool InteractionActive,
@@ -886,7 +887,8 @@ internal sealed record TabPoll(
     string TabId,
     bool Claimed,
     HandoffInfo? Handoff,
-    string? ReassignTabId);
+    string? ReassignTabId,
+    IReadOnlyList<NetworkRule> Network);
 
 // The "another agent wants in" prompt payload (serialized camelCase → {ticket, agentLabel, autoShareMs},
 // which the snippet reads). Typed rather than anonymous so the instance tests can assert on it.

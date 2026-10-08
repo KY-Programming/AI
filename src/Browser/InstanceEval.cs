@@ -27,9 +27,10 @@ internal static class InstanceEval
     };
 
     // reload counts: it throws away whatever is on screen — a human mid-test in that tab included — so it
-    // needs an open session on a tab the agent owns, like navigate.
+    // needs an open session on a tab the agent owns, like navigate. network counts too: slowed or failing
+    // requests change what the app shows, and the rules live and die with the session.
     public static bool IsManipulationKind(string? kind) =>
-        kind is "click" or "move" or "key" or "type" or "scroll" or "focus" or "navigate" or "reload";
+        kind is "click" or "move" or "key" or "type" or "scroll" or "focus" or "navigate" or "reload" or "network";
 
     // Gate, then enqueue + await. `ch` is null only if capture isn't running (defensive — an instance
     // always has its channel); waitMs is how long to park the call waiting on the page.
@@ -54,6 +55,11 @@ internal static class InstanceEval
             return NeedsInteraction();
         else if (isManipulationBatch && !ch.InteractionActive)
             return NeedsInteraction();
+
+        // Stored before the page sees them, so the poll that delivers this request already carries the
+        // same set — and a page that misses the request (reloading right now) still picks them up.
+        if (string.Equals(req.Kind, "network", StringComparison.Ordinal))
+            ch.SetNetworkRules(req.Rules);
 
         return await ch.RequestAsync(id => req with { Id = id }, waitMs, CancellationToken.None);
     }

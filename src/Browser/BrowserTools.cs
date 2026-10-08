@@ -211,12 +211,12 @@ internal static class BrowserTools
 
     // ── interaction (synthetic; see the type header) ──
     //
-    // GATED: click/move/send_key/type_text/scroll/focus/navigate/reload_page require start_interaction first, which shows
+    // GATED: click/move/send_key/type_text/scroll/focus/navigate/reload_page/set_network_rules require start_interaction first, which shows
     // the user a fixed red overlay with an animated cursor so they can see the agent driving the page.
     // Call stop_interaction when done. The gate is enforced by the capture instance (it owns the flag).
 
     [McpServerTool(Name = "start_interaction"), Description(
-        "Open supervised interaction — REQUIRED before click/move/send_key/type_text/scroll/focus/navigate/reload_page. It draws " +
+        "Open supervised interaction — REQUIRED before click/move/send_key/type_text/scroll/focus/navigate/reload_page/set_network_rules. It draws " +
         "a fixed, non-interactable red frame over the app with a cursor icon, so the user can plainly see the " +
         "agent is driving the page; each action then animates that cursor (ripple on click, key cap on a key " +
         "press, the cursor gliding on move). Call stop_interaction when you're finished. Returns {ok, shown, tabId} " +
@@ -484,6 +484,57 @@ internal static class BrowserTools
         return Eval(project, budget + 1500, new EvalRequest
         { Id = "", Kind = "navigate", Path = path, Replace = replace, TimeoutMs = budget }, tab);
     }
+
+    [McpServerTool(Name = "set_network_rules"), Description(
+        "Delay, block or fail the page's own HTTP requests (fetch and XMLHttpRequest, so Angular's HttpClient " +
+        "either way) by URL pattern — the way to see loading states, spinners and error handling for real " +
+        "instead of setting signals by hand. `rules` REPLACES the whole set; [] clears it. Each rule: `url` " +
+        "(matched case-insensitively against the absolute URL: with `*` a glob over the whole URL, e.g. " +
+        "\"*/api/orders*\"; without, a substring), optional `method`, then `delayMs` (hold it back that long, " +
+        "max 120000) and/or ONE outcome — `block:true` (fails as a network error: status 0 / fetch rejects) or " +
+        "`status` 200–599 with optional `body` (answered locally, never reaches the server). A rule with only " +
+        "delayMs lets the request through after the delay. First matching rule wins. REQUIRES start_interaction: " +
+        "the rules belong to your session — they survive page reloads within it (so bootstrap loaders are " +
+        "testable: set rules, then reload_page) and are cleared when the session ends (stop_interaction, the " +
+        "user's Pause/Stop, losing the tab). The overlay badge shows the user that rules are active. Returns " +
+        "network_status's shape. Omit project when only one capture is registered.")]
+    public static Task<string> SetNetworkRules(
+        [Description("The complete rule set (replaces the previous one); [] clears all rules")] NetworkRule[] rules,
+        [Description("Max ms to wait for the page (default 5000)")] int timeoutMs = 5000,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
+        [Description("Project name; omit when only one capture is registered")] string? project = null)
+    {
+        rules ??= Array.Empty<NetworkRule>();
+        if (rules.Length > MaxNetworkRules) return Task.FromResult(Bad($"at most {MaxNetworkRules} rules"));
+        foreach (var r in rules)
+        {
+            if (string.IsNullOrWhiteSpace(r.Url)) return Task.FromResult(Bad("every rule needs a url pattern"));
+            if (r.DelayMs is < 0 or > 120_000) return Task.FromResult(Bad($"rule '{r.Url}': delayMs must be 0–120000"));
+            if (r.Status is { } s && (s < 200 || s > 599)) return Task.FromResult(Bad($"rule '{r.Url}': status must be 200–599 (use block:true for a network error)"));
+            if (r.Block && r.Status is not null) return Task.FromResult(Bad($"rule '{r.Url}': block and status are exclusive"));
+            if (r.Body is not null && r.Status is null) return Task.FromResult(Bad($"rule '{r.Url}': body needs a status"));
+            if (!r.Block && r.Status is null && r.DelayMs is null or 0) return Task.FromResult(Bad($"rule '{r.Url}': does nothing — give it delayMs, block or status"));
+        }
+        var normalized = rules.Select(r => r with { Method = string.IsNullOrWhiteSpace(r.Method) ? null : r.Method.Trim().ToUpperInvariant() }).ToArray();
+        var budget = Clamp(timeoutMs);
+        return Eval(project, budget + 1500, new EvalRequest { Id = "", Kind = "network", Rules = normalized, TimeoutMs = budget }, tab);
+    }
+
+    [McpServerTool(Name = "network_status"), Description(
+        "Show the page's request activity: the active set_network_rules rules, each with `hits` (how many " +
+        "requests it caught since it was set — confirms your pattern matches), and `pending` — the app's " +
+        "fetch/XHR requests in flight right now ({kind, method, url, ageMs}, oldest first, capped) plus " +
+        "`pendingCount`. Ungated read. Omit project when only one capture is registered.")]
+    public static Task<string> NetworkStatus(
+        [Description("Max ms to wait for the page (default 5000)")] int timeoutMs = 5000,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
+        [Description("Project name; omit when only one capture is registered")] string? project = null)
+    {
+        var budget = Clamp(timeoutMs);
+        return Eval(project, budget + 1500, new EvalRequest { Id = "", Kind = "networkStatus", TimeoutMs = budget }, tab);
+    }
+
+    private const int MaxNetworkRules = 20;
 
     [McpServerTool(Name = "batch"), Description(
         "Run a sequence of actions in ONE page round-trip — much faster than separate calls for a multi-step " +

@@ -365,11 +365,11 @@
       })["catch"](function () { /* server gone — nothing to do */ });
     } catch (e) { /* never throw into the app */ }
   }
-  function onUserPause() { try { overlay.showPaused(); } catch (e) {} syncTabIcon(); postInteractionOverride(INTERACTION_PAUSE); }
+  function onUserPause() { try { overlay.showPaused(); net.clear(); } catch (e) {} syncTabIcon(); postInteractionOverride(INTERACTION_PAUSE); }
   function onUserResume() { try { overlay.clearPaused(); } catch (e) {} syncTabIcon(); postInteractionOverride(INTERACTION_RESUME); }
-  function onUserKill() { try { overlay.showKilled(); } catch (e) {} syncTabIcon(); postInteractionOverride(INTERACTION_KILL); }
+  function onUserKill() { try { overlay.showKilled(); net.clear(); } catch (e) {} syncTabIcon(); postInteractionOverride(INTERACTION_KILL); }
   // Shift-click a Stop icon = stop EVERY agent's tab at once (handy when several are driving in parallel).
-  function onUserKillAll() { try { overlay.showKilled(); } catch (e) {} syncTabIcon(); postInteractionOverride(INTERACTION_KILL, { scope: "all" }); }
+  function onUserKillAll() { try { overlay.showKilled(); net.clear(); } catch (e) {} syncTabIcon(); postInteractionOverride(INTERACTION_KILL, { scope: "all" }); }
 
   // Handoff prompt actions (shown when another agent is waiting for a tab):
   //   open a new tab — window.open MUST be inside this real click handler, or the browser blocks it; the
@@ -1123,6 +1123,10 @@
     // with no session open, just disappears — there's no persistent state to return to, which itself
     // reads as "no session"). The icons only ever show while a session is actually open.
     var SESSION_TEXT = "● ky-ai agent interacting", HINT_MS = 2000;
+    // Appended to the session text while something of the session changes the app beyond the agent's
+    // visible actions — active network rules — so the user can tell why requests are slow or failing.
+    var sessionNote = "";
+    function sessionText() { return SESSION_TEXT + (sessionNote ? " · " + sessionNote : ""); }
     function setHint(text) {
       ensure();
       if (hintTimer) { clearTimeout(hintTimer); hintTimer = null; }
@@ -1131,7 +1135,7 @@
       badgePause.style.display = badgeKill.style.display = shown ? "flex" : "none";
       hintTimer = setTimeout(function () {
         hintTimer = null;
-        if (shown) { badgeText.textContent = SESSION_TEXT; }
+        if (shown) { badgeText.textContent = sessionText(); }
         else { badge.style.display = "none"; badgePause.style.display = badgeKill.style.display = "none"; }
       }, HINT_MS);
     }
@@ -1144,7 +1148,7 @@
           ensure(); shown = true; paused = false;
           frame.style.display = "block"; cursor.style.display = "block";
           pausedPill.style.display = "none";
-          if (!hintTimer) { badgeText.textContent = SESSION_TEXT; badge.style.display = "flex"; }
+          if (!hintTimer) { badgeText.textContent = sessionText(); badge.style.display = "flex"; }
           badgePause.style.display = badgeKill.style.display = "flex";
         } catch (e) {}
       },
@@ -1185,6 +1189,10 @@
         } catch (e) {}
       },
       clearKilled: function () { killed = false; },
+      setSessionNote: function (text) {
+        sessionNote = text || "";
+        try { if (shown && !hintTimer && badgeText) badgeText.textContent = sessionText(); } catch (e) {}
+      },
       isKilled: function () { return killed; },
       shown: function () { return shown; },
       cursorTo: function (x, y) { try { if (shown) put(x, y, CURSOR_STEP_MS); } catch (e) {} },
@@ -1445,6 +1453,207 @@
   })();
   reloadHold.install();
 
+  /*
+   * Network rules + request tracking — set_network_rules / network_status.
+   *
+   * Wraps window.fetch and XMLHttpRequest so the agent can delay, block or fail the app's requests by URL
+   * pattern, making loading and error states testable for real. Like the WebSocket wrap above this runs at
+   * snippet parse, before the app's bundles, which is the whole trick: Angular's HttpClient (XHR backend or
+   * withFetch) only ever sees the wrapped versions. A patch applied later from evaluate_js comes too late.
+   *
+   * The rules belong to the agent's session (server-side EvalChannel.NetworkRules): every poll carries the
+   * current set and reconcile() adopts it. A sessionStorage copy re-applies them synchronously on a reload,
+   * because the app's bootstrap requests go out long before that first poll returns — and testing the
+   * bootstrap loader is a main use. Every way a session ends here (overlay hidden, Pause, Stop, reserving
+   * the tab, ky-ai-browser gone) clears them on the spot instead of waiting for the next poll.
+   *
+   * Our own traffic to ky-ai-browser is never matched or counted. In-flight requests are tracked either
+   * way (network_status, and the idle check builds on it).
+   */
+  var net = (function () {
+    var KEY = "__kyai_net";
+    var OWN_ORIGIN = (function () { try { return new URL(INGEST).origin; } catch (e) { return ""; } })();
+    var FAKE_PROPS = ["readyState", "status", "statusText", "responseText", "response", "responseURL", "getAllResponseHeaders", "getResponseHeader"];
+    var rules = [], rulesKey = "[]", hits = [];
+    var pending = {}, nextId = 0;
+    var xinfo = typeof WeakMap === "function" ? new WeakMap() : null;
+
+    function abs(u) { try { return new URL(String(u), location.href).href; } catch (e) { return String(u); } }
+    function isOwn(url) { return !!OWN_ORIGIN && (url === OWN_ORIGIN || url.indexOf(OWN_ORIGIN + "/") === 0); }
+    function compile(r) {
+      if (!r || !r.url) return null;
+      var pat = String(r.url), re;
+      if (pat.indexOf("*") >= 0) {
+        re = new RegExp("^" + pat.split("*").map(function (p) { return p.replace(/[.+?^${}()|[\]\\]/g, "\\$&"); }).join(".*") + "$", "i");
+      } else {
+        var lower = pat.toLowerCase();
+        re = { test: function (u) { return u.toLowerCase().indexOf(lower) >= 0; } };
+      }
+      return {
+        url: pat, method: r.method ? String(r.method).toUpperCase() : null, delayMs: Math.max(0, +r.delayMs || 0),
+        block: !!r.block, status: r.status || null, body: r.body == null ? null : String(r.body), re: re
+      };
+    }
+    function match(url, method) {
+      for (var i = 0; i < rules.length; i++) {
+        var r = rules[i];
+        if ((!r.method || r.method === method) && r.re.test(url)) { hits[i]++; return r; }
+      }
+      return null;
+    }
+    function track(kind, method, url) { var id = ++nextId; pending[id] = { kind: kind, method: method, url: url, at: Date.now() }; return id; }
+    function untrack(id) { delete pending[id]; }
+
+    function set(list) {
+      list = Array.isArray(list) ? list : [];
+      var key = JSON.stringify(list);
+      if (key === rulesKey) return;
+      rulesKey = key;
+      rules = list.map(compile).filter(Boolean);
+      hits = rules.map(function () { return 0; });
+      try { if (rules.length) sessionStorage.setItem(KEY, key); else sessionStorage.removeItem(KEY); } catch (e) {}
+      overlay.setSessionNote(rules.length ? "network: " + rules.length + (rules.length === 1 ? " rule" : " rules") : "");
+    }
+
+    function abortError() {
+      try { return new DOMException("The operation was aborted.", "AbortError"); }
+      catch (e) { var err = new Error("The operation was aborted."); err.name = "AbortError"; return err; }
+    }
+    // A delay that a fetch's AbortSignal can cut short, rejecting like a real aborted fetch would.
+    function hold(ms, signal) {
+      return new Promise(function (resolve, reject) {
+        if (signal && signal.aborted) { reject(abortError()); return; }
+        var t = setTimeout(function () { if (signal) signal.removeEventListener("abort", onAbort); resolve(); }, ms);
+        function onAbort() { clearTimeout(t); reject(abortError()); }
+        if (signal) signal.addEventListener("abort", onAbort);
+      });
+    }
+    function contentTypeOf(body) {
+      try { JSON.parse(body); return "application/json"; } catch (e) { return "text/plain"; }
+    }
+
+    function installFetch() {
+      var native = window.fetch;
+      if (typeof native !== "function") return;
+      window.fetch = function (input, init) {
+        var args = arguments, url, method;
+        try {
+          url = abs(input && typeof input === "object" && "url" in input ? input.url : input);
+          method = String((init && init.method) || (input && typeof input === "object" && input.method) || "GET").toUpperCase();
+        } catch (e) { return native.apply(window, args); }
+        if (isOwn(url)) return native.apply(window, args);
+        var rule = match(url, method), id = track("fetch", method, url);
+        var p = !rule ? native.apply(window, args) :
+          hold(rule.delayMs, (init && init.signal) || (input && typeof input === "object" && input.signal)).then(function () {
+            if (rule.block) throw new TypeError("Failed to fetch (blocked by a ky-ai network rule)");
+            if (rule.status) {
+              var noBody = rule.status === 204 || rule.status === 205 || rule.status === 304;
+              var body = noBody ? null : (rule.body || "");
+              return new Response(body, { status: rule.status, statusText: "ky-ai", headers: body ? { "content-type": contentTypeOf(body) } : {} });
+            }
+            return native.apply(window, args);
+          });
+        p.then(function () { untrack(id); }, function () { untrack(id); });
+        return p;
+      };
+    }
+
+    // Answer an XHR locally: shadow the response getters on the instance and fire the events a finished
+    // request fires, so HttpClient's XHR backend sees an ordinary response (or a status-0 network error).
+    function fakeXhr(xhr, info, rule) {
+      var failed = rule.block, status = failed ? 0 : rule.status, body = failed ? "" : (rule.body || "");
+      var type = failed ? "" : contentTypeOf(body);
+      function def(name, v) { try { Object.defineProperty(xhr, name, { configurable: true, get: function () { return v; } }); } catch (e) {} }
+      var response = body;
+      try {
+        if (xhr.responseType === "json") response = body ? JSON.parse(body) : null;
+        else if (xhr.responseType === "arraybuffer") response = new TextEncoder().encode(body).buffer;
+        else if (xhr.responseType === "blob") response = new Blob([body], { type: type });
+        else if (xhr.responseType === "document") response = null;
+      } catch (e) { response = null; }
+      def("readyState", 4); def("status", status); def("statusText", failed ? "" : "ky-ai");
+      def("responseText", body); def("response", response); def("responseURL", failed ? "" : info.url);
+      def("getAllResponseHeaders", function () { return type ? "content-type: " + type + "\r\n" : ""; });
+      def("getResponseHeader", function (n) { return type && String(n).toLowerCase() === "content-type" ? type : null; });
+      info.faked = true;
+      function fire(name) {
+        try { xhr.dispatchEvent(typeof ProgressEvent === "function" ? new ProgressEvent(name) : new Event(name)); } catch (e) {}
+      }
+      fire("readystatechange"); fire(failed ? "error" : "load"); fire("loadend");
+    }
+
+    function installXhr() {
+      var X = window.XMLHttpRequest;
+      if (!X || !xinfo) return;
+      var proto = X.prototype, nOpen = proto.open, nSend = proto.send, nAbort = proto.abort;
+      proto.open = function (method, url, async) {
+        try {
+          var prev = xinfo.get(this);
+          if (prev && prev.faked) for (var i = 0; i < FAKE_PROPS.length; i++) delete this[FAKE_PROPS[i]];
+          xinfo.set(this, { method: String(method || "GET").toUpperCase(), url: abs(url), async: async !== false });
+        } catch (e) {}
+        return nOpen.apply(this, arguments);
+      };
+      proto.send = function () {
+        var info = xinfo.get(this), xhr = this, args = arguments;
+        if (!info || isOwn(info.url)) return nSend.apply(this, args);
+        info.id = track("xhr", info.method, info.url);
+        xhr.addEventListener("loadend", function () { untrack(info.id); });
+        var rule = info.async ? match(info.url, info.method) : null;   // a sync request can't be held back
+        if (!rule) return nSend.apply(this, args);
+        info.timer = setTimeout(function () {
+          info.timer = null;
+          if (rule.block || rule.status) fakeXhr(xhr, info, rule);
+          else nSend.apply(xhr, args);
+        }, rule.delayMs);
+      };
+      // Aborted while we hold it back: it was never sent natively, so no loadend comes to untrack it.
+      proto.abort = function () {
+        var info = xinfo.get(this);
+        if (info && info.timer) { clearTimeout(info.timer); info.timer = null; untrack(info.id); }
+        return nAbort.apply(this, arguments);
+      };
+    }
+
+    return {
+      install: function (fresh) {
+        try { installFetch(); } catch (e) {}
+        try { installXhr(); } catch (e) {}
+        // A tab opened by window.open copies the opener's sessionStorage — its rules are not this tab's.
+        try {
+          if (fresh) sessionStorage.removeItem(KEY);
+          else { var saved = sessionStorage.getItem(KEY); if (saved) set(JSON.parse(saved)); }
+        } catch (e) {}
+      },
+      set: set,
+      clear: function () { set([]); },
+      reconcile: function (serverRules) { set(serverRules || []); },
+      pendingCount: function () { var n = 0; for (var k in pending) n++; return n; },
+      status: function () {
+        var now = Date.now(), list = [];
+        for (var k in pending) {
+          var p = pending[k];
+          list.push({ kind: p.kind, method: p.method, url: short(p.url, 300), ageMs: now - p.at });
+        }
+        list.sort(function (a, b) { return b.ageMs - a.ageMs; });
+        return {
+          ok: true, action: "network",
+          rules: rules.map(function (r, i) {
+            var o = { url: r.url, hits: hits[i] };
+            if (r.method) o.method = r.method;
+            if (r.delayMs) o.delayMs = r.delayMs;
+            if (r.block) o.block = true;
+            if (r.status) o.status = r.status;
+            return o;
+          }),
+          pendingCount: list.length,
+          pending: list.slice(0, 50)
+        };
+      }
+    };
+  })();
+  net.install(!!pendingClaim);
+
   function onUserContinueReload() { reloadHold.release(); syncTabIcon(); postInteractionOverride(RELOAD_RELEASE); }
   function onUserHoldReloads() { reloadHold.engage(); syncTabIcon(); postInteractionOverride(RELOAD_HOLD, { hold: true }); }
   // "Reload page now": pick up whatever the dev server has built, WITHOUT lifting the hold — after the
@@ -1471,7 +1680,7 @@
       toggle: function () {
         reserved = !reserved; pending = true;
         // Reflect the eviction right away instead of a poll window later — as Pause does.
-        if (reserved) { try { overlay.hide(); overlay.clearPaused(); } catch (e) {} }
+        if (reserved) { try { overlay.hide(); overlay.clearPaused(); net.clear(); } catch (e) {} }
         syncTabIcon();
         postInteractionOverride(TAB_RESERVE, { reserved: reserved });
       },
@@ -1963,7 +2172,7 @@
   }
 
   function doOverlay(req) {
-    if (req.show) overlay.show(); else overlay.hide();
+    if (req.show) overlay.show(); else { overlay.hide(); net.clear(); }
     syncTabIcon();
     return { ok: true, action: "overlay", shown: overlay.shown() };
   }
@@ -2112,6 +2321,8 @@
         case "reload": setTimeout(function () { try { location.reload(); } catch (e) {} }, 0); return;
         case "navigate": postDo(req, doNavigate(req)); return;
         case "overlay": postResult(req.id, doOverlay(req)); return;
+        case "network": net.set(req.rules); postResult(req.id, net.status()); return;
+        case "networkStatus": postResult(req.id, net.status()); return;
         case "batch": postDo(req, doBatch(req)); return;
         case "query": postDo(req, doQuery(req)); return;
         case "click": postDo(req, doClick(req)); return;
@@ -2210,6 +2421,7 @@
         if (data && data.reassignTabId && data.reassignTabId !== tabId) {
           tabId = data.reassignTabId;
           try { sessionStorage.setItem("__kyai_tab", tabId); } catch (e) {}
+          net.clear();                                       // the rules came with the copied storage — not ours
           pendingClaim = null;
           setTimeout(pollEvalOnce, 0);
           return;
@@ -2219,6 +2431,7 @@
         reconcilePaused(data && data.paused);                // restore/clear the paused pill likewise
         reconcileKilled(data && data.killed);                // restore/clear the killed pill likewise
         tabReserve.reconcile(data && data.reserved);
+        net.reconcile(data && data.network);                // the session's request rules (none outside a session)
         // Engage/release the dev-server reload hold. Ordered after the three above so a release that
         // force-reloads sees the overlay state already settled. A reservation counts as "the human is
         // looking" like a pause: the session it ended must not trigger the catch-up reload.
@@ -2230,7 +2443,7 @@
         setTimeout(pollEvalOnce, 0);     // immediately re-open the long-poll
       })["catch"](function () {
         // ky-ai-browser unreachable for a while → it (or the agent) is gone; don't strand the overlay.
-        if (Date.now() - lastPollOkAt > 8000) { overlay.hide(); syncTabIcon(); }
+        if (Date.now() - lastPollOkAt > 8000) { overlay.hide(); net.clear(); syncTabIcon(); }
         setTimeout(pollEvalOnce, 2000);  // back off, keep trying
       });
   }
