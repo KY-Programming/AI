@@ -442,6 +442,29 @@ internal static class BrowserTools
         { Id = "", Kind = "wait", Selector = selector, Expression = expression, PollMs = Math.Clamp(pollMs, 20, 5000), TimeoutMs = wait }, tab);
     }
 
+    [McpServerTool(Name = "wait_for_idle"), Description(
+        "Wait until the page has SETTLED — no app fetch/XHR request in flight AND Angular stable (ApplicationRef." +
+        "isStable: no pending zone work, scheduled change detection, router navigation …) — and has stayed that " +
+        "way for `quietMs` (default 200, catches a response that triggers the next request or a debounce). Use it " +
+        "after an action or a navigation instead of a fixed sleep/setTimeout guess, then read the result. Returns " +
+        "{ok:true, idle:true, waitedMs, angular:'stable'|'unavailable'} ('unavailable' = no dev-build Angular " +
+        "found, only the network was waited on), or on timeout {ok:false, timedOut:true, angular, pendingCount, " +
+        "pending:[{kind, method, url, ageMs}]} — if a request never ends by design (SignalR/long-poll, a stream), " +
+        "pass its URL pattern in `ignore` (glob with *, else substring) and call again. Ungated read; also " +
+        "available as a batch step {action:'idle', quietMs?, ignore?, timeoutMs?}. Omit project when only one " +
+        "capture is registered.")]
+    public static Task<string> WaitForIdle(
+        [Description("How long the page must stay settled, in ms (default 200)")] int quietMs = 200,
+        [Description("URL patterns of requests that never count as busy (long-polls, streams)")] string[]? ignore = null,
+        [Description("Max ms to wait before giving up (default 10000)")] int timeoutMs = 10_000,
+        [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,
+        [Description("Project name; omit when only one capture is registered")] string? project = null)
+    {
+        var wait = Clamp(timeoutMs);
+        return Eval(project, wait + 2000, new EvalRequest
+        { Id = "", Kind = "idle", QuietMs = Math.Clamp(quietMs, 0, 10_000), Ignore = ignore, TimeoutMs = wait }, tab);
+    }
+
     [McpServerTool(Name = "reload_page"), Description(
         "Reload the attached page (location.reload()). Use after a build that changed code rather than just " +
         "templates/styles: a hot reload may keep already-created objects (services, singletons, model " +
@@ -539,13 +562,14 @@ internal static class BrowserTools
     [McpServerTool(Name = "batch"), Description(
         "Run a sequence of actions in ONE page round-trip — much faster than separate calls for a multi-step " +
         "flow. `steps` is an ordered list; each step is { action, …the same fields that action's own tool takes }. " +
-        "action ∈ click | move | key | type | wait | scroll | focus | styles | query | component | eval | sleep. Steps run in order " +
+        "action ∈ click | move | key | type | wait | idle | scroll | focus | styles | query | component | eval | sleep. Steps run in order " +
         "and STOP at the first failure; the result is { ok, count, results:[{step, action, …payload}], failedAt? }. " +
         "Any manipulation step (click/move/key/type/scroll/focus) requires start_interaction first. Example — open " +
         "a menu then pick an item in one call: steps=[{action:'click',selector:'.menu'},{action:'wait',selector:" +
         "'.item'},{action:'click',text:'Zwei'}]. `sleep` (durationMs, default 500, max 30000) just pauses between " +
         "steps — use it to pace a flow a human is watching; prefer `wait` to synchronise on the page, since a fixed " +
-        "sleep is a guess. Omit project when only one capture is registered.")]
+        "sleep is a guess; `idle` (quietMs?, ignore?, timeoutMs?) waits until requests and Angular have settled, like wait_for_idle. " +
+        "Omit project when only one capture is registered.")]
     public static Task<string> Batch(
         [Description("Ordered steps; each is { action, plus that action's fields }")] BatchStep[] steps,
         [Description("Max ms for the whole sequence (default: derived from the steps' own waits/durations/sleeps)")] int timeoutMs = 0,
@@ -559,6 +583,7 @@ internal static class BrowserTools
         // ripple before dispatching, so their worst case sits above the flat 500.
         var derived = 2000 + steps.Sum(s =>
             s.Action == "wait" ? (s.TimeoutMs ?? 5000) :
+            s.Action == "idle" ? (s.TimeoutMs ?? 10_000) :
             s.Action == "move" ? (s.DurationMs ?? 300) :
             s.Action == "sleep" ? (s.DurationMs ?? 500) + 100 :
             s.Action is "click" or "focus" ? 800 : 500);

@@ -24,6 +24,7 @@ namespace KY.AI.Browser;
 //   start/stop_interaction → kind "overlay" (show/hide the supervision overlay)
 //   set_network_rules → kind "network" (replace the session's request rules; see NetworkRules)
 //   network_status    → kind "networkStatus" (the active rules with hit counts + in-flight requests)
+//   wait_for_idle     → kind "idle" (wait until no app request is in flight and Angular is stable)
 //
 // Interaction is gated: the manipulation tools require InteractionActive (set by start_interaction)
 // so the human always sees the supervision overlay while the agent drives the page. The flag is also
@@ -452,6 +453,7 @@ internal enum PollAdmit { Proceed, Fork }
 //   overlay— Show (true ⇒ show the supervision overlay, false ⇒ hide it)
 //   network— Rules (the full replacement set; empty ⇒ clear)
 //   networkStatus — (none)
+//   idle   — [QuietMs, Ignore]   (waits up to TimeoutMs)
 internal sealed record EvalRequest
 {
     public required string Id { get; init; }
@@ -527,6 +529,10 @@ internal sealed record EvalRequest
     // network — the session's request rules, replacing the previous set
     public IReadOnlyList<NetworkRule>? Rules { get; init; }
 
+    // idle — how long the page must stay settled, and URL patterns of requests that never count as busy
+    public int? QuietMs { get; init; }
+    public IReadOnlyList<string>? Ignore { get; init; }
+
     // advisory page-side budget (wait uses it as its poll deadline)
     public int TimeoutMs { get; init; } = 5000;
 }
@@ -546,7 +552,7 @@ public sealed record NetworkRule
     public string? Body { get; init; }
 }
 
-// One step of a `batch`: an Action (click|move|key|type|wait|scroll|focus|styles|query|eval|sleep) plus
+// One step of a `batch`: an Action (click|move|key|type|wait|idle|scroll|focus|styles|query|eval|sleep) plus
 // the same fields the matching single tool takes. Serialized camelCase to the page, where the snippet runs
 // each step in order. Manipulation steps (click/move/key/type/scroll/focus) require open interaction.
 // `sleep` (DurationMs, shared with move) is batch-only — it exists to pace a flow between steps, which
@@ -588,6 +594,8 @@ public sealed record BatchStep
     public IReadOnlyList<string>? Props { get; init; }
     public IReadOnlyList<string>? Fields { get; init; }   // component: serialize only these state fields in full
     public int? Depth { get; init; }                      // component: nesting cap for serialized values
+    public int? QuietMs { get; init; }                    // idle: how long the page must stay settled
+    public IReadOnlyList<string>? Ignore { get; init; }   // idle: URL patterns that never count as busy
     public int? TimeoutMs { get; init; }
 
     // Manipulation steps are gated behind start_interaction; reads (wait/query/styles/eval) are not.

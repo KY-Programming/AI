@@ -1627,8 +1627,10 @@
       },
       set: set,
       clear: function () { set([]); },
+      // A test function for one URL pattern, matched the way rules are (glob with *, else substring).
+      matcher: function (pattern) { var c = compile({ url: pattern }); return c ? function (u) { return c.re.test(u); } : function () { return false; }; },
+      pendingList: function () { var list = []; for (var k in pending) list.push(pending[k]); return list; },
       reconcile: function (serverRules) { set(serverRules || []); },
-      pendingCount: function () { var n = 0; for (var k in pending) n++; return n; },
       status: function () {
         var now = Date.now(), list = [];
         for (var k in pending) {
@@ -2204,6 +2206,7 @@
       case "component": return readComponent(step.selector, step);
       case "eval": return doEval(step);
       case "sleep": return doSleep(step);
+      case "idle": return doIdle(step);
       default: return { ok: false, error: "unknown batch action: " + step.action };
     }
   }
@@ -2247,6 +2250,85 @@
   // Resolve a payload-or-promise and post it as the request's result.
   function postDo(req, valueOrPromise) {
     Promise.resolve(valueOrPromise).then(function (p) { postResult(req.id, p); }, function (e) { postResult(req.id, errPayload(e)); });
+  }
+
+  // Best-effort locate the app's ApplicationRef on a dev build (window.ng). There is no token to ask an
+  // injector for from out here, so this walks the root element's injector chain
+  // (ng.ɵgetInjectorResolutionPath) and duck-types the values each R3Injector has already created
+  // (its internal `records`) for one with tick() and an observable isStable. Null when ng or those
+  // internals aren't there (production build, a future Angular) — callers degrade, never throw.
+  // The ɵ is escaped: the snippet may be decoded without a charset.
+  function findAppRef() {
+    var ng = window.ng;
+    var resolutionPath = ng && ng["ɵgetInjectorResolutionPath"];
+    if (typeof resolutionPath !== "function" || typeof ng.getInjector !== "function") return null;
+    var roots = document.querySelectorAll("[ng-version]");
+    for (var i = 0; i < roots.length; i++) {
+      var path;
+      try { path = resolutionPath(ng.getInjector(roots[i])); } catch (e) { continue; }
+      for (var j = 0; path && j < path.length; j++) {
+        var recs = path[j] && path[j].records, found = null;
+        if (!recs || typeof recs.forEach !== "function") continue;
+        try {
+          recs.forEach(function (rec) {
+            var v = rec && rec.value;
+            if (!found && v && typeof v === "object" && typeof v.tick === "function" && v.isStable && typeof v.isStable.subscribe === "function") found = v;
+          });
+        } catch (e) {}
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  // wait_for_idle: resolve once the page has been settled for quietMs without a break — no app request in
+  // flight (net's tracking, minus `ignore` patterns for long-lived ones like a SignalR long-poll) and
+  // Angular stable (ApplicationRef.isStable: pending tasks such as zone work, scheduled change detection,
+  // router navigations). The quiet window catches follow-ups — a response whose handler fires the next
+  // request, a debounce. Without a reachable ApplicationRef it still waits on the network and says so
+  // (`angular:"unavailable"`). Times out with what was still busy, so the agent can ignore a request that
+  // never ends instead of guessing. Returns a Promise<payload>.
+  function doIdle(req) {
+    var quietMs = typeof req.quietMs === "number" ? Math.max(0, req.quietMs) : 200;
+    var timeoutMs = typeof req.timeoutMs === "number" ? req.timeoutMs : 10000;
+    var ignore = (req.ignore || []).map(function (p) { return net.matcher(p); });
+    var stable = null, sub = null;
+    var app = null;
+    try { app = findAppRef(); } catch (e) {}
+    if (app) { try { sub = app.isStable.subscribe(function (s) { stable = !!s; }); } catch (e) { sub = null; } }
+    var start = Date.now(), quietSince = null;
+    function busy() {
+      return net.pendingList().filter(function (p) {
+        for (var i = 0; i < ignore.length; i++) if (ignore[i](p.url)) return false;
+        return true;
+      });
+    }
+    return new Promise(function (resolve) {
+      function finish(payload) { try { if (sub) sub.unsubscribe(); } catch (e) {} resolve(payload); }
+      (function check() {
+        var now = Date.now(), pend = busy(), angularBusy = sub ? stable === false : false;
+        if (!pend.length && !angularBusy) {
+          if (quietSince === null) quietSince = now;
+          if (now - quietSince >= quietMs) {
+            finish({ ok: true, action: "idle", idle: true, waitedMs: now - start, angular: sub ? "stable" : "unavailable" });
+            return;
+          }
+        } else quietSince = null;
+        if (now - start >= timeoutMs) {
+          finish({
+            ok: false, action: "idle", idle: false, timedOut: true, waitedMs: now - start,
+            angular: sub ? (angularBusy ? "busy" : "stable") : "unavailable",
+            pendingCount: pend.length,
+            pending: pend.slice(0, 20).map(function (p) { return { kind: p.kind, method: p.method, url: short(p.url, 300), ageMs: now - p.at }; }),
+            error: pend.length
+              ? "requests still in flight — if one never ends (long-poll, stream), pass its URL pattern in `ignore`"
+              : "Angular did not become stable in time (a pending task, e.g. a navigation or a scheduled render, kept it busy)"
+          });
+          return;
+        }
+        setTimeout(check, 25);
+      })();
+    });
   }
 
   // Best-effort locate the Angular Router on a dev build (window.ng). Walks the components on the
@@ -2323,6 +2405,7 @@
         case "overlay": postResult(req.id, doOverlay(req)); return;
         case "network": net.set(req.rules); postResult(req.id, net.status()); return;
         case "networkStatus": postResult(req.id, net.status()); return;
+        case "idle": postDo(req, doIdle(req)); return;
         case "batch": postDo(req, doBatch(req)); return;
         case "query": postDo(req, doQuery(req)); return;
         case "click": postDo(req, doClick(req)); return;

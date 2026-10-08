@@ -299,6 +299,32 @@ public class BrowserToolsTests
     }
 
     [Fact]
+    public async Task Wait_for_idle_builds_an_ungated_idle_request()
+    {
+        var ch = new EvalChannel("t");   // interaction NOT opened — it's a read
+        BrowserTools.ForwardHook = (_, waitMs, req, _tab) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        try
+        {
+            var task = BrowserTools.WaitForIdle(quietMs: 300, ignore: new[] { "*/signalr/*" }, timeoutMs: 4000);
+            var req = Assert.Single(await ch.PollAsync(1000, default));
+            Assert.Equal("idle", req.Kind);
+            Assert.Equal(300, req.QuietMs);
+            Assert.Equal("*/signalr/*", Assert.Single(req.Ignore!));
+            Assert.Equal(4000, req.TimeoutMs);
+            ch.Complete("t", req.Id, "{\"ok\":true}");
+            await task;
+        }
+        finally { BrowserTools.ForwardHook = null; }
+    }
+
+    [Fact]
+    public async Task Batch_budget_covers_an_idle_steps_timeout()
+    {
+        var r = await Enqueued(() => BrowserTools.Batch(new[] { new BatchStep { Action = "idle", TimeoutMs = 20_000 } }));
+        Assert.True(r.TimeoutMs > 20_000, $"budget {r.TimeoutMs} must exceed the 20s idle wait it contains");
+    }
+
+    [Fact]
     public async Task Reload_page_is_gated()
     {
         // A reload wipes whatever is on screen — possibly the user's own test — so it needs a session.

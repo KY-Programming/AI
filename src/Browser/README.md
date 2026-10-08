@@ -89,7 +89,8 @@ file-based allow-list — tools are toggled in the editor's UI):
   "mcp__ky-ai-browser__click", "mcp__ky-ai-browser__move", "mcp__ky-ai-browser__send_key",
   "mcp__ky-ai-browser__type_text", "mcp__ky-ai-browser__scroll", "mcp__ky-ai-browser__focus",
   "mcp__ky-ai-browser__wait_for", "mcp__ky-ai-browser__reload_page", "mcp__ky-ai-browser__navigate",
-  "mcp__ky-ai-browser__batch", "mcp__ky-ai-browser__set_network_rules", "mcp__ky-ai-browser__network_status"
+  "mcp__ky-ai-browser__batch", "mcp__ky-ai-browser__set_network_rules", "mcp__ky-ai-browser__network_status",
+  "mcp__ky-ai-browser__wait_for_idle"
 ] } }
 ```
 
@@ -133,6 +134,7 @@ browser has the app open.
 | `evaluate_js` | `expression`, `awaitPromise?`, `json?`, `timeoutMs?` | evaluate JS in the page (global scope) → `{ok, type, value}` — read live state, e.g. `ng.getComponent(document.querySelector('app-wire')).energized()`. Signals are getter **functions** — **call** them (`.value()`, not `.value`). `value` comes back as a **string** (objects are JSON-stringified) — return `JSON.stringify(...)` and parse your side |
 | `query_dom` | `selector`, `all?`, `limit?`, `detail?`, `timeoutMs?` | describe matched element(s): `{tag, id, classes, attributes, text, rect, html}` + `count`. `detail:false` slims each match to `{tag, id?, text}` |
 | `get_styles` | `selector`, `props?`, `timeoutMs?` | computed CSS of an element: `{styles:{prop:value,…}, target}` — confirm a transform/hover style actually applied |
+| `wait_for_idle` | `quietMs?`, `ignore?`, `timeoutMs?` | wait until no app request is in flight **and** Angular is stable, for `quietMs` in a row — instead of a fixed sleep after an action. On timeout it lists what was still busy; `ignore` takes URL patterns of requests that never end (long-polls). Also a `batch` step (`action:'idle'`). Angular stability needs a dev build (`angular:'unavailable'` otherwise — then only the network is waited on) |
 | `network_status` | `timeoutMs?` | the active `set_network_rules` rules with their `hits`, plus the app's fetch/XHR requests in flight (`pending`, `pendingCount`) |
 | `read_component` | `selector`, `fields?`, `depth?`, `timeoutMs?` | snapshot the Angular component on/above the element: `{component, state, signals, formControls?, methods, objects?, note?}` — **signals resolved (called), FormControls unwrapped**, so a clean model read works where `ng.getComponent(el).value` came back empty. **`state` is lean by default**: it expands signals + FormControls + scalars and collapses complex/framework objects (services, Subjects, `destroyRef`, `errorHandler`, view graphs) to a one-line type tag, listing their names in `objects`. Expand the ones you need with `fields:["options",…]` (returned in full, depth-limited) or raise `depth`. Also inline as `__kyai.readComponent(el, {fields, depth})` from `evaluate_js` |
 
@@ -156,7 +158,7 @@ user a fixed red overlay with an animated cursor so they can see the agent drivi
 | `reload_page` | `timeoutMs?` | **full** reload (gated like `navigate`: it wipes what's on screen) — re-instantiate everything after a build that changed code (HMR may keep stale instances). Not navigation — use `navigate` to change route without a reload |
 | `navigate` | `path`, `replace?`, `timeoutMs?` | change the SPA route **without** a hard reload — finds the Angular `Router` on a dev build and calls `navigateByUrl(path)`, falling back to the History API (pushState + synthetic popstate) otherwise. Returns `{ok, from, to, navigated, method:'router'\|'history'}`; `to` is the settled URL (confirm even a guard redirect). Services/singletons stay live — reach for `reload_page` when you need those re-instantiated |
 | `set_network_rules` | `rules[]` (`url`, `method?`, `delayMs?`, `block?` \| `status?`+`body?`) | delay, block or fail the app's own requests by URL pattern (`*` glob over the absolute URL, else substring); `[]` clears. The rules belong to the session: they survive reloads within it (set them, then `reload_page`, to test bootstrap loaders) and are cleared when it ends. The badge shows the user that rules are active |
-| `batch` | `steps[]`, `timeoutMs?` | run an ordered sequence of actions in **one** page round-trip — much faster for multi-step flows. Each step is `{action, …that action's fields}`, `action ∈ click \| move \| key \| type \| wait \| scroll \| focus \| styles \| query \| component \| eval`; steps run in order and **stop at the first failure**. Returns `{ok, count, results:[…], failedAt?}`. Manipulation steps still require `start_interaction` first |
+| `batch` | `steps[]`, `timeoutMs?` | run an ordered sequence of actions in **one** page round-trip — much faster for multi-step flows. Each step is `{action, …that action's fields}`, `action ∈ click \| move \| key \| type \| wait \| idle \| scroll \| focus \| styles \| query \| component \| eval \| sleep`; steps run in order and **stop at the first failure**. Returns `{ok, count, results:[…], failedAt?}`. Manipulation steps still require `start_interaction` first |
 
 Every interaction returns the element it actually targeted so you can confirm you hit the right
 thing. That `target` is **minimal by default** (`{tag, id?, text}`) — enough to confirm the hit and
