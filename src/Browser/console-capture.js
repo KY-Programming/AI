@@ -312,6 +312,8 @@
   var TAB_RESERVE = INGEST.replace(/\/console$/, "/tab/reserve");
   // What this tab shows changed between polls (see reportPageIfChanged).
   var TAB_PAGE = INGEST.replace(/\/console$/, "/tab/page");
+  // The human's latest real click/key press in this tab (see reportUserInputIfNew).
+  var TAB_ACTIVITY = INGEST.replace(/\/console$/, "/tab/activity");
   // Multi-agent handoff: the "another agent wants in" prompt's Share / Deny buttons post here. (Open-a-
   // new-tab is a pure client action — window.open in the click handler — so it has no server route.)
   var HANDOFF_BASE = INGEST.replace(/\/console$/, "/handoff");
@@ -807,8 +809,13 @@
       badgePause = null, badgeKill = null, pausedPill = null, pausedText = null, pausedKill = null,
       reloadPill = null, reloadText = null, reloadPlay = null,
       handoffPill = null, handoffText = null, handoffOpen = null, handoffShare = null, handoffDeny = null,
+      handoffShareFill = null, handoffShareLabel = null,
       menuWrap = null, hotbar = null, menu = null;
     var shown = false, paused = false, killed = false, cx = 0, cy = 0, curLabel = null, curLabelTimer = null, hintTimer = null, handoffTicket = null;
+    // The handoff prompt's auto-share countdown (only in a tab the user is busy in — see showHandoff).
+    // handoffKey is ticket + countdown so a poll that changes either re-renders, and one that doesn't keeps
+    // the running countdown untouched.
+    var handoffKey = null, autoShareMs = 0, autoShareStart = 0, autoShareTimer = null;
     // The held-reload pill is normally session chrome (hidden with the rest of it), but a hold the HUMAN
     // switched on outlives every session — and a hold with no visible sign of it is a trap ("why isn't my
     // app updating?"). Sticky ⇒ the pill survives hide()/Pause/Stop until the human lifts the hold.
@@ -816,6 +823,26 @@
     var menuOpen = false, menuHideTimer = null;
     function vw() { return window.innerWidth || (document.documentElement || {}).clientWidth || 0; }
     function vh() { return window.innerHeight || (document.documentElement || {}).clientHeight || 0; }
+
+    function handoffKeyOf(info) { return info.ticket + "|" + (info.autoShareMs || 0); }
+    function startAutoShare(ms) {
+      autoShareMs = ms; autoShareStart = Date.now();
+      tickAutoShare();
+      autoShareTimer = setInterval(tickAutoShare, 200);
+    }
+    function stopAutoShare() {
+      if (autoShareTimer) { clearInterval(autoShareTimer); autoShareTimer = null; }
+      if (handoffShareFill) handoffShareFill.style.width = "0";
+      if (handoffShareLabel) handoffShareLabel.textContent = "Share this tab";
+    }
+    function tickAutoShare() {
+      try {
+        var left = autoShareMs - (Date.now() - autoShareStart);
+        if (left <= 0) { var t = handoffTicket; stopAutoShare(); if (t) onShareTab(t); return; }
+        handoffShareFill.style.width = (left / autoShareMs * 100) + "%";
+        handoffShareLabel.textContent = "Share this tab (" + Math.ceil(left / 1000) + "s)";
+      } catch (e) {}
+    }
 
     function ensure() {
       if (host) return;
@@ -892,7 +919,17 @@
         return b;
       }
       handoffOpen = mkHandoffBtn("Open a new tab", true);
-      handoffShare = mkHandoffBtn("Share this tab", false);
+      // Share carries the auto-share countdown as a fill draining behind its label.
+      handoffShare = mkHandoffBtn("", false);
+      handoffShare.style.position = "relative"; handoffShare.style.overflow = "hidden";
+      handoffShareFill = document.createElement("span");
+      var hfs = handoffShareFill.style;
+      hfs.position = "absolute"; hfs.left = "0"; hfs.top = "0"; hfs.bottom = "0"; hfs.width = "0";
+      hfs.background = "rgba(255,255,255,0.28)"; hfs.pointerEvents = "none"; hfs.transition = "width 0.2s linear";
+      handoffShare.appendChild(handoffShareFill);
+      handoffShareLabel = document.createElement("span");
+      handoffShareLabel.style.position = "relative"; handoffShareLabel.textContent = "Share this tab";
+      handoffShare.appendChild(handoffShareLabel);
       handoffDeny = mkHandoffBtn("Deny", false);
       hrow.appendChild(handoffOpen); hrow.appendChild(handoffShare); hrow.appendChild(handoffDeny);
       handoffPill.appendChild(hrow);
@@ -1100,7 +1137,7 @@
     }
     return {
       // Persistent, supervised session — started by start_interaction, cleared by stop_interaction.
-      // All manipulation kinds (click/move/key/type/scroll/focus/navigate) are server-gated behind this,
+      // All manipulation kinds (click/move/key/type/scroll/focus/navigate/reload) are server-gated behind this,
       // so by the time any of them runs here the frame is already showing.
       show: function () {
         try {
@@ -1186,22 +1223,35 @@
       hint: function (text) { try { setHint(text); } catch (e) {} },
       // Multi-agent handoff prompt: another agent is waiting to drive this app. Wires the three buttons to
       // the current ticket (window.open for a new tab, or share/deny to the server) and shows the pill.
+      // info.autoShareMs is set when the only thing keeping the agent out of THIS tab is that the user was
+      // just using it: Share then counts down and fires on its own, since they may have clicked and walked
+      // away. Using the tab again restarts it (userInput) — they're evidently still here.
       showHandoff: function (info) {
         try {
           if (!info || !info.ticket) return;
           ensure();
-          handoffText.textContent = (info.agentLabel || "Another agent") + " wants to work in this app.";
+          var label = info.agentLabel || "Another agent";
+          handoffText.textContent = info.autoShareMs
+            ? label + " wants to use this tab — it's handed over when the timer runs out."
+            : label + " wants to work in this app.";
           var t = info.ticket;
           handoffOpen.onclick = function (e) { e.preventDefault(); e.stopPropagation(); onOpenNewTab(t); };
           handoffShare.onclick = function (e) { e.preventDefault(); e.stopPropagation(); onShareTab(t); };
           handoffDeny.onclick = function (e) { e.preventDefault(); e.stopPropagation(); onDenyHandoff(t); };
           handoffTicket = t;
+          handoffKey = handoffKeyOf(info);
+          stopAutoShare();
+          if (info.autoShareMs > 0) startAutoShare(info.autoShareMs);
           handoffPill.style.display = "block";
         } catch (e) {}
       },
-      hideHandoff: function () { try { handoffTicket = null; if (handoffPill) handoffPill.style.display = "none"; } catch (e) {} },
+      hideHandoff: function () { try { stopAutoShare(); handoffTicket = null; handoffKey = null; if (handoffPill) handoffPill.style.display = "none"; } catch (e) {} },
       hasHandoff: function () { return !!handoffTicket; },
-      currentHandoff: function () { return handoffTicket; },
+      showsHandoff: function (info) { return handoffKey === handoffKeyOf(info); },
+      userInput: function () { if (autoShareTimer) { autoShareStart = Date.now(); tickAutoShare(); } },
+      // An event whose target is our own overlay host (shadow DOM retargets everything inside it to the
+      // host): clicks on our badge, menu or prompt are not the user using the app.
+      ownsEvent: function (e) { return !!host && !!e && e.target === host; },
       // The held-reload pill, stacked under the badge — shown once the hold has actually swallowed a
       // dev-server reload, so it reads as "your change is waiting", not as idle chrome on every session.
       // sticky ⇒ this is the human's own manual hold, so the pill must outlive the agent's session UI.
@@ -1265,7 +1315,7 @@
   function reconcileHandoff(info) {
     try {
       if (info && info.ticket) {
-        if (overlay.currentHandoff() !== info.ticket) overlay.showHandoff(info);
+        if (!overlay.showsHandoff(info)) overlay.showHandoff(info);
       } else if (overlay.hasHandoff()) {
         overlay.hideHandoff();
       }
@@ -2104,6 +2154,38 @@
   }
   setInterval(reportPageIfChanged, 1000);
 
+  /*
+   * Whether the human is using this tab: the time of their last real click or key press, so agents leave a
+   * tab alone while someone tests in it by hand (server side: EvalChannel.UserBusy). Real = isTrusted —
+   * the agent's own input is synthetic and must never make a tab look busy — and not on our own overlay
+   * (badge, menu, the handoff prompt), which is the user talking to ky-ai, not using the app. Reported as
+   * "ms ago" (the browser clock may be off) on the same once-a-second check as the page, only when there's
+   * new input; every poll carries it too, so a restarted ky-ai-browser relearns it.
+   */
+  var lastUserInputAt = 0, reportedUserInputAt = 0;
+  function onUserInput(e) {
+    try {
+      if (!e || !e.isTrusted || overlay.ownsEvent(e)) return;
+      var first = Date.now() - lastUserInputAt > 1000;
+      lastUserInputAt = Date.now();
+      // The first input after a quiet second goes out at once, so an agent can't slip in during the
+      // reporting tick; a burst after it rides the interval.
+      if (first) reportUserInputIfNew();
+      overlay.userInput();   // a running auto-share countdown restarts: they're evidently still here
+    } catch (err) {}
+  }
+  window.addEventListener("pointerdown", onUserInput, { capture: true, passive: true });
+  window.addEventListener("keydown", onUserInput, { capture: true, passive: true });
+  function userInputAgoMs() { return lastUserInputAt ? Math.max(0, Date.now() - lastUserInputAt) : null; }
+  function reportUserInputIfNew() {
+    try {
+      if (lastUserInputAt === reportedUserInputAt) return;
+      reportedUserInputAt = lastUserInputAt;
+      postInteractionOverride(TAB_ACTIVITY, { agoMs: userInputAgoMs() });
+    } catch (e) {}
+  }
+  setInterval(reportUserInputIfNew, 1000);
+
   var lastPollOkAt = Date.now();
   function pollEvalOnce() {
     var page = currentPage();
@@ -2112,6 +2194,7 @@
       "&tabId=" + encodeURIComponent(tabId) + "&pageLoadId=" + encodeURIComponent(pageLoadId) +
       "&url=" + encodeURIComponent(page.url) + "&title=" + encodeURIComponent(page.title);
     if (pendingClaim) url += "&claim=" + encodeURIComponent(pendingClaim);
+    if (lastUserInputAt) { url += "&userInputAgoMs=" + userInputAgoMs(); reportedUserInputAt = lastUserInputAt; }
     fetch(url, {
       method: "GET",
       credentials: "omit",

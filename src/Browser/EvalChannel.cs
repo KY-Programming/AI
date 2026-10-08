@@ -47,6 +47,7 @@ internal sealed class EvalChannel
     private volatile bool _reloadReleased;
     private volatile bool _userHoldReload;
     private volatile bool _reserved;
+    private bool _nudged;   // see Nudge
 
     // Duplicate-tab (fork) detection — see AdmitPoll. tabId lives in sessionStorage, which the browser
     // COPIES into a duplicated tab (right-click → Duplicate) and into window.open children, so two
@@ -85,6 +86,22 @@ internal sealed class EvalChannel
         if (string.IsNullOrEmpty(url)) return;   // an older snippet reports nothing — keep what we know
         Url = url.Length > MaxUrl ? url[..MaxUrl] : url;
         Title = title is { Length: > MaxTitle } ? title[..MaxTitle] : title;
+    }
+
+    // When the human last clicked or pressed a key in this tab (real input only — the snippet ignores the
+    // agent's synthetic events and clicks on our own overlay). A tab used that recently is BUSY: an agent
+    // looking for a tab skips it, and if it's the only one left the human is asked first, so an agent can't
+    // navigate away under someone who is testing by hand. Stored as server time (receipt minus the page's
+    // "ms ago"), so a skewed browser clock can't make a tab look busy forever.
+    public static readonly TimeSpan UserBusyFor = TimeSpan.FromSeconds(30);
+    private DateTimeOffset _lastUserInputAt = DateTimeOffset.MinValue;
+    public DateTimeOffset LastUserInputAt { get { lock (_sync) return _lastUserInputAt; } }
+    public bool UserBusy => DateTimeOffset.UtcNow - LastUserInputAt < UserBusyFor;
+    internal void NoteUserInput(long? agoMs)
+    {
+        if (agoMs is null or < 0) return;
+        var at = DateTimeOffset.UtcNow - TimeSpan.FromMilliseconds(agoMs.Value);
+        lock (_sync) if (at > _lastUserInputAt) _lastUserInputAt = at;
     }
 
     public EvalChannel(string token, string? tabId = null)
@@ -342,6 +359,7 @@ internal sealed class EvalChannel
             {
                 if (_pending.Count > 0)
                 {
+                    _nudged = false;   // any return hands the page fresh state, so it covers a nudge too
                     var batch = new List<EvalRequest>(_pending);
                     _pending.Clear();
                     foreach (var r in batch)
@@ -349,6 +367,7 @@ internal sealed class EvalChannel
                             w.TrySetResult(JsonSerializer.Serialize(new { ok = true, dispatched = true, action = "reload" }, Json));
                     return batch;
                 }
+                if (_nudged) { _nudged = false; return Array.Empty<EvalRequest>(); }
                 wake = _wake.Task;
             }
 
@@ -375,6 +394,13 @@ internal sealed class EvalChannel
             w.TrySetResult(string.IsNullOrEmpty(payloadJson) ? "{\"ok\":false,\"error\":\"empty result\"}" : payloadJson);
             return true;
         }
+    }
+
+    // End the parked poll (or the next one) early with no work, so the page picks up a changed poll
+    // response — the handoff prompt appearing or going away — now instead of a poll window later.
+    public void Nudge()
+    {
+        lock (_sync) { _nudged = true; WakeNoLock(); }
     }
 
     // Replace the wake signal and fire the old one so any parked poll drains immediately.

@@ -672,4 +672,147 @@ public class TabRegistryTests
         await Pump(reg, "A");
         Assert.Contains("\"shown\":true", await parked);
     }
+
+    // ── the user busy in a tab (a real click/key press within EvalChannel.UserBusyFor) ──
+
+    [Fact]
+    public async Task A_tab_the_user_is_busy_in_is_skipped_when_looking_for_a_free_one()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A"); await Connect(reg, "B");
+        reg.SetUserInput("A", 0);
+
+        Assert.Equal("B", await OpenAny(reg, "a1", "A", "B"));
+    }
+
+    [Fact]
+    public async Task The_agents_own_last_tab_is_skipped_while_the_user_is_busy_in_it()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A"); await Connect(reg, "B");
+        await OpenOn(reg, "a1", "A");
+        await StopOn(reg, "a1", "A");
+        reg.SetUserInput("A", 0);
+
+        Assert.Equal("B", await OpenAny(reg, "a1", "A", "B"));
+    }
+
+    [Fact]
+    public async Task List_reports_the_users_activity_per_tab()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A"); await Connect(reg, "B");
+        reg.SetUserInput("A", 1000);
+
+        using var doc = System.Text.Json.JsonDocument.Parse(StatusJson(reg));
+        var tabs = doc.RootElement.GetProperty("tabs").EnumerateArray().ToDictionary(t => t.GetProperty("tabId").GetString()!);
+        Assert.True(tabs["A"].GetProperty("userBusy").GetBoolean());
+        Assert.InRange(tabs["A"].GetProperty("userInputAgoMs").GetInt64(), 1000, 10_000);
+        Assert.False(tabs["B"].GetProperty("userBusy").GetBoolean());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, tabs["B"].GetProperty("userInputAgoMs").ValueKind);
+    }
+
+    [Fact]
+    public async Task With_only_a_busy_tab_the_agent_parks_and_the_prompt_there_counts_down()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A");
+        reg.SetUserInput("A", 0);
+
+        var parked = reg.DispatchAsync(Overlay(true), 5000, "a1", null);
+        var poll = await reg.PollAsync("A", null, null, 1000, default);
+        Assert.False(parked.IsCompleted);
+        Assert.Equal(TabRegistry.AutoShareMs, poll.Handoff!.AutoShareMs);
+
+        Assert.True(reg.ShareTab("A", poll.Handoff.Ticket));   // the user's click, or the countdown running out
+        await Pump(reg, "A");                                  // no owner to wait for — granted at once
+        Assert.Contains("\"tabId\":\"A\"", await parked);
+    }
+
+    [Fact]
+    public async Task A_tab_another_agent_drives_shows_the_prompt_without_a_countdown()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A");
+        await OpenOn(reg, "a1", "A");
+        reg.SetUserInput("A", 0);
+
+        var parked = reg.DispatchAsync(Overlay(true), 5000, "a2", null);
+        var poll = await reg.PollAsync("A", null, null, 1000, default);
+        Assert.Null(poll.Handoff!.AutoShareMs);   // sharing here means waiting for a1, never automatic
+
+        reg.DenyHandoff(poll.Handoff.Ticket);
+        Assert.Contains("handoffDenied", await parked);
+    }
+
+    [Fact]
+    public async Task Naming_a_busy_tab_asks_the_user_in_that_tab_only()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A"); await Connect(reg, "B");
+        reg.SetUserInput("A", 0);
+
+        var parked = reg.DispatchAsync(Overlay(true), 5000, "a1", "A");
+        var pollA = await reg.PollAsync("A", null, null, 1000, default);
+        Assert.False(parked.IsCompleted);                                     // B is free, but a1 asked for A
+        Assert.Equal(TabRegistry.AutoShareMs, pollA.Handoff!.AutoShareMs);
+        Assert.Null((await reg.PollAsync("B", null, null, 1, default)).Handoff);
+
+        Assert.True(reg.ShareTab("A", pollA.Handoff.Ticket));
+        await Pump(reg, "A");
+        Assert.Contains("\"tabId\":\"A\"", await parked);
+    }
+
+    [Fact]
+    public async Task A_timed_out_wait_for_a_busy_tab_says_the_user_is_using_it()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A");
+        reg.SetUserInput("A", 0);
+
+        var result = await reg.DispatchAsync(Overlay(true), 1000, "a1", "A");
+        Assert.Contains("handoffTimedOut", result);
+        Assert.Contains("\"userBusy\":true", result);
+    }
+
+    [Fact]
+    public async Task The_agent_driving_a_tab_keeps_it_when_the_user_clicks_in_it()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A");
+        await OpenOn(reg, "a1", "A");
+        reg.SetUserInput("A", 0);
+
+        Assert.Contains("\"shown\":true", await OpenOn(reg, "a1", "A"));   // its own session — Pause is the user's brake
+    }
+
+    [Fact]
+    public async Task A_waiter_gets_the_tab_once_the_user_stops_using_it()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A");
+        reg.SetUserInput("A", (long)EvalChannel.UserBusyFor.TotalMilliseconds - 150);   // busy for another 150ms
+
+        var parked = reg.DispatchAsync(Overlay(true), 5000, "a1", null);
+        await Task.Delay(300);
+        await Finish(reg, "A", parked);   // the next poll's sweep finds A free and hands it over
+        Assert.Contains("\"tabId\":\"A\"", await parked);
+    }
+
+    [Fact]
+    public async Task Parking_wakes_a_waiting_poll_so_the_prompt_shows_at_once()
+    {
+        var reg = new TabRegistry(Tok);
+        await Connect(reg, "A");
+        await OpenOn(reg, "a1", "A");
+
+        var poll = reg.PollAsync("A", null, null, 10_000, default);
+        await Task.Delay(100);
+        var parked = reg.DispatchAsync(Overlay(true), 5000, "a2", null);
+
+        Assert.Same(poll, await Task.WhenAny(poll, Task.Delay(2000)));   // not the 10s window
+        Assert.NotNull((await poll).Handoff);
+        reg.DenyHandoff((await poll).Handoff!.Ticket);
+        await parked;
+    }
 }

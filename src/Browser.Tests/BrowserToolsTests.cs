@@ -227,6 +227,20 @@ public class BrowserToolsTests
     }
 
     [Fact]
+    public async Task Reload_page_is_gated()
+    {
+        // A reload wipes whatever is on screen — possibly the user's own test — so it needs a session.
+        var ch = new EvalChannel("t");   // interaction NOT opened
+        BrowserTools.ForwardHook = (_, waitMs, req, _tab) => InstanceEval.DispatchAsync(ch, req, waitMs);
+        try
+        {
+            Assert.Contains("needsInteraction", await BrowserTools.ReloadPage());
+            Assert.Empty(await ch.PollAsync(50, default));
+        }
+        finally { BrowserTools.ForwardHook = null; }
+    }
+
+    [Fact]
     public async Task Batch_of_reads_only_runs_without_interaction()
     {
         var ch = new EvalChannel("t");   // interaction NOT opened

@@ -46,7 +46,10 @@ internal static class BrowserTools
         "you when it's free, so between tests you keep your tab without passing its id. When the user points " +
         "you at a different page (\"check /orders in project X\"), find the tab showing it here and pass its " +
         "tabId as `tab` — to start_interaction especially, which otherwise gives you your own tab or any free " +
-        "one, possibly the one the user is working in.")]
+        "one. `userBusy:true` marks a tab the user clicked or typed in within the last 30s (`userInputAgoMs` is how " +
+        "long ago). That is no reason to stop or to ask the user in chat: just call start_interaction (with that " +
+        "tab's id if it's the one you need) — that call IS the asking: it shows the user a \"Share this tab\" prompt " +
+        "in that tab and hands it to you when they accept (or don't answer within 10s). Reads there are fine anyway.")]
     public static Task<string> List() => Hub.ListAsync(detail: true);
 
     [McpServerTool(Name = "console_tail"), Description(
@@ -208,12 +211,12 @@ internal static class BrowserTools
 
     // ── interaction (synthetic; see the type header) ──
     //
-    // GATED: click/move/send_key/type_text/scroll/focus/navigate require start_interaction first, which shows
+    // GATED: click/move/send_key/type_text/scroll/focus/navigate/reload_page require start_interaction first, which shows
     // the user a fixed red overlay with an animated cursor so they can see the agent driving the page.
     // Call stop_interaction when done. The gate is enforced by the capture instance (it owns the flag).
 
     [McpServerTool(Name = "start_interaction"), Description(
-        "Open supervised interaction — REQUIRED before click/move/send_key/type_text/scroll/focus/navigate. It draws " +
+        "Open supervised interaction — REQUIRED before click/move/send_key/type_text/scroll/focus/navigate/reload_page. It draws " +
         "a fixed, non-interactable red frame over the app with a cursor icon, so the user can plainly see the " +
         "agent is driving the page; each action then animates that cursor (ripple on click, key cap on a key " +
         "press, the cursor gliding on move). Call stop_interaction when you're finished. Returns {ok, shown, tabId} " +
@@ -222,7 +225,11 @@ internal static class BrowserTools
         "MULTIPLE AGENTS: several agents can drive the same app in parallel, each in its own tab. If another " +
         "agent already holds the only tab, THIS CALL BLOCKS while the user is shown a prompt to open a new tab " +
         "for you (or share the current one when it's free); it then returns your tab, or a refusal " +
-        "(handoffTimedOut/handoffDenied) you should not blindly retry. Note tabs of the same app SHARE cookies, " +
+        "(handoffTimedOut/handoffDenied) you should not blindly retry. The same happens when the only otherwise " +
+        "free tab is one the USER is using (clicked/typed within 30s, userBusy in list) — also when you name it " +
+        "with `tab`: they are asked first, and the tab is handed to you if they don't answer within 10s. So never " +
+        "ask the user in chat for permission to drive a tab, or to click through pages for you — call this and " +
+        "let its prompt ask them. Note tabs of the same app SHARE cookies, " +
         "localStorage and the backend — you get input isolation, not a clean-room: coordinate if you touch shared " +
         "state. Omit project when only one capture is registered.")]
     public static Task<string> StartInteraction(
@@ -239,7 +246,7 @@ internal static class BrowserTools
 
     [McpServerTool(Name = "stop_interaction"), Description(
         "Close supervised interaction and remove the overlay. Call this when you're done driving the page; " +
-        "afterwards click/move/send_key/type_text/scroll/focus/navigate are blocked again until the next " +
+        "afterwards click/move/send_key/type_text/scroll/focus/navigate/reload_page are blocked again until the next " +
         "start_interaction. Returns {ok, shown:false}. Omit project when only one capture is registered.")]
     public static Task<string> StopInteraction(
         [Description("Max ms to wait for the page (default 3000)")] int timeoutMs = 3000,
@@ -442,7 +449,9 @@ internal static class BrowserTools
         "re-instantiates everything. This is a FULL reload, not navigation — to change an SPA route WITHOUT " +
         "re-instantiating everything, use `navigate` instead. Returns {ok, dispatched} once the " +
         "page picks up the reload; capture re-attaches automatically on the fresh load (a new pageLoadId). " +
-        "Returns pageConnected:false if no page is open. Omit project when only one capture is registered.")]
+        "REQUIRES start_interaction first, like navigate — it throws away what's on screen, which may be the " +
+        "user's own work in that tab. Returns pageConnected:false if no page is open. Omit project when only " +
+        "one capture is registered.")]
     public static Task<string> ReloadPage(
         [Description("Max ms to wait for the page to pick up the reload (default 3000)")] int timeoutMs = 3000,
         [Description("Target a specific tab by id (from start_interaction/list); omit to use your own tab (the one you drive, or drove last)")] string? tab = null,

@@ -152,8 +152,8 @@ user a fixed red overlay with an animated cursor so they can see the agent drivi
 | `scroll` | `selector?`, `x?`, `y?` | scrollIntoView, scroll within an element, or window.scrollTo |
 | `focus` | `selector?`, `blur?` | focus (or blur) an element |
 | `wait_for` | `selector?` \| `expression?`, `timeoutMs?`, `pollMs?` | poll in-page until an element appears / an expression is truthy — avoid acting before render |
-| `reload_page` | `timeoutMs?` | **full** reload — re-instantiate everything after a build that changed code (HMR may keep stale instances). Not navigation — use `navigate` to change route without a reload |
-| `navigate` (ungated) | `path`, `replace?`, `timeoutMs?` | change the SPA route **without** a hard reload — finds the Angular `Router` on a dev build and calls `navigateByUrl(path)`, falling back to the History API (pushState + synthetic popstate) otherwise. Returns `{ok, from, to, navigated, method:'router'\|'history'}`; `to` is the settled URL (confirm even a guard redirect). Services/singletons stay live — reach for `reload_page` when you need those re-instantiated |
+| `reload_page` | `timeoutMs?` | **full** reload (gated like `navigate`: it wipes what's on screen) — re-instantiate everything after a build that changed code (HMR may keep stale instances). Not navigation — use `navigate` to change route without a reload |
+| `navigate` | `path`, `replace?`, `timeoutMs?` | change the SPA route **without** a hard reload — finds the Angular `Router` on a dev build and calls `navigateByUrl(path)`, falling back to the History API (pushState + synthetic popstate) otherwise. Returns `{ok, from, to, navigated, method:'router'\|'history'}`; `to` is the settled URL (confirm even a guard redirect). Services/singletons stay live — reach for `reload_page` when you need those re-instantiated |
 | `batch` | `steps[]`, `timeoutMs?` | run an ordered sequence of actions in **one** page round-trip — much faster for multi-step flows. Each step is `{action, …that action's fields}`, `action ∈ click \| move \| key \| type \| wait \| scroll \| focus \| styles \| query \| component \| eval`; steps run in order and **stop at the first failure**. Returns `{ok, count, results:[…], failedAt?}`. Manipulation steps still require `start_interaction` first |
 
 Every interaction returns the element it actually targeted so you can confirm you hit the right
@@ -249,6 +249,15 @@ runtime keeps working — the mark moves onto its new icon, and the app's curren
 - **A tab-less `start_interaction` picks** your own tab → else a tab that's no other agent's (never driven,
   or its agent disconnected) → else another agent's idle tab → else it waits for the user to open or share
   one. If the user paused you in your tab, it's refused with `paused:true` instead of moving you elsewhere.
+- **Tabs the user is using are left alone.** A real click or key press in the last 30s makes a tab
+  `userBusy:true` in `list` (`userInputAgoMs` says how long ago). The picking above skips such a tab — your own
+  included — and naming one with `tab` doesn't claim it either: when nothing else is free you wait, and the
+  prompt in that tab shows **Share this tab** with a 10s countdown that hands the tab over by itself unless the
+  user answers or keeps using the tab (which restarts it) — they may have clicked and walked away. That
+  prompt *is* the agent's request for permission, so an agent seeing `userBusy:true` should just call
+  `start_interaction` rather than stopping to ask in chat (the tool descriptions say so). A timeout
+  then comes back with `userBusy:true`: ask the user rather than retrying. Reads are never held back, and an
+  agent already driving a tab keeps it when the user clicks in it (Pause is their brake for that).
 - **Pointed at a page** (*"check /orders in project X while I work on /users"*): find the tab showing
   `/orders` in `list` and pass its id, above all to `start_interaction` — without one you get your own tab
   or any free one, which may be the tab the user is working in.
@@ -272,14 +281,14 @@ evaluate_js({ expression:
 **2. Open interaction, act, verify, close.**
 
 ```
-start_interaction()                                   // draws the overlay; REQUIRED before click/move/key/type/scroll/focus
+start_interaction()                                   // draws the overlay; REQUIRED before click/move/key/type/scroll/focus/navigate/reload
 click({ selector: 'a[href="/elements/dropdown"]' })   // returns the element actually hit
 wait_for({ expression: 'location.pathname==="/elements/dropdown"' })   // don't act before the route/render settles
 // …read state to confirm…
 stop_interaction()
 ```
 
-To *just change route* (no reload, no overlay needed) skip the click: `navigate({ path: '/elements/dropdown' })`
+To *just change route* (no reload) skip the click: `navigate({ path: '/elements/dropdown' })`
 drives the router directly and returns the settled `to` URL. Since it doesn't reload, the `pageLoadId`
 is unchanged — to read only what the new route logged, page from the prior tail's max `seq` with
 `console_tail({ sinceSeq })`. (`currentPageOnly` segments *reloads*, e.g. after `reload_page`.)

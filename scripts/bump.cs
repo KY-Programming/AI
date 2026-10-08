@@ -6,7 +6,8 @@
 //                           dotnet run scripts/bump.cs -- Net   --set-major 11
 //   Preview only:           ... --dry-run
 //   Interactive (no args):  dotnet run scripts/bump.cs        — or simply:  scripts\bump.cmd
-//                           select one or more projects (arrows + space) and one bump part for all;
+//                           select one or more projects (arrows + space), then one bump part for all
+//                           (arrows + enter) — or "keep" to leave every version as it is;
 //                           Enter with nothing selected bumps the focused project.
 //   (scripts\bump.cmd replaces "dotnet run scripts/bump.cs --"; pass args for scripted use.)
 //
@@ -44,11 +45,13 @@ static int Bump(string[] args)
 
     bool wantInteractive = args.Length == 0 || args.Contains("-i") || args.Contains("--interactive");
     List<BumpRequest>? reqs = wantInteractive ? Interactive(root) : [ParseArgs(args)];
-    if (reqs is null || reqs.Count == 0)
+    if (reqs is null)
     {
         Console.WriteLine("Cancelled — nothing written.");
         return 0;
     }
+    if (reqs.Count == 0)
+        return 0;   // interactive "keep" / nothing to bump — already reported
 
     // CLI path: refuse to bump a dirty project (the interactive path checks right after the project
     // selection). Skipped for a dry run.
@@ -227,8 +230,10 @@ static string Next(string[] args, ref int i, string flag)
 // ---- interactive mode ---------------------------------------------------
 
 // Default path when bump runs with no arguments (e.g. a bare scripts\bump.cmd):
-// select one or more projects (arrows + space), choose one bump part for all, preview, confirm.
-// With nothing selected, Enter bumps the focused project. Returns null if cancelled / nothing to do.
+// select one or more projects (arrows + space), choose one bump part for all (arrows + enter), apply.
+// With nothing selected, Enter bumps the focused project. Returns null if cancelled, an empty list
+// when there's nothing to bump (e.g. "keep" chosen, so a re-run of _all.cmd continues at the
+// current versions).
 static List<BumpRequest>? Interactive(string root)
 {
     Console.WriteLine("Interactive version bump — select project(s), then one bump part applied to all.");
@@ -256,15 +261,25 @@ static List<BumpRequest>? Interactive(string root)
     // Pick the bump part once, applied to every selected project (major resets minor+patch, minor
     // resets patch, revision = patch). For now only Serve's major is supported — on a major bump the
     // framework-pinned leaf tools (Ng/Net) are skipped (set their major via the CLI --set-major).
-    string[] partKeys = ["patch", "minor", "major"];
+    string[] partKeys = ["patch", "minor", "major", "keep"];
     string[] partLabels =
     [
         "revision  (x.x.X)",
         "minor     (x.X.0)",
         "major     (X.0.0)",
+        "keep      (no version change)",
     ];
-    var part = partKeys[Choose(
-        $"Bump which part for the {picks.Length} selected project{(picks.Length == 1 ? "" : "s")}?", partLabels)];
+    var partIdx = Select(
+        $"Bump which part for the {picks.Length} selected project{(picks.Length == 1 ? "" : "s")}?", partLabels);
+    if (partIdx is null) return null;
+    var part = partKeys[partIdx.Value];
+
+    if (part == "keep")
+    {
+        foreach (var idx in picks)
+            Console.WriteLine($"  KY.AI.{projects[idx]} stays {curVers[idx]?.ToString() ?? "?"}.");
+        return [];
+    }
 
     var requests = new List<BumpRequest>();
     foreach (var idx in picks)
@@ -290,12 +305,9 @@ static List<BumpRequest>? Interactive(string root)
     }
 
     if (requests.Count == 0)
-    {
         Console.WriteLine("Nothing to bump.");
-        return null;
-    }
-
-    Console.WriteLine();   // Apply() prints each project's cur -> next and the files it changed.
+    else
+        Console.WriteLine();   // Apply() prints each project's cur -> next and the files it changed.
     return requests;
 }
 
@@ -427,23 +439,37 @@ static (int Code, string Out) GitCapture(string root, params string[] args)
     return (p.ExitCode, stdout);
 }
 
-// Print a numbered menu and return the chosen zero-based index.
-static int Choose(string title, string[] options)
+// Arrow-key single choice: up/down (or k/j) move, enter confirms. Esc (or q) cancels and returns
+// null. Needs a real terminal.
+static int? Select(string title, string[] options)
 {
+    if (Console.IsInputRedirected)
+        throw new BumpError("interactive selection needs a real terminal — pass arguments instead");
+
+    int focus = 0;
+
+    Console.WriteLine(title);
+    Console.WriteLine("  up/down move · enter confirm · esc cancel");
+    for (int i = 0; i < options.Length; i++) Console.WriteLine();   // reserve rows (absorbs any scroll)
+    int top = Console.CursorTop - options.Length;
+
+    void Draw()
+    {
+        Console.SetCursorPosition(0, top);
+        for (int i = 0; i < options.Length; i++)
+            Console.WriteLine($" {(i == focus ? ">" : " ")} {options[i]}");
+    }
+
+    Draw();
     while (true)
     {
-        Console.WriteLine(title);
-        for (int i = 0; i < options.Length; i++)
-            Console.WriteLine($"  {i + 1}) {options[i]}");
-        Console.Write("> ");
-
-        var line = Console.ReadLine();
-        if (line is null) throw new BumpError("no input on stdin — pass arguments instead of running interactively");
-        if (int.TryParse(line.Trim(), out var n) && n >= 1 && n <= options.Length)
-            return n - 1;
-
-        Console.WriteLine($"  enter a number between 1 and {options.Length}.");
-        Console.WriteLine();
+        switch (Console.ReadKey(intercept: true).Key)
+        {
+            case ConsoleKey.UpArrow or ConsoleKey.K:   focus = (focus - 1 + options.Length) % options.Length; Draw(); break;
+            case ConsoleKey.DownArrow or ConsoleKey.J: focus = (focus + 1) % options.Length; Draw(); break;
+            case ConsoleKey.Enter:                     return focus;
+            case ConsoleKey.Escape or ConsoleKey.Q:    return null;
+        }
     }
 }
 

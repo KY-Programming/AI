@@ -101,8 +101,27 @@ internal sealed class TabRegistry
         public required string Ticket { get; init; }
         public required string AgentId { get; init; }
         public string? PinnedTabId { get; set; }        // set by "share this tab": only that tab satisfies it
+        // The tab the agent named (start_interaction tab=…) while the user was busy in it: only that tab
+        // satisfies it, and only that tab shows its prompt.
+        public string? RequestedTabId { get; init; }
+        // Parked because the only tabs that were otherwise free were ones the user is busy in — so a timeout
+        // says that, not "another agent holds the app".
+        public bool UserBusyBlocked { get; init; }
         public required TaskCompletionSource<Grant> Tcs { get; init; }
+
+        // Whether a release/sweep may hand this waiter tab t. A tab the user is busy in only goes to the
+        // waiter it was explicitly shared with — that click IS the user's go-ahead.
+        public bool MayTake(EvalChannel t)
+        {
+            var want = PinnedTabId ?? RequestedTabId;
+            if (want is not null && want != t.TabId) return false;
+            return PinnedTabId == t.TabId || !t.UserBusy;
+        }
     }
+
+    // How long the prompt in a tab the user is busy in counts down before sharing it on its own: they may
+    // have clicked there and walked away, and an agent shouldn't wait out its whole budget for nobody.
+    public const int AutoShareMs = 10_000;
 
     private sealed record Grant(string? TabId, string Reason);   // Reason: granted | denied | timeout
 
@@ -113,7 +132,7 @@ internal sealed class TabRegistry
     // prompt this tab should show. `claim` is sent only on a freshly-opened tab's first poll. url/title are
     // the page the tab is showing (see EvalChannel.Url).
     public async Task<TabPoll> PollAsync(string? tabId, string? claim, string? pageLoadId, int waitMs, CancellationToken ct,
-        string? url = null, string? title = null)
+        string? url = null, string? title = null, long? userInputAgoMs = null)
     {
         var ch = GetOrCreate(tabId);
 
@@ -130,6 +149,7 @@ internal sealed class TabRegistry
 
         if (!string.IsNullOrEmpty(pageLoadId)) ch.CurrentPageLoadId = pageLoadId;
         ch.NotePage(url, title);   // after the fork check: a duplicate must not relabel the tab it was copied from
+        ch.NoteUserInput(userInputAgoMs);   // likewise — and it lets a restarted ky-ai-browser relearn who's busy
 
         var claimed = false;
         if (!string.IsNullOrEmpty(claim))
@@ -171,6 +191,16 @@ internal sealed class TabRegistry
         var ch = Get(tabId);
         if (ch is null) return false;
         ch.NotePage(url, title);
+        return true;
+    }
+
+    // The page reporting the human's latest real click/key press (agoMs before this report). Same "unknown
+    // tab is ignored" rule as SetPage.
+    public bool SetUserInput(string? tabId, long? agoMs)
+    {
+        var ch = Get(tabId);
+        if (ch is null) return false;
+        ch.NoteUserInput(agoMs);
         return true;
     }
 
@@ -247,8 +277,13 @@ internal sealed class TabRegistry
                     return TabBusy(explicitTabId);
                 if (ex.Reserved) return TabReserved(explicitTabId);
                 if (ex.Paused) return InstanceEval.Paused();
-                ex.Assign(agentId, _lease);
-                target = ex;
+                if (ex.UserBusy && !OwnerAlive(ex))   // (not already the caller's own session) the user is working there → ask them first
+                    waiter = Park(agentId, requestedTabId: explicitTabId);
+                else
+                {
+                    ex.Assign(agentId, _lease);
+                    target = ex;
+                }
             }
             else if (FindOwned(agentId) is { } mine)   // already driving a tab → reopen/renew it
             {
@@ -272,15 +307,9 @@ internal sealed class TabRegistry
             {
                 return NoPage();
             }
-            else                                        // all tabs busy or reserved → park for a handoff
+            else                                        // all tabs taken, reserved or in the user's hands → park for a handoff
             {
-                waiter = new Waiter
-                {
-                    Ticket = "c" + Interlocked.Increment(ref _nextTicket).ToString(),
-                    AgentId = agentId,
-                    Tcs = new TaskCompletionSource<Grant>(TaskCreationOptions.RunContinuationsAsynchronously),
-                };
-                _waiters.Add(waiter);
+                waiter = Park(agentId, userBusyBlocked: _tabs.Values.Any(t => FreeOfAgents(t) && t.UserBusy));
             }
         }
 
@@ -299,13 +328,16 @@ internal sealed class TabRegistry
             });
             grant = await waiter!.Tcs.Task;
         }
+        // However it resolved, the prompt must go away in every tab now. Not the granted one: the overlay
+        // show queued on it below wakes it anyway, and a nudge racing that would just return it empty.
+        NudgeTabs(except: grant.TabId);
 
         if (grant.TabId is null)
-            return grant.Reason == "denied" ? HandoffDenied() : HandoffTimedOut();
+            return grant.Reason == "denied" ? HandoffDenied() : HandoffTimedOut(waiter);
 
         EvalChannel granted;
         lock (_sync) _tabs.TryGetValue(grant.TabId, out granted!);
-        if (granted is null) return HandoffTimedOut();
+        if (granted is null) return HandoffTimedOut(waiter);
         return WithTabId(await InstanceEval.DispatchAsync(granted, req, waitMs), granted.TabId);
     }
 
@@ -404,10 +436,10 @@ internal sealed class TabRegistry
         return true;
     }
 
-    // Human clicked "share this tab" on the handoff prompt: pin the ticket's waiter to this tab so it is
-    // granted the moment this tab's owner releases (rather than opening a new tab). Shown in a RESERVED tab
-    // it is the human handing that tab over: the reservation is lifted, and — the tab having no owner to
-    // wait for — the waiter gets it immediately.
+    // Human clicked "share this tab" on the handoff prompt (or its countdown ran out in a tab they'd been
+    // busy in): pin the ticket's waiter to this tab so it is granted the moment this tab's owner releases
+    // (rather than opening a new tab). A tab with no owner to wait for — one the user was busy in, or a
+    // RESERVED one, whose reservation sharing lifts — is handed over immediately.
     public bool ShareTab(string? tabId, string ticket)
     {
         Waiter? granted = null;
@@ -418,10 +450,10 @@ internal sealed class TabRegistry
             if (w is null) return false;
             w.PinnedTabId = tabId ?? LegacyTab;
             _tabs.TryGetValue(w.PinnedTabId, out ch);
-            if (ch is not null && ch.Reserved)
+            if (ch is not null)
             {
-                ch.SetReserved(false);
-                if (ch.PageConnected && !OwnerAlive(ch))
+                if (ch.Reserved) ch.SetReserved(false);
+                if (FreeOfAgents(ch))
                 {
                     _waiters.Remove(w);
                     ch.Assign(w.AgentId, _lease);
@@ -481,6 +513,11 @@ internal sealed class TabRegistry
                     owner = t.OwnerAgentId is null ? null : Label(t.OwnerAgentId),
                     leaseExpiresInMs = t.LeaseValid ? (int)Math.Max(0, (t.LeaseExpiresAt - DateTimeOffset.UtcNow).TotalMilliseconds) : (int?)null,
                     pageConnected = t.PageConnected,
+                    // The human clicked/typed here within EvalChannel.UserBusyFor: agents leave it alone.
+                    userBusy = t.UserBusy,
+                    userInputAgoMs = t.LastUserInputAt == DateTimeOffset.MinValue
+                        ? (long?)null
+                        : (long)(DateTimeOffset.UtcNow - t.LastUserInputAt).TotalMilliseconds,
                     interactionActive = t.InteractionActive,
                     paused = t.Paused,
                     killed = t.Killed,
@@ -610,9 +647,12 @@ internal sealed class TabRegistry
     // A free tab for an agent that holds none, by TAB AFFINITY: its own last tab first; then one that is
     // no other agent's (never driven, or its last agent has disconnected); only then another agent's idle
     // tab. Without this the first free tab won, so two sessions testing turn about kept trading tabs.
+    // A tab the user is busy in is never free here, not even the agent's own last tab: taking it could
+    // navigate away under someone testing by hand. If that leaves nothing, the agent parks and the user is
+    // asked (see HandoffFor's countdown).
     private EvalChannel? FindFreeConnected(string agentId)   // caller holds _sync
     {
-        bool Free(EvalChannel t) => t.PageConnected && !OwnerAlive(t) && !t.Paused && !t.Reserved;
+        bool Free(EvalChannel t) => FreeOfAgents(t) && !t.UserBusy;
         if (FindLastUsed(agentId) is { } own && Free(own)) return own;
         EvalChannel? othersIdle = null;
         foreach (var t in _tabs.Values)
@@ -632,8 +672,37 @@ internal sealed class TabRegistry
 
     private bool AnyConnectedLocked() => _tabs.Values.Any(t => t.PageConnected);
 
-    // Release a tab and hand it straight to the first compatible waiter (FIFO; a share-pinned waiter only
-    // takes its own tab). Only promotes to a LIVE tab — a closed/gone tab is no use to a waiter.
+    // Live and not held by any agent, paused or reserved — free as far as agents are concerned, whether or
+    // not the user is busy in it. Caller holds _sync.
+    private bool FreeOfAgents(EvalChannel t) => t.PageConnected && !OwnerAlive(t) && !t.Paused && !t.Reserved;
+
+    // Queue an agent for a tab. Caller holds _sync. Wakes the connected tabs so the prompt shows now, not a
+    // poll window later.
+    private Waiter Park(string agentId, string? requestedTabId = null, bool userBusyBlocked = false)
+    {
+        var waiter = new Waiter
+        {
+            Ticket = "c" + Interlocked.Increment(ref _nextTicket).ToString(),
+            AgentId = agentId,
+            RequestedTabId = requestedTabId,
+            UserBusyBlocked = userBusyBlocked || requestedTabId is not null,
+            Tcs = new TaskCompletionSource<Grant>(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+        _waiters.Add(waiter);
+        NudgeTabs();
+        return waiter;
+    }
+
+    // End every connected tab's parked poll early so it re-reads its handoff prompt (see EvalChannel.Nudge).
+    private void NudgeTabs(string? except = null)
+    {
+        lock (_sync)
+            foreach (var t in _tabs.Values)
+                if (t.PageConnected && t.TabId != except) t.Nudge();
+    }
+
+    // Release a tab and hand it straight to the first compatible waiter (FIFO; see Waiter.MayTake). Only
+    // promotes to a LIVE tab — a closed/gone tab is no use to a waiter.
     private void ReleaseAndPromote(EvalChannel ch)
     {
         Waiter? promoted = null;
@@ -642,7 +711,7 @@ internal sealed class TabRegistry
             ch.Unassign();
             if (ch.PageConnected && !ch.Reserved)
             {
-                promoted = _waiters.FirstOrDefault(w => w.PinnedTabId is null || w.PinnedTabId == ch.TabId);
+                promoted = _waiters.FirstOrDefault(w => w.MayTake(ch));
                 if (promoted is not null)
                 {
                     _waiters.Remove(promoted);
@@ -678,12 +747,19 @@ internal sealed class TabRegistry
                 {
                     // Owner's session ended but the page is alive → free it, then hand it to a waiter (case 2).
                     t.Unassign();
-                    var w = _waiters.FirstOrDefault(x => x.PinnedTabId is null || x.PinnedTabId == t.TabId);
+                    var w = _waiters.FirstOrDefault(x => x.MayTake(t));
                     if (w is not null && !t.Reserved) { _waiters.Remove(w); t.Assign(w.AgentId, _lease); grants.Add((w, t)); }
                 }
                 else if (ownerGone && !t.PageConnected)
                 {
                     t.Unassign();
+                }
+                else if (_waiters.Count > 0 && FreeOfAgents(t))
+                {
+                    // A free tab while someone waits: the user stopped using it (busy lapsed), or opened it
+                    // themselves. start_interaction would have taken it outright, so a waiter may too.
+                    var w = _waiters.FirstOrDefault(x => x.MayTake(t));
+                    if (w is not null) { _waiters.Remove(w); t.Assign(w.AgentId, _lease); grants.Add((w, t)); }
                 }
 
                 // Drop a long-silent, unowned tab so the registry doesn't accumulate dead tabs. Never drop
@@ -702,10 +778,14 @@ internal sealed class TabRegistry
         lock (_sync)
         {
             if (_waiters.Count == 0 || !ch.PageConnected) return null;
-            // Don't nag the very tab that a share already pinned to this waiter — it's already committed.
-            var w = _waiters.FirstOrDefault(x => x.PinnedTabId is null || x.PinnedTabId != ch.TabId);
+            // Don't nag the very tab that a share already pinned to this waiter — it's already committed —
+            // and show a waiter that asked for one particular tab only there.
+            var w = _waiters.FirstOrDefault(x => x.PinnedTabId != ch.TabId && (x.RequestedTabId is null || x.RequestedTabId == ch.TabId));
             if (w is null) return null;
-            return new HandoffInfo(w.Ticket, Label(w.AgentId));
+            // Only the user's being here keeps this tab from the agent: count down to sharing it on its own,
+            // in case they clicked and walked away.
+            int? autoShareMs = FreeOfAgents(ch) && ch.UserBusy ? AutoShareMs : null;
+            return new HandoffInfo(w.Ticket, Label(w.AgentId), autoShareMs);
         }
     }
 
@@ -764,13 +844,20 @@ internal sealed class TabRegistry
         error = "no page is open — open the app in a browser so a tab exists to interact with.",
     }, Json);
 
-    private static string HandoffTimedOut() => JsonSerializer.Serialize(new
+    private static string HandoffTimedOut(Waiter w) => JsonSerializer.Serialize(new
     {
         ok = false,
         handoffTimedOut = true,
-        error = "another agent is already driving this app and the user did not open a new tab in time. " +
-                "Ask the user to open a tab for you (a prompt is waiting in their browser), or target an " +
-                "existing tab with the tab argument — do not blindly retry.",
+        userBusy = w.UserBusyBlocked ? true : (bool?)null,
+        error = w.RequestedTabId is { } tab
+            ? $"the user is working in tab '{tab}' themselves and did not hand it over in time. Do not drive it " +
+              "under them — ask the user whether you may, or call start_interaction without a tab to get another one."
+            : w.UserBusyBlocked
+                ? "every tab is either driven by another agent or being used by the user right now, and the user " +
+                  "did not hand one over or open a new one in time. Ask them how to proceed — do not blindly retry."
+                : "another agent is already driving this app and the user did not open a new tab in time. " +
+                  "Ask the user to open a tab for you (a prompt is waiting in their browser), or target an " +
+                  "existing tab with the tab argument — do not blindly retry.",
     }, Json);
 
     private static string HandoffDenied() => JsonSerializer.Serialize(new
@@ -801,6 +888,8 @@ internal sealed record TabPoll(
     HandoffInfo? Handoff,
     string? ReassignTabId);
 
-// The "another agent wants in" prompt payload (serialized camelCase → {ticket, agentLabel}, which the
-// snippet reads). Typed rather than anonymous so the instance tests can assert on it.
-internal sealed record HandoffInfo(string Ticket, string AgentLabel);
+// The "another agent wants in" prompt payload (serialized camelCase → {ticket, agentLabel, autoShareMs},
+// which the snippet reads). Typed rather than anonymous so the instance tests can assert on it.
+// AutoShareMs is set only in a tab the user is busy in but no agent holds: the prompt there counts down
+// and shares the tab on its own unless the user answers (or keeps using the tab, which restarts it).
+internal sealed record HandoffInfo(string Ticket, string AgentLabel, int? AutoShareMs = null);

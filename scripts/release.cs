@@ -9,9 +9,9 @@
 // (.NET / Angular / Browser / Terminal / Serve), and only the Angular release is marked GitHub's "Latest". Release notes
 // are every feat:/fix: line since the project's previous tag (src\<Project> only), checked per line
 // so mixed commits keep just their feat:/fix: lines, one per line with no blanks or dashes/hashes.
-// Before publishing, all releases' notes open together in an inline editor — Up/Down move across every
-// line (and from one release into the next), type/Backspace edit, Enter adds a line, Entf drops a line,
-// Ctrl+Enter commits, Esc cancels. Requires the GitHub CLI
+// Before publishing, all releases' notes open together in one file in your editor ($VISUAL / $EDITOR,
+// default notepad) — one "=== <tag> ===" section per release; save and close to continue, then confirm.
+// Deleting a release's whole section (header included) skips that release. Requires the GitHub CLI
 // (https://cli.github.com), authenticated via `gh auth login`.
 //
 // Mapping (project -> tag):  KY.AI.Ng -> ng-v<version> · KY.AI.Net -> dotnet-v<version> ·
@@ -111,33 +111,34 @@ if (dryRun)
     return 0;
 }
 
-// Let the user review and tweak all releases' notes together before publishing.
+// Let the user review and tweak all releases' notes together in their editor (skipped when there's
+// no console, e.g. redirected), then show the final notes and confirm.
 Console.WriteLine();
-Console.WriteLine($"About to create {toCreate.Count} release(s){(draft ? " (draft)" : "")} — review/edit the notes, then commit.");
+Console.WriteLine($"About to create {toCreate.Count} release(s){(draft ? " (draft)" : "")}.");
 if (!Console.IsInputRedirected && !Console.IsOutputRedirected)
 {
-    var edited = EditAllReleases(toCreate);   // null if the user cancelled (Esc); Ctrl+Enter commits
-    if (edited is null)
+    var planned = toCreate.Count;
+    toCreate = EditInEditor(toCreate);
+    if (toCreate.Count == 0)
     {
-        Console.WriteLine("Cancelled — no releases created.");
+        Console.WriteLine("Every release section was removed — no releases created.");
         return 0;
     }
-    toCreate = edited;
+    if (toCreate.Count < planned)
+        Console.WriteLine($"{planned - toCreate.Count} release(s) removed in the editor — skipped.");
 }
-else   // no console to drive the editor (redirected) — show what will be released, then confirm
+
+foreach (var (tag, title, notes, _) in toCreate)
 {
-    foreach (var (tag, title, notes, _) in toCreate)
-    {
-        Console.WriteLine();
-        Console.WriteLine($"  ── {title}  ({tag}){(draft ? "  (draft)" : "")} ──");
-        foreach (var line in notes.Split('\n')) Console.WriteLine($"    {line}");
-    }
     Console.WriteLine();
-    if (!ConfirmYes($"Create {toCreate.Count} release(s)?"))
-    {
-        Console.WriteLine("Aborted — no releases created.");
-        return 0;
-    }
+    Console.WriteLine($"  ── {title}  ({tag}){(draft ? "  (draft)" : "")} ──");
+    foreach (var line in notes.Split('\n')) Console.WriteLine($"    {line}");
+}
+Console.WriteLine();
+if (!ConfirmYes($"Create {toCreate.Count} release(s)?"))
+{
+    Console.WriteLine("Aborted — no releases created.");
+    return 0;
 }
 
 int rc = 0;
@@ -204,157 +205,56 @@ static string ReleaseNotes(string root, string prefix, string tag, string path)
     return lines.Count > 0 ? string.Join("\n", lines) : $"Release {tag}.";
 }
 
-// Interactive editor for every release's notes at once, shown just before publishing. Controls:
-//   Up/Down            move line by line, crossing from one release into the next at its edges
-//   Left/Right, Home/End  move the cursor within the selected line
-//   type a character   insert at the cursor   Backspace   delete the char before it
-//   Enter              add a new line after the selected one   Delete (Entf)   drop the selected line
-//   Ctrl+Enter         commit all releases    Esc   cancel (create nothing)
-// The selected line is highlighted and carries the cursor. Blank lines are dropped on commit (so the
-// "no blank lines" rule holds); a release left empty falls back to "Release <tag>.". Returns the edited
-// releases, or null if the user cancelled.
-static List<(string Tag, string Title, string Notes, string Prefix)>? EditAllReleases(
+// Opens every release's notes together in one temp file in the user's editor ($VISUAL / $EDITOR,
+// default notepad) and reads them back once it's saved and closed. Each release is a section headed
+// "=== <tag> ===" (the tag is how sections map back to releases, so header lines are left as-is).
+// Within a section blank lines are dropped (the "no blank lines" rule) and a section left empty falls
+// back to "Release <tag>.". A release whose header was deleted is left out of the result (skipped).
+// The editor command is split on spaces so a value like "code --wait" works.
+static List<(string Tag, string Title, string Notes, string Prefix)> EditInEditor(
     List<(string Tag, string Title, string Notes, string Prefix)> toCreate)
 {
-    var releases = toCreate
-        .Select(t => (t.Tag, t.Title, t.Prefix, Lines: t.Notes.Split('\n').Select(l => l.TrimEnd()).ToList()))
-        .ToList();
-    foreach (var r in releases) if (r.Lines.Count == 0) r.Lines.Add("");   // keep each release selectable
+    var file = Path.Combine(Path.GetTempPath(), $"ky-ai-release-notes-{DateTime.Now:yyyyMMddHHmmss}.txt");
+    var nl = Environment.NewLine;
+    File.WriteAllText(file, string.Join(nl + nl, toCreate.Select(t =>
+        $"=== {t.Tag} ==={nl}{t.Notes.Replace("\n", nl)}")) + nl);
 
-    int selRel = 0, selLine = 0, col = releases[0].Lines[0].Length;
-    int top = -1, maxRows = 0;
-
-    // Write one full-width row (truncate or pad) so each frame fully overwrites the previous one.
-    static void Row(string s, int width)
+    var editorCommand = Environment.GetEnvironmentVariable("VISUAL")
+                        ?? Environment.GetEnvironmentVariable("EDITOR")
+                        ?? "notepad";
+    var parts = editorCommand.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+    Console.WriteLine($"Opening release notes in {editorCommand} — save and close to continue...");
+    try
     {
-        s = s.Length > width ? s[..width] : s.PadRight(width);
-        Console.Write(s);
-        Console.Write('\n');
-    }
+        var psi = new ProcessStartInfo(parts[0]) { UseShellExecute = false };
+        foreach (var a in parts.Skip(1)) psi.ArgumentList.Add(a);
+        psi.ArgumentList.Add(file);
+        using (var p = Process.Start(psi) ?? throw new InvalidOperationException($"could not start {parts[0]}"))
+            p.WaitForExit();
 
-    // Repaint every release (headers + lines, the selected line highlighted), then the hint + commit line.
-    void Render()
-    {
-        int width = Math.Max(20, Console.WindowWidth - 1);
-        if (top < 0) top = Console.CursorTop;
-        Console.CursorVisible = false;
-        Console.ResetColor();
-        Console.SetCursorPosition(0, top);
-
-        int printed = 0, selRow = top;
-        for (int r = 0; r < releases.Count; r++)
+        // Collect each section's lines by its header tag.
+        var sections = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        List<string>? current = null;
+        foreach (var raw in File.ReadAllLines(file))
         {
-            if (r > 0) { Row("", width); printed++; }
-            Row($"  ── {releases[r].Title}  ({releases[r].Tag}) ──", width); printed++;
-            for (int i = 0; i < releases[r].Lines.Count; i++)
+            var line = raw.Trim();
+            var header = Regex.Match(line, @"^===\s*(\S+)\s*===$");
+            if (header.Success) { current = sections[header.Groups[1].Value] = []; continue; }
+            if (current is not null && line.Length > 0) current.Add(line);
+        }
+
+        return toCreate
+            .Where(t => sections.ContainsKey(t.Tag))
+            .Select(t =>
             {
-                bool selected = r == selRel && i == selLine;
-                if (selected) { selRow = top + printed; Console.BackgroundColor = ConsoleColor.DarkCyan; Console.ForegroundColor = ConsoleColor.Black; }
-                Row("    " + releases[r].Lines[i], width);
-                if (selected) Console.ResetColor();
-                printed++;
-            }
-        }
-        Row("", width); printed++;
-        Row("  [Up/Down] line   [Left/Right] move   type/Backspace edit   [Enter] new line   [Entf] delete line", width); printed++;
-        Row("  press Ctrl+Enter to commit the releases   (Esc to cancel)", width); printed++;
-
-        for (int i = printed; i < maxRows; i++) Row("", width);   // wipe leftovers from a taller frame
-        maxRows = Math.Max(maxRows, printed);
-
-        Console.SetCursorPosition(Math.Min(4 + col, width), Math.Min(selRow, Console.BufferHeight - 1));
-        Console.CursorVisible = true;
+                var kept = sections[t.Tag];
+                return (t.Tag, t.Title, kept.Count > 0 ? string.Join("\n", kept) : $"Release {t.Tag}.", t.Prefix);
+            })
+            .ToList();
     }
-
-    // On commit/cancel: repaint a clean copy (no highlight, no hint, blank lines removed) and park below.
-    void FinalRender()
+    finally
     {
-        int width = Math.Max(20, Console.WindowWidth - 1);
-        Console.CursorVisible = false;
-        Console.ResetColor();
-        Console.SetCursorPosition(0, top);
-        int printed = 0;
-        for (int r = 0; r < releases.Count; r++)
-        {
-            if (r > 0) { Row("", width); printed++; }
-            Row($"  ── {releases[r].Title}  ({releases[r].Tag}) ──", width); printed++;
-            foreach (var l in releases[r].Lines.Select(x => x.Trim()).Where(x => x.Length > 0)) { Row("    " + l, width); printed++; }
-        }
-        for (int i = printed; i < maxRows; i++) Row("", width);
-        Console.SetCursorPosition(0, Math.Min(top + printed, Console.BufferHeight - 1));
-        Console.CursorVisible = true;
-    }
-
-    // Step the selection down/up one line, spilling into the neighbouring release at a release's edge.
-    bool MoveDown()
-    {
-        if (selLine < releases[selRel].Lines.Count - 1) { selLine++; return true; }
-        for (int r = selRel + 1; r < releases.Count; r++)
-            if (releases[r].Lines.Count > 0) { selRel = r; selLine = 0; return true; }
-        return false;
-    }
-    bool MoveUp()
-    {
-        if (selLine > 0) { selLine--; return true; }
-        for (int r = selRel - 1; r >= 0; r--)
-            if (releases[r].Lines.Count > 0) { selRel = r; selLine = releases[r].Lines.Count - 1; return true; }
-        return false;
-    }
-
-    while (true)
-    {
-        Render();
-        var key = Console.ReadKey(intercept: true);
-        var lines = releases[selRel].Lines;
-        switch (key.Key)
-        {
-            case ConsoleKey.UpArrow:    if (MoveUp())   col = releases[selRel].Lines[selLine].Length; break;
-            case ConsoleKey.DownArrow:  if (MoveDown()) col = releases[selRel].Lines[selLine].Length; break;
-            case ConsoleKey.LeftArrow:  if (col > 0) col--; break;
-            case ConsoleKey.RightArrow: if (col < lines[selLine].Length) col++; break;
-            case ConsoleKey.Home:       col = 0; break;
-            case ConsoleKey.End:        col = lines[selLine].Length; break;
-
-            case ConsoleKey.Delete:                        // Entf: drop the selected line.
-                lines.RemoveAt(selLine);
-                if (lines.Count == 0) lines.Add("");
-                if (selLine >= lines.Count) selLine = lines.Count - 1;
-                col = lines[selLine].Length;
-                break;
-
-            case ConsoleKey.Backspace:
-                if (col > 0) { lines[selLine] = lines[selLine].Remove(col - 1, 1); col--; }
-                else if (selLine > 0)                      // at column 0: merge into the previous line
-                {
-                    col = lines[selLine - 1].Length;
-                    lines[selLine - 1] += lines[selLine];
-                    lines.RemoveAt(selLine);
-                    selLine--;
-                }
-                break;
-
-            case ConsoleKey.Enter:
-                if ((key.Modifiers & ConsoleModifiers.Control) != 0)   // Ctrl+Enter: commit every release
-                {
-                    FinalRender();
-                    return releases.Select(r =>
-                    {
-                        var kept = r.Lines.Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
-                        return (r.Tag, r.Title, kept.Count > 0 ? string.Join("\n", kept) : $"Release {r.Tag}.", r.Prefix);
-                    }).ToList();
-                }
-                lines.Insert(selLine + 1, "");             // Enter: add a new line after the selected one
-                selLine++; col = 0;
-                break;
-
-            case ConsoleKey.Escape:
-                FinalRender();
-                return null;                               // cancelled — create nothing
-
-            default:
-                if (!char.IsControl(key.KeyChar)) { lines[selLine] = lines[selLine].Insert(col, key.KeyChar.ToString()); col++; }
-                break;
-        }
+        File.Delete(file);
     }
 }
 
@@ -421,8 +321,8 @@ static void PrintUsage()
         Title: "<Framework> v<version>" (.NET / Angular / Browser / Terminal / Serve); only Angular is marked "Latest".
         Notes: every feat:/fix: line since the project's previous tag (src\<Project> only),
         checked per line, one per line, no blank lines or dashes/hashes. Before publishing, all
-        releases open together in an inline editor (Up/Down move across every line and between
-        releases, type/Backspace edit, Enter add a line, Entf drop a line, Ctrl+Enter commit, Esc cancel).
+        releases open together in one file in your editor ($VISUAL / $EDITOR, default notepad), one
+        "=== <tag> ===" section each; save and close, then confirm. Remove a section to skip that release.
         The tag must already exist on origin — run scripts\tag.cmd first. Requires the gh CLI, authed.
 
         Options:

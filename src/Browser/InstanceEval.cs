@@ -26,8 +26,10 @@ internal static class InstanceEval
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
     };
 
+    // reload counts: it throws away whatever is on screen — a human mid-test in that tab included — so it
+    // needs an open session on a tab the agent owns, like navigate.
     public static bool IsManipulationKind(string? kind) =>
-        kind is "click" or "move" or "key" or "type" or "scroll" or "focus" or "navigate";
+        kind is "click" or "move" or "key" or "type" or "scroll" or "focus" or "navigate" or "reload";
 
     // Gate, then enqueue + await. `ch` is null only if capture isn't running (defensive — an instance
     // always has its channel); waitMs is how long to park the call waiting on the page.

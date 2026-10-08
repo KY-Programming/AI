@@ -288,8 +288,9 @@ internal static class Program
             var tabId = ctx.Request.Query["tabId"].ToString();
             var claim = ctx.Request.Query["claim"].ToString();
             var pageLoadId = ctx.Request.Query["pageLoadId"].ToString();
+            long? userInputAgoMs = long.TryParse(ctx.Request.Query["userInputAgoMs"], out var ago) ? ago : null;
             var poll = await eval.PollAsync(tabId, claim, pageLoadId, EvalPollWindowMs, ctx.RequestAborted,
-                ctx.Request.Query["url"].ToString(), ctx.Request.Query["title"].ToString());
+                ctx.Request.Query["url"].ToString(), ctx.Request.Query["title"].ToString(), userInputAgoMs);
             // interactionActive/paused/killed/holdReload are THIS TAB's now (same field names as before, so the
             // snippet reconciles unchanged) and let a (re)loaded tab restore its own overlay/paused/killed/held
             // state. claimed acks a presented claim ticket; handoff asks this tab to show the "another agent
@@ -475,6 +476,20 @@ internal static class Program
             if (!TokenOk(body, collector.Token)) return Results.Json(new { ok = false });
             return Results.Json(new { ok = eval.SetPage(Str(body, "tabId"), Str(body, "url"), Str(body, "title")) });
         });
+        // The page reporting the human's latest real click/key press, so agents leave a tab they're busy in
+        // alone (see EvalChannel.UserBusy). agoMs, not a timestamp: the browser's clock may be off.
+        app.MapMethods("/__kyai/tab/activity", new[] { "OPTIONS" }, (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            return Results.StatusCode(StatusCodes.Status204NoContent);
+        });
+        app.MapPost("/__kyai/tab/activity", async (HttpContext ctx) =>
+        {
+            Cors(ctx);
+            var body = await ReadBodyAsync(ctx);
+            if (!TokenOk(body, collector.Token)) return Results.Json(new { ok = false });
+            return Results.Json(new { ok = eval.SetUserInput(Str(body, "tabId"), Long(body, "agoMs")) });
+        });
         app.Urls.Add($"http://127.0.0.1:{restPort}");
 
         // The heartbeat keeps ky-ai-ng from auto-reverting our inject (and re-injects if it did); stop it
@@ -568,6 +583,9 @@ internal static class Program
     private static bool? Bool(JsonElement? body, string prop) =>
         body is { } b && b.TryGetProperty(prop, out var v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False
             ? v.GetBoolean() : null;
+
+    private static long? Long(JsonElement? body, string prop) =>
+        body is { } b && b.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var n) ? n : null;
 
     private static string? Str(JsonElement? body, string prop) =>
         body is { } b && b.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
