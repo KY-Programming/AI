@@ -169,6 +169,55 @@ public class ConsoleBufferTests
         Assert.False(ev.TryGetProperty("receivedAt", out _));      // omitted in compact
     }
 
+    // ── dedupe (ConsoleCollector.TailJson dedupe:true) ──
+
+    [Fact]
+    public void TailJson_dedupe_folds_repeats_into_the_latest_occurrence()
+    {
+        var c = new ConsoleCollector(100, () => 0);
+        c.Ingest(Batch(c.Token, "p", null,
+            Raw("warn", "Unknown attribute 'gap'"), Raw("log", "a"), Raw("warn", "Unknown attribute 'gap'"),
+            Raw("error", "Unknown attribute 'gap'"), Raw("warn", "Unknown attribute 'gap'"), Raw("log", "b")));
+
+        using var doc = JsonDocument.Parse(c.TailJson("browser", true, 0, null, 0, 0, null, null, dedupe: true));
+        var root = doc.RootElement;
+        var evs = root.GetProperty("events").EnumerateArray().ToList();
+
+        Assert.True(root.GetProperty("deduped").GetBoolean());
+        Assert.Equal(2, root.GetProperty("collapsed").GetInt32());
+        // ordered by latest occurrence: log a (2), error (4), warn ×3 (latest 5), log b (6)
+        Assert.Equal(new long[] { 2, 4, 5, 6 }, evs.Select(e => e.GetProperty("seq").GetInt64()));
+        var warn = evs[2];
+        Assert.Equal(3, warn.GetProperty("repeat").GetInt32());
+        Assert.Equal(1, warn.GetProperty("firstSeq").GetInt64());
+        Assert.False(evs[1].TryGetProperty("repeat", out _));   // same text, other level ⇒ its own entry, no repeat
+    }
+
+    [Fact]
+    public void TailJson_dedupe_counts_lines_as_distinct_entries()
+    {
+        var c = new ConsoleCollector(100, () => 0);
+        var flood = Enumerable.Range(0, 24).Select(_ => Raw("warn", "same")).ToList();
+        flood.Insert(0, Raw("error", "the real one"));
+        c.Ingest(Batch(c.Token, "p", null, flood.ToArray()));
+
+        using var doc = JsonDocument.Parse(c.TailJson("browser", true, 2, null, 0, 0, null, null, compact: true, dedupe: true));
+        var texts = doc.RootElement.GetProperty("events").EnumerateArray().Select(e => e.GetProperty("text").GetString());
+        Assert.Equal(new[] { "the real one", "same" }, texts);   // without dedupe, lines:2 would be two "same"
+    }
+
+    [Fact]
+    public void TailJson_without_dedupe_keeps_its_shape()
+    {
+        var c = new ConsoleCollector(100, () => 0);
+        c.Ingest(Batch(c.Token, "p", null, Raw("log", "x"), Raw("log", "x")));
+        using var doc = JsonDocument.Parse(c.TailJson("browser", true, 0, null, 0, 0, null, null));
+        var root = doc.RootElement;
+        Assert.False(root.TryGetProperty("deduped", out _));
+        Assert.Equal(2, root.GetProperty("returned").GetInt32());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("events")[0].GetProperty("source").ValueKind);   // full mode keeps null fields
+    }
+
     // ── ConsoleCollector ──
 
     private static ConsoleIngestBatch Batch(string token, string page, long? droppedClient, params RawConsoleEvent[] events)

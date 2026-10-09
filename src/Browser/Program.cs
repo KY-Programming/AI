@@ -205,10 +205,10 @@ internal static class Program
                 payload[pr.Name] = pr.Value.Clone();
             return Results.Content(JsonSerializer.Serialize(payload, EvalJson), "application/json");
         });
-        app.MapGet("/console/tail", (int? lines, string? level, long? sinceSeq, string? grep, string? pageLoad, bool? compact, bool? appOnly, bool? dropFrameworkNoise, bool? currentPageOnly, string? tab) =>
+        app.MapGet("/console/tail", (int? lines, string? level, long? sinceSeq, string? grep, string? pageLoad, bool? compact, bool? appOnly, bool? dropFrameworkNoise, bool? currentPageOnly, string? tab, bool? dedupe) =>
             Results.Content(collector.TailJson("browser", enabled: true,
                 lines is null or <= 0 ? 200 : lines.Value, level, sinceSeq ?? 0, sinceBuildSeq: 0,
-                grep, pageLoad, compact ?? false, appOnly ?? false, dropFrameworkNoise ?? false, currentPageOnly ?? false, tab), "application/json"));
+                grep, pageLoad, compact ?? false, appOnly ?? false, dropFrameworkNoise ?? false, currentPageOnly ?? false, tab, dedupe ?? false), "application/json"));
         app.MapPost("/console/clear", () =>
         {
             collector.Clear();

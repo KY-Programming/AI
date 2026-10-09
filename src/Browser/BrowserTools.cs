@@ -67,7 +67,10 @@ internal static class BrowserTools
         "transport churn (SignalR/WebSocket negotiation, [vite] HMR socket noise). dropFrameworkNoise=true " +
         "SEPARATELY drops known-benign framework banners (DevExtreme/Inferno production-build notice, the " +
         "Angular dev-mode banner, a dev-only router 'Transition was aborted') — set both for a fully clean " +
-        "channel so app-level logs and errors stand out. Omit project when only one capture is registered.")]
+        "channel so app-level logs and errors stand out. dedupe=true folds repeats of one message (same level + " +
+        "text) into a single entry — the latest occurrence, with `repeat` (how many) and `firstSeq`/`firstTimestamp` " +
+        "— so a flood of one warning doesn't bury the rest; `lines` then counts distinct entries and the response " +
+        "reports how many events were `collapsed`. Omit project when only one capture is registered.")]
     public static Task<string> ConsoleTail(
         [Description("Trailing events; 0 = whole buffer (default 200)")] int lines = 0,
         [Description("Min severity: debug|log|info|warn|error|exception")] string? level = null,
@@ -79,9 +82,11 @@ internal static class BrowserTools
         [Description("Drop transport churn (SignalR/WebSocket negotiation, [vite] HMR socket noise)")] bool appOnly = false,
         [Description("Drop known-benign framework banners (Inferno/Angular/router noise); separate from appOnly")] bool dropFrameworkNoise = false,
         [Description("Only this tab's console (tab id from start_interaction/list); omit for the interleaved all-tabs view")] string? tab = null,
+        [Description("Fold repeats of the same message (level + text) into one entry with a `repeat` count")] bool dedupe = false,
         [Description("Project name; omit when only one capture is registered")] string? project = null)
     {
         var q = $"/console/tail?lines={(lines <= 0 ? 200 : lines)}";
+        if (dedupe) q += "&dedupe=true";
         if (!string.IsNullOrEmpty(level)) q += $"&level={Uri.EscapeDataString(level)}";
         if (sinceSeq > 0) q += $"&sinceSeq={sinceSeq}";
         if (!string.IsNullOrEmpty(grep)) q += $"&grep={Uri.EscapeDataString(grep)}";

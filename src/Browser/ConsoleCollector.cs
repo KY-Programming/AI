@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace KY.AI.Browser;
 
@@ -157,40 +158,73 @@ public sealed class ConsoleCollector
     // second call. compact slims each event (drops args when text carries them, truncates stacks, omits
     // null fields); appOnly drops dev-transport churn (SignalR/WebSocket/[vite]); frameworkNoise drops
     // known-benign framework banners; currentPageOnly scopes to the live page load (the one-call "did my
-    // reload clear it?" check) unless an explicit pageLoadId was given (that wins).
+    // reload clear it?" check) unless an explicit pageLoadId was given (that wins). dedupe folds repeats
+    // of one message (see Dedupe).
     public string TailJson(string name, bool enabled,
         int count, string? minLevel, long sinceSeq, long sinceBuildSeq, string? grep, string? pageLoadId,
         bool compact = false, bool appOnly = false, bool frameworkNoise = false, bool currentPageOnly = false,
-        string? tabId = null)
+        string? tabId = null, bool dedupe = false)
     {
         // currentPageOnly scopes to the live page load — of the given tab if one was named, else the
         // instance-wide most-recent (whoever logged last).
         if (string.IsNullOrEmpty(pageLoadId) && currentPageOnly)
             pageLoadId = (string.IsNullOrEmpty(tabId) ? null : CurrentPageLoadIdFor(tabId)) ?? CurrentPageLoadId;
-        var events = Tail(count, minLevel, sinceSeq, sinceBuildSeq, grep, pageLoadId, appOnly, frameworkNoise, tabId);
-        if (compact)
-            return JsonSerializer.Serialize(new
-            {
-                name,
-                enabled,
-                compact = true,
-                returned = events.Count,
-                total = Count,
-                dropped = Dropped,
-                currentPageLoadId = CurrentPageLoadId,
-                events = events.Select(ToCompact),
-            }, CompactJson);
+        var options = compact ? CompactJson : Json;
 
-        return JsonSerializer.Serialize(new
+        // Deduping folds over the whole filtered buffer and THEN takes the tail, so `count` counts distinct
+        // entries — a flood of one warning can't push everything else out of the window.
+        var groups = dedupe
+            ? Dedupe(Tail(0, minLevel, sinceSeq, sinceBuildSeq, grep, pageLoadId, appOnly, frameworkNoise, tabId))
+            : Tail(count, minLevel, sinceSeq, sinceBuildSeq, grep, pageLoadId, appOnly, frameworkNoise, tabId)
+                .Select(e => new EventGroup(e, 1, e.Seq, e.Timestamp)).ToList();
+        if (dedupe && count > 0 && count < groups.Count) groups = groups.Skip(groups.Count - count).ToList();
+
+        var events = new JsonArray();
+        foreach (var g in groups)
         {
-            name,
-            enabled,
-            returned = events.Count,
-            total = Count,
-            dropped = Dropped,
-            currentPageLoadId = CurrentPageLoadId,
-            events,
-        }, Json);
+            var node = JsonSerializer.SerializeToNode(compact ? ToCompact(g.Last) : g.Last, options)!.AsObject();
+            if (g.Repeat > 1)
+            {
+                node["repeat"] = g.Repeat;
+                node["firstSeq"] = g.FirstSeq;
+                node["firstTimestamp"] = g.FirstTimestamp;
+            }
+            events.Add(node);
+        }
+
+        var result = new JsonObject { ["name"] = name, ["enabled"] = enabled };
+        if (compact) result["compact"] = true;
+        if (dedupe)
+        {
+            result["deduped"] = true;
+            result["collapsed"] = groups.Sum(g => g.Repeat - 1);   // events folded into another entry
+        }
+        result["returned"] = events.Count;
+        result["total"] = Count;
+        result["dropped"] = Dropped;
+        if (!compact || CurrentPageLoadId is not null) result["currentPageLoadId"] = CurrentPageLoadId;
+        result["events"] = events;
+        return result.ToJsonString();
+    }
+
+    // One returned entry: the latest occurrence of a message plus how often it occurred and since when.
+    private sealed record EventGroup(ConsoleEvent Last, int Repeat, long FirstSeq, string FirstTimestamp);
+
+    // Fold events with the same level and text into one entry (the latest occurrence, so `seq` stays
+    // usable for sinceSeq paging), ordered by that latest occurrence. Source and stack are deliberately
+    // not part of the key: the same warning raised from two call sites is still the same noise. Events
+    // without text key on their stack, so distinct bare errors don't merge.
+    private static List<EventGroup> Dedupe(IReadOnlyList<ConsoleEvent> events)
+    {
+        var byKey = new Dictionary<string, EventGroup>(StringComparer.Ordinal);
+        foreach (var e in events)
+        {
+            var key = e.Level + "\n" + (e.Text ?? e.Stack ?? "");
+            byKey[key] = byKey.TryGetValue(key, out var g)
+                ? g with { Last = e, Repeat = g.Repeat + 1 }
+                : new EventGroup(e, 1, e.Seq, e.Timestamp);
+        }
+        return byKey.Values.OrderBy(g => g.Last.Seq).ToList();
     }
 
     // Slim view of one event: keep args only when there is no `text` to carry them, clip the stack to
