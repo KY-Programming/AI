@@ -334,14 +334,17 @@
     return out;
   }
 
-  function postResult(id, payload) {
+  // keepalive lets a result posted while the page unloads still arrive (navigate's reload report); only
+  // for small payloads — the browser caps keepalive bodies at 64KB.
+  function postResult(id, payload, keepalive) {
     try {
       fetch(EVAL_RESULT, {
         method: "POST",
         headers: { "Content-Type": "text/plain;charset=UTF-8" },
         body: JSON.stringify({ token: TOKEN, id: id, tabId: tabId, payload: payload }),
         credentials: "omit",
-        cache: "no-store"
+        cache: "no-store",
+        keepalive: !!keepalive
       })["catch"](function () { /* server gone — nothing to do */ });
     } catch (e) { /* never throw into the app */ }
   }
@@ -2252,13 +2255,12 @@
     Promise.resolve(valueOrPromise).then(function (p) { postResult(req.id, p); }, function (e) { postResult(req.id, errPayload(e)); });
   }
 
-  // Best-effort locate the app's ApplicationRef on a dev build (window.ng). There is no token to ask an
-  // injector for from out here, so this walks the root element's injector chain
-  // (ng.ɵgetInjectorResolutionPath) and duck-types the values each R3Injector has already created
-  // (its internal `records`) for one with tick() and an observable isStable. Null when ng or those
-  // internals aren't there (production build, a future Angular) — callers degrade, never throw.
-  // The ɵ is escaped: the snippet may be decoded without a charset.
-  function findAppRef() {
+  // Best-effort find an already-created service of the app on a dev build (window.ng), by shape. There is
+  // no token to ask an injector for from out here, so this walks each root element's injector chain
+  // (ng.ɵgetInjectorResolutionPath) and duck-types the values each R3Injector has already created (its
+  // internal `records`). Null when ng or those internals aren't there (production build, a future
+  // Angular) — callers degrade, never throw.
+  function findInInjectors(test) {
     var ng = window.ng;
     var resolutionPath = ng && ng["ɵgetInjectorResolutionPath"];
     if (typeof resolutionPath !== "function" || typeof ng.getInjector !== "function") return null;
@@ -2272,13 +2274,18 @@
         try {
           recs.forEach(function (rec) {
             var v = rec && rec.value;
-            if (!found && v && typeof v === "object" && typeof v.tick === "function" && v.isStable && typeof v.isStable.subscribe === "function") found = v;
+            if (!found && v && typeof v === "object" && test(v)) found = v;
           });
         } catch (e) {}
         if (found) return found;
       }
     }
     return null;
+  }
+
+  // The app's ApplicationRef: tick() plus an observable isStable.
+  function findAppRef() {
+    return findInInjectors(function (v) { return typeof v.tick === "function" && v.isStable && typeof v.isStable.subscribe === "function"; });
   }
 
   // wait_for_idle: resolve once the page has been settled for quietMs without a break — no app request in
@@ -2331,49 +2338,108 @@
     });
   }
 
-  // Best-effort locate the Angular Router on a dev build (window.ng). Walks the components on the
-  // usual routing anchors and duck-types each instance's own properties for the Router (TS-private
-  // fields are still enumerable own props): a value exposing navigateByUrl + createUrlTree. Returns
-  // the Router instance or null (production build / not found → caller falls back to the History API).
+  // Locate the Angular Router on a dev build (window.ng), most reliable way first:
+  //   1. ng.ɵgetRouterInstance(injector) — the router's own debug hook (Angular 20+);
+  //   2. the injector records (findInInjectors) — older versions without the hook;
+  //   3. the fields of the components on the usual routing anchors — last resort for versions without
+  //      ɵgetInjectorResolutionPath. It misses a Router held in a #private field or used only via inject()
+  //      inside a function, which is why it can't be the only way.
+  // Returns { router, via } or { router: null, reason } — the reason travels into navigate's result, so a
+  // History-API fallback always says why.
   function findRouter() {
     var ng = window.ng;
-    if (!ng || typeof ng.getComponent !== "function") return null;
+    if (!ng || typeof ng.getInjector !== "function")
+      return { router: null, reason: "window.ng is not available (a production build, or not an Angular app)" };
+    var roots = document.querySelectorAll("[ng-version]");
+    if (!roots.length) return { router: null, reason: "no Angular root element ([ng-version]) on the page" };
+    function isRouter(v) { return !!v && typeof v.navigateByUrl === "function" && typeof v.createUrlTree === "function"; }
+
+    var hook = ng["ɵgetRouterInstance"];
+    if (typeof hook === "function")
+      for (var i = 0; i < roots.length; i++) {
+        var r = null;
+        try { r = hook(ng.getInjector(roots[i])); } catch (e) {}
+        if (isRouter(r)) return { router: r, via: "ng.getRouterInstance" };
+      }
+
+    var fromInjector = null;
+    try { fromInjector = findInInjectors(isRouter); } catch (e) {}
+    if (fromInjector) return { router: fromInjector, via: "injector" };
+
     var els = document.querySelectorAll("router-outlet, app-root, [ng-version]");
-    for (var i = 0; i < els.length; i++) {
+    for (var k = 0; k < els.length; k++) {
       var cmp = null;
-      try { cmp = ng.getComponent(els[i]); } catch (e) {}
+      try { cmp = ng.getComponent(els[k]); } catch (e) {}
       if (!cmp) continue;
       var keys;
       try { keys = Object.keys(cmp); } catch (e) { continue; }
       for (var j = 0; j < keys.length; j++) {
         var v;
         try { v = cmp[keys[j]]; } catch (e) { continue; }
-        if (v && typeof v.navigateByUrl === "function" && typeof v.createUrlTree === "function") return v;
+        if (isRouter(v)) return { router: v, via: "component" };
       }
     }
-    return null;
+    return { router: null, reason: "no Angular Router found in the app's injectors (does the app use @angular/router?)" };
   }
 
   // navigate: change the SPA route without a full reload. Prefer the real Router (router.navigateByUrl,
   // strategy-agnostic); fall back to the History API (pushState/replaceState + a synthetic popstate the
   // default PathLocationStrategy picks up, or the hash when the app is already on a hash route). Returns
   // a Promise<payload> with the settled location so the agent can confirm the destination (even a guard
-  // redirect). Reports which `method` drove it.
+  // redirect), which `method` drove it, and — whenever the outcome isn't the plain success — a `reason`.
+  //
+  // It also reports whether the page RELOADED: a route that ends in a full page load (the app assigning
+  // location.href, a server-side redirect, a dev-server reload racing it) wipes every global the agent
+  // set, and the result alone couldn't tell. A pagehide during the navigation posts the result at once
+  // (keepalive, so it still arrives) with reloaded:true; otherwise the payload carries reloaded:false and
+  // the pageLoadId it ran in, to compare against later results.
   function doNavigate(req) {
     var path = req && req.path;
     var from = location.href;
     if (!path) return { ok: false, error: "path is required" };
     overlay.centerLabel("navigate to: " + path);
+    var requested;
+    try { requested = new URL(path.charAt(0) === "/" || /^[a-z][a-z0-9+.-]*:/i.test(path) ? path : "/" + path, location.href).href; }
+    catch (e) { requested = path; }
 
-    var router = null;
-    try { router = findRouter(); } catch (e) { router = null; }
-    if (router) {
-      return Promise.resolve()
-        .then(function () { return router.navigateByUrl(path); })
+    var posted = false;
+    function onPageHide() {
+      if (posted) return;
+      posted = true;
+      postResult(req.id, {
+        ok: true, from: from, requested: requested, reloaded: true, pageLoadId: pageLoadId,
+        reason: "the page unloaded during the navigation — a full page load happened, not a client-side route " +
+          "change, so globals and in-memory state from before are gone"
+      }, true);
+    }
+    window.addEventListener("pagehide", onPageHide);
+    function done(payload) {
+      window.removeEventListener("pagehide", onPageHide);
+      if (posted) return;
+      posted = true;
+      payload.reloaded = false;
+      payload.pageLoadId = pageLoadId;
+      postResult(req.id, payload);
+    }
+
+    var found;
+    try { found = findRouter(); } catch (e) { found = { router: null, reason: String((e && e.message) || e) }; }
+    if (found.router) {
+      Promise.resolve()
+        .then(function () { return found.router.navigateByUrl(path); })
         .then(
-          function (navigated) { return { ok: true, from: from, to: location.href, navigated: navigated !== false, method: "router" }; },
-          function (e) { return { ok: false, from: from, to: location.href, method: "router", error: String((e && e.message) || e) }; }
+          function (navigated) {
+            var p = { ok: true, from: from, to: location.href, requested: requested, navigated: navigated !== false, method: "router", via: found.via };
+            if (navigated === false)
+              p.reason = from === requested
+                ? "already at this URL — the router ignores a navigation to the current URL (onSameUrlNavigation: 'ignore'); use reload_page to re-run the route"
+                : "the router cancelled the navigation (a guard returned false, or a newer navigation superseded it)";
+            else if (location.href !== requested) { p.redirected = true; p.reason = "the router ended on a different URL than requested (a redirect or a guard's UrlTree)"; }
+            done(p);
+          },
+          function (e) { done({ ok: false, from: from, to: location.href, requested: requested, method: "router", via: found.via, error: String((e && e.message) || e) }); }
         );
+      return;
     }
 
     // Fallback: History API. Use the hash when the app is already on a hash route (hashchange fires on
@@ -2387,13 +2453,14 @@
         window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
       }
     } catch (e) {
-      return { ok: false, from: from, to: location.href, method: "history", error: String((e && e.message) || e) };
+      done({ ok: false, from: from, to: location.href, requested: requested, method: "history", fallbackReason: found.reason, error: String((e && e.message) || e) });
+      return;
     }
-    return new Promise(function (resolve) {
-      setTimeout(function () {
-        resolve({ ok: true, from: from, to: location.href, navigated: location.href !== from, method: "history" });
-      }, 150);
-    });
+    setTimeout(function () {
+      var p = { ok: true, from: from, to: location.href, requested: requested, navigated: location.href !== from, method: "history", fallbackReason: found.reason };
+      if (location.href === from) p.reason = "the URL did not change — already there, or nothing reacted to the History-API change";
+      done(p);
+    }, 150);
   }
 
   function dispatchEval(req) {
@@ -2401,7 +2468,7 @@
       if (!req || !req.kind) return;
       switch (req.kind) {
         case "reload": setTimeout(function () { try { location.reload(); } catch (e) {} }, 0); return;
-        case "navigate": postDo(req, doNavigate(req)); return;
+        case "navigate": { var nav = doNavigate(req); if (nav) postResult(req.id, nav); return; }   // posts its own result (see doNavigate)
         case "overlay": postResult(req.id, doOverlay(req)); return;
         case "network": net.set(req.rules); postResult(req.id, net.status()); return;
         case "networkStatus": postResult(req.id, net.status()); return;

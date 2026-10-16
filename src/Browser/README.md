@@ -156,7 +156,7 @@ user a fixed red overlay with an animated cursor so they can see the agent drivi
 | `focus` | `selector?`, `blur?` | focus (or blur) an element |
 | `wait_for` | `selector?` \| `expression?`, `timeoutMs?`, `pollMs?` | poll in-page until an element appears / an expression is truthy — avoid acting before render |
 | `reload_page` | `timeoutMs?` | **full** reload (gated like `navigate`: it wipes what's on screen) — re-instantiate everything after a build that changed code (HMR may keep stale instances). Not navigation — use `navigate` to change route without a reload |
-| `navigate` | `path`, `replace?`, `timeoutMs?` | change the SPA route **without** a hard reload — finds the Angular `Router` on a dev build and calls `navigateByUrl(path)`, falling back to the History API (pushState + synthetic popstate) otherwise. Returns `{ok, from, to, navigated, method:'router'\|'history'}`; `to` is the settled URL (confirm even a guard redirect). Services/singletons stay live — reach for `reload_page` when you need those re-instantiated |
+| `navigate` | `path`, `replace?`, `timeoutMs?` | change the SPA route **without** a hard reload — finds the Angular `Router` on a dev build and calls `navigateByUrl(path)`, falling back to the History API (pushState + synthetic popstate) otherwise. Returns `{ok, from, to, requested, navigated, method:'router'\|'history', via?, fallbackReason?, reason?, redirected?, reloaded, pageLoadId}`; `to` is the settled URL (confirm even a guard redirect). `fallbackReason` says why the Router wasn't used, `reason` why an outcome isn't a plain success (e.g. `navigated:false` because the router ignores a navigation to the current URL), and `reloaded:true` that it ended in a full page load. Services/singletons stay live — reach for `reload_page` when you need those re-instantiated |
 | `set_network_rules` | `rules[]` (`url`, `method?`, `delayMs?`, `block?` \| `status?`+`body?`) | delay, block or fail the app's own requests by URL pattern (`*` glob over the absolute URL, else substring); `[]` clears. The rules belong to the session: they survive reloads within it (set them, then `reload_page`, to test bootstrap loaders) and are cleared when it ends. The badge shows the user that rules are active |
 | `batch` | `steps[]`, `timeoutMs?` | run an ordered sequence of actions in **one** page round-trip — much faster for multi-step flows. Each step is `{action, …that action's fields}`, `action ∈ click \| move \| key \| type \| wait \| idle \| scroll \| focus \| styles \| query \| component \| eval \| sleep`; steps run in order and **stop at the first failure**. Returns `{ok, count, results:[…], failedAt?}`. Manipulation steps still require `start_interaction` first |
 
@@ -171,6 +171,16 @@ cheap on multi-step flows; pass **`detail:true`** on any interaction tool for th
 > resolves async. You can still route the user's way — `click` a nav link / `routerLink` — when you
 > want the real DOM path. `reload_page` is a *full* page reload (a new `pageLoadId`); reach for it only
 > after a code change that needs everything re-instantiated, not to move around.
+>
+> **Finding the Router.** `navigate` asks Angular's own debug hook (`ng.ɵgetRouterInstance`) first, then
+> the injectors, and only last the fields of the root components. The field scan alone used to be the
+> only way, and it misses every app that keeps the Router in a `#private` field or only uses `inject()` —
+> which is why so many apps silently fell back to the History API. The fallback still exists for
+> production builds; the result now says why it happened (`fallbackReason`).
+>
+> **Reload detection is best-effort.** `reloaded:true` is only reported when the page unloads *while* the
+> navigation is still settling. A reload that comes later (a dev-server rebuild a second afterwards)
+> doesn't show up here — compare `pageLoadId` with a later `console_tail`'s `currentPageLoadId` instead.
 
 > **Synthetic-event caveat.** Interaction events are dispatched in-page, so `isTrusted` is `false`:
 > they fire JS handlers but do **not** drive CSS `:hover`, nor user-activation-gated APIs

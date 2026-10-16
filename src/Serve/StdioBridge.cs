@@ -152,8 +152,11 @@ public static class StdioBridge
                         }
                     }
                 }
-                catch (OperationCanceledException) { return; }
-                catch { /* hub not up (or not up yet) — the next call re-ensures it */ }
+                // Only our own shutdown ends the loop — an HttpClient timeout (slow hub) is also an
+                // OperationCanceledException, and stopping on it made the hub take a live agent for
+                // disconnected, releasing its tab.
+                catch (OperationCanceledException) when (stopping.IsCancellationRequested) { return; }
+                catch { /* hub not up (or not up yet, or slow) — the next call re-ensures it */ }
 
                 try { await Task.Delay(Hub.BridgeHeartbeatInterval, stopping.Token); }
                 catch { return; }

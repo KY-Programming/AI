@@ -495,11 +495,16 @@ internal static class BrowserTools
         "router.navigateByUrl(path); if the Router can't be resolved (production build, etc.) it falls back to " +
         "the History API (pushState + a synthetic popstate the default PathLocationStrategy picks up). Because " +
         "it does not reload, already-created services/singletons stay live (use reload_page when you need those " +
-        "re-instantiated). Returns {ok, from, to, navigated, method:'router'|'history'}; `to` is the settled " +
-        "location.href so you can confirm the destination even if a route guard redirected. REQUIRES " +
-        "start_interaction first, like click/move/send_key/type_text/scroll/focus — it changes what's on screen, " +
-        "so the user needs the same visible overlay. If the route resolves async, follow with `wait_for` on a " +
-        "destination selector or location.pathname. Omit project when only one capture is registered.")]
+        "re-instantiated). Returns {ok, from, to, requested, navigated, method:'router'|'history', via?, " +
+        "fallbackReason?, reason?, redirected?, reloaded, pageLoadId}: `to` is the settled location.href (confirm " +
+        "the destination even if a guard redirected — `redirected:true` when it differs from `requested`); " +
+        "`fallbackReason` says why the Router wasn't used; `reason` explains any outcome that isn't a plain " +
+        "success (navigated:false because you were already at that URL — use reload_page to re-run a route — or " +
+        "a guard cancelled it). `reloaded:true` means the navigation ended in a FULL page load (globals and " +
+        "in-memory state you set are gone); `pageLoadId` is the page load it ran in, to compare with later " +
+        "results. REQUIRES start_interaction first, like click/move/send_key/type_text/scroll/focus — it changes " +
+        "what's on screen, so the user needs the same visible overlay. Follow with wait_for_idle (or `wait_for` on " +
+        "a destination selector) before reading the new page. Omit project when only one capture is registered.")]
     public static Task<string> Navigate(
         [Description("Target route/URL to navigate to, e.g. \"/orders/42\" (router path or same-origin URL)")] string path,
         [Description("Use replaceState instead of pushState in the History fallback (no new history entry)")] bool replace = false,

@@ -711,9 +711,15 @@ internal static class Program
     // typically after the machine slept: the wall clock jumps past the stale window, so on wake ng
     // takes us for dead. Its watchdog only re-applies while the inject is active, so nothing else
     // would ever bring the tag back; we re-inject ourselves.
-    private static async Task HeartbeatLoopAsync(string controlUrl, string scriptTag, CancellationToken ct)
+    // Only our own shutdown ends the loop: an HttpClient timeout ALSO throws OperationCanceledException,
+    // and treating that as "stop" killed the heartbeat for good the first time ng answered slowly (busy
+    // machine, e.g. during an npm install) — ng then reverted the tag and the page lost its connection.
+    // `handler`/`timeout`/`interval` are test seams.
+    internal static async Task HeartbeatLoopAsync(string controlUrl, string scriptTag, CancellationToken ct,
+        HttpMessageHandler? handler = null, TimeSpan? timeout = null, TimeSpan? interval = null)
     {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(4) };
+        using var http = handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: false);
+        http.Timeout = timeout ?? TimeSpan.FromSeconds(4);
         var url = controlUrl.TrimEnd('/') + "/inject/heartbeat";
         while (!ct.IsCancellationRequested)
         {
@@ -731,9 +737,9 @@ internal static class Program
                         Console.WriteLine("ky-ai-browser · ky-ai-ng had reverted the inject (e.g. after sleep) — re-applied it");
                 }
             }
-            catch (OperationCanceledException) { break; }
-            catch { /* ng unreachable — keep trying */ }
-            try { await Task.Delay(TimeSpan.FromSeconds(5), ct); } catch { break; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
+            catch { /* ng unreachable or slow (request timed out) — keep trying */ }
+            try { await Task.Delay(interval ?? TimeSpan.FromSeconds(5), ct); } catch { break; }
         }
     }
 

@@ -353,7 +353,7 @@ internal sealed class DevServer : IDisposable
         if (stale)
         {
             RevertInject();   // clears _injectActive via Uninject
-            lock (_ioSync) Console.WriteLine($"{Name} · inject heartbeat lost — reverted index.html");
+            WriteLocal($"{Name} · inject heartbeat lost — reverted index.html");
             return;
         }
         if (EnsureInjected())
