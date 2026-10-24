@@ -2,10 +2,12 @@ using System.Diagnostics;
 
 namespace KY.AI.Serve;
 
-internal enum BuildStatus { Unknown, Building, Success, Failed }
+internal enum BuildStatus { Unknown, Building, Success, Failed, Stopped }
 
 // The settled (or in-progress) result of a dev-server build, as observed from the output stream.
-//   building          — a (re)build is currently running
+//   status            — unknown | building | success | failed | stopped (a build in flight was cut
+//                       short by stop/restart, so it has no verdict of its own)
+//   building         — a (re)build is currently running
 //   pending           — a source file changed that the latest build hasn't incorporated yet
 //   seq               — increments per build, so callers can tell builds apart
 //   startedBy         — the output line that triggered this build (null on a cold start/restart)
@@ -25,6 +27,9 @@ internal enum BuildStatus { Unknown, Building, Success, Failed }
 //                       objects on the previous version; reload the page to be sure. Only set for
 //                       tools that opt in via HotReloadSafeExtensions (ng), never on a cold start.
 //   staleHint         — human-readable companion to mayHaveStaleInstances (null when it is false)
+//   exitCode          — set when the dev-server process exited on its own during this cycle (a crash,
+//                       not a stop/restart); a build in flight then settles as failed with settledBy
+//                       naming the exit. Null while the process is alive or was stopped by us.
 internal sealed record BuildResult(
     string Status,
     bool Building,
@@ -44,7 +49,8 @@ internal sealed record BuildResult(
     string? SettledBy = null,
     bool TimedOut = false,
     bool MayHaveStaleInstances = false,
-    string? StaleHint = null);
+    string? StaleHint = null,
+    int? ExitCode = null);
 
 // Watches the dev-server output (via a tool-specific IBuildMatcher) and a source-file
 // watcher to derive the current build state. `WaitForSettleAsync` blocks until the build
@@ -64,6 +70,10 @@ internal sealed class BuildTracker
     // trigger for THAT build (the dev server printed "Rebuilding…" before our watcher event arrived)
     // rather than a change pending the next build — so filesInLastBuild isn't left empty by the race.
     private static readonly TimeSpan AttributionGrace = TimeSpan.FromSeconds(1);
+
+    // A process that dies this soon after a cold start never got to build anything — usually the
+    // command or the environment is broken (missing/corrupt package, bad args), not the code.
+    private static readonly TimeSpan StartupWindow = TimeSpan.FromSeconds(3);
 
     private const int LineCap = 20;       // raw error/warning lines kept per build
     private const int DiagCap = 40;       // structured diagnostics kept per build
@@ -94,6 +104,7 @@ internal sealed class BuildTracker
     private string? _startedBy;
     private string? _settledBy;
     private int _openDiagIndex = -1;                 // diagnostic awaiting its location line (-1 = none)
+    private int? _exitCode;
 
     // hotReloadSafeExt: extensions a hot reload swaps cleanly (templates/styles); a build touching
     // anything else is flagged mayHaveStaleInstances. Empty ⇒ no stale hint. clock is injectable so
@@ -106,6 +117,46 @@ internal sealed class BuildTracker
     }
 
     public void MarkBuilding() { lock (_sync) BeginNoLock(null); }
+
+    // The dev-server process exited on its own (the caller filters out exits it caused itself). No
+    // output line will ever settle a build in flight now, so settle it as failed — keeping the error
+    // lines collected so far, which usually hold the reason — instead of leaving every wait to run
+    // into its timeout. A cycle that already settled keeps its verdict; exitCode says the server is
+    // gone. Returns the reason, so the caller can log the same text.
+    public string MarkExited(string command, int exitCode)
+    {
+        lock (_sync)
+        {
+            var duringStartup = _status == BuildStatus.Building && _startedBy is null && _now() - _buildStartedAt < StartupWindow;
+            var reason = duringStartup
+                ? $"{command} exited during startup with code {exitCode}"
+                : $"{command} exited with code {exitCode}";
+            _exitCode = exitCode;
+            if (_status is BuildStatus.Building or BuildStatus.Unknown) FinishNoLock(BuildStatus.Failed, reason);
+            return reason;
+        }
+    }
+
+    // The dev-server process could not be started at all (command not found, bad working dir), so
+    // the build MarkBuilding announced will never run. Returns the reason, for the caller's log.
+    public string MarkStartFailed(string command, string error)
+    {
+        lock (_sync)
+        {
+            var reason = $"{command} failed to start: {error}";
+            FinishNoLock(BuildStatus.Failed, reason);
+            return reason;
+        }
+    }
+
+    // We stopped the process (stop, or the old one of a restart). A build in flight is cut short and
+    // has no verdict, so it settles as stopped — a wait returns instead of waiting for output that
+    // will never come. A build that already settled keeps its verdict.
+    public void MarkStopped()
+    {
+        lock (_sync)
+            if (_status == BuildStatus.Building) FinishNoLock(BuildStatus.Stopped, null);
+    }
 
     // Called by the file watcher the moment a source file changes — before the dev server reacts.
     // `path` is recorded so the next build can report which files it incorporated. A change arriving
@@ -207,6 +258,7 @@ internal sealed class BuildTracker
         _incoming.Clear();
         _seq++;
         _settledBy = null;
+        _exitCode = null;
         _sw.Restart();
     }
 
@@ -215,11 +267,16 @@ internal sealed class BuildTracker
         // For matchers where the first settle wins, ignore later settle lines this cycle
         // (e.g. "Now listening on" arriving before "Application started").
         if (_matcher.FirstSettleWins && _status is BuildStatus.Success or BuildStatus.Failed) return;
+        FinishNoLock(status, line.Trim());
+    }
+
+    private void FinishNoLock(BuildStatus status, string? settledBy)
+    {
         _sw.Stop();
         _status = status;
         _durationMs = _sw.ElapsedMilliseconds;
         _finishedAt = _now();
-        _settledBy = line.Trim();
+        _settledBy = settledBy;
     }
 
     // Blocks until the build has settled AND incorporates the latest source change AND has
@@ -238,7 +295,7 @@ internal sealed class BuildTracker
             lock (_sync)
             {
                 snap = SnapshotNoLock();
-                ready = _status is BuildStatus.Success or BuildStatus.Failed && !PendingNoLock();
+                ready = _status is BuildStatus.Success or BuildStatus.Failed or BuildStatus.Stopped && !PendingNoLock();
                 seq = _seq;
             }
 
@@ -298,7 +355,8 @@ internal sealed class BuildTracker
             _startedBy,
             _settledBy,
             MayHaveStaleInstances: stale,
-            StaleHint: hint);
+            StaleHint: hint,
+            ExitCode: _exitCode);
     }
 
     // True when this INCREMENTAL rebuild incorporated a file outside the hot-swappable set (e.g. a

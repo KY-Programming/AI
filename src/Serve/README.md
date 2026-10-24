@@ -37,3 +37,17 @@ its supervisor/hub configuration; the rest is shared here.
 
 Loopback-only — nothing is exposed off the machine. See the
 [project README](../../README.md) for the full picture.
+
+## For Agents
+
+- **Every way the child goes away must settle the build.** Nothing else ends a cycle once the
+  dev-server process is gone, and `wait_for_build` / `restart` / `start` would sit out their full
+  timeout and report `timedOut`, which reads like a slow build. So all three exits settle it: a
+  crash (`Exited`) → `failed` with `exitCode`; a failed `Process.Start()` → `failed` with the start
+  error in `settledBy`, and the supervisor stays up instead of throwing; our own stop mid-build →
+  `stopped`. A new path that ends the child needs the same.
+- **"We stopped it" vs. "it died" is told apart by identity alone.** Every intentional stop (`stop`,
+  the old process of a `restart`) goes through `StopChildNoGateAsync`, which nulls `_child` *before*
+  killing. The `Exited` handler ignores any process that is no longer `_child`. Keep that order, and
+  keep `_child` published under `_ioSync` together with `Start()` — otherwise an instantly crashing
+  child reads as an intentional stop.

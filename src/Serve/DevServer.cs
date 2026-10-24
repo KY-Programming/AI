@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
@@ -120,17 +121,50 @@ internal sealed class DevServer : IDisposable
         };
         foreach (var a in _args) psi.ArgumentList.Add(a);
 
-        var proc = new Process { StartInfo = psi };
+        var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
         proc.OutputDataReceived += (_, e) => { if (e.Data != null) OnLine(e.Data, false); };
         proc.ErrorDataReceived += (_, e) => { if (e.Data != null) OnLine(e.Data, true); };
+        proc.Exited += (_, _) => OnChildExited(proc);
 
         WriteLocal($"↻ {_bannerCommand}  ·  {DateTimeOffset.Now.ToString(BuildTracker.IsoFormat)}");
         _tracker.MarkBuilding();
-        proc.Start();
-        _job.Assign(proc); // OS kills the whole child tree if the supervisor dies, however it dies
-        proc.BeginOutputReadLine();
-        proc.BeginErrorReadLine();
-        lock (_ioSync) _child = proc;
+        // Held across start → publish so a child that dies instantly can't have its Exited handler
+        // run before _child points at it (it would mistake its own crash for an intentional stop).
+        string? startError = null;
+        lock (_ioSync)
+        {
+            try { proc.Start(); }
+            catch (Win32Exception ex) { startError = ex.Message; } // command not found / not executable, working dir missing
+            if (startError is null)
+            {
+                _job.Assign(proc); // OS kills the whole child tree if the supervisor dies, however it dies
+                proc.BeginOutputReadLine();
+                proc.BeginErrorReadLine();
+                _child = proc;
+                return;
+            }
+        }
+        // Report it as a failed build rather than throwing: the supervisor stays up, the verdict names
+        // the cause, and a `restart` retries once it is fixed.
+        proc.Dispose();
+        WriteLocal($"{Name} · {_tracker.MarkStartFailed(_bannerCommand, startError)}");
+    }
+
+    // The child exited. StopChildNoGateAsync nulls _child before it kills, so a process that is no
+    // longer the current child was stopped by us (stop, or the old one of a restart) — nothing to
+    // report. Anything else died on its own: settle the build so waits return now, not at timeout.
+    private void OnChildExited(Process proc)
+    {
+        lock (_ioSync) if (!ReferenceEquals(_child, proc)) return;
+        int code;
+        try
+        {
+            proc.WaitForExit(); // drains the redirected output, so its last words land before the verdict
+            code = proc.ExitCode;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException) { return; } // stopped meanwhile
+        lock (_ioSync) if (!ReferenceEquals(_child, proc)) return;
+        WriteLocal($"{Name} · {_tracker.MarkExited(_bannerCommand, code)}");
     }
 
     private async Task StopChildNoGateAsync()
@@ -148,6 +182,7 @@ internal sealed class DevServer : IDisposable
         }
         catch { /* already gone */ }
         p.Dispose();
+        _tracker.MarkStopped();
     }
 
     private void OnLine(string line, bool isErr)

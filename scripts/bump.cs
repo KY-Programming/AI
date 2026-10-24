@@ -56,7 +56,10 @@ static int Bump(string[] args)
     // CLI path: refuse to bump a dirty project (the interactive path checks right after the project
     // selection). Skipped for a dry run.
     if (!wantInteractive && !reqs.Any(r => r.DryRun) && !EnsureClean(root, reqs.Select(r => r.Project).Distinct()))
+    {
+        Console.Error.WriteLine("Commit or stash first.");
         return 1;
+    }
 
     var changed = new List<string>();
     for (int i = 0; i < reqs.Count; i++)
@@ -140,6 +143,15 @@ static bool ConfirmYes(string question)
         || string.Equals(line, "yes", StringComparison.OrdinalIgnoreCase);
 }
 
+// Yes/No prompt that defaults to NO (empty input or EOF = no).
+static bool ConfirmNo(string question)
+{
+    Console.Write($"{question} [y/N] ");
+    var line = Console.ReadLine()?.Trim();
+    return string.Equals(line, "y", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(line, "yes", StringComparison.OrdinalIgnoreCase);
+}
+
 static int Git(string root, params string[] args)
 {
     var psi = new ProcessStartInfo("git") { UseShellExecute = false, WorkingDirectory = root };
@@ -149,9 +161,10 @@ static int Git(string root, params string[] args)
     return p.ExitCode;
 }
 
-// Refuse to bump when a selected project's src\<Project> folder has uncommitted changes — the
+// Reports whether a selected project's src\<Project> folder has uncommitted changes — the
 // prepare-release commit/tag should reflect a clean project, and bump only commits the version
-// files (not your other edits). Best-effort: never blocks if git is unavailable.
+// files (not your other edits). The CLI path refuses on false; the interactive path asks.
+// Best-effort: never blocks if git is unavailable.
 static bool EnsureClean(string root, IEnumerable<string> projectNames)
 {
     try
@@ -166,7 +179,7 @@ static bool EnsureClean(string root, IEnumerable<string> projectNames)
         }
         if (dirty.Count == 0) return true;
 
-        Console.Error.WriteLine("Uncommitted changes in the selected project(s) — commit or stash first:");
+        Console.Error.WriteLine("Uncommitted changes in the selected project(s):");
         foreach (var d in dirty.Distinct()) Console.Error.WriteLine($"  {d}");
         return false;
     }
@@ -252,8 +265,9 @@ static List<BumpRequest>? Interactive(string root)
     var picks = MultiSelect("Which project(s)?", labels);
     if (picks is null) return null;
 
-    // Right after the selection: refuse if any picked project has uncommitted work.
-    if (!EnsureClean(root, picks.Select(i => projects[i]).Distinct()))
+    // Right after the selection: if any picked project has uncommitted work, ask whether to go on
+    // anyway (default: cancel).
+    if (!EnsureClean(root, picks.Select(i => projects[i]).Distinct()) && !ConfirmNo("Bump anyway?"))
         return null;
 
     Console.WriteLine();

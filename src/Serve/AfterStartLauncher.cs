@@ -23,7 +23,8 @@ internal sealed class AfterStartLauncher : IDisposable
     {
         // Wait for the first build to settle — success or failure both mean the dev server is up and
         // serving (it keeps the page served even with compile errors). A timeout still launches: the
-        // server is usually listening by then, just slow or noisy.
+        // server is usually listening by then, just slow or noisy. A server that is gone (crashed,
+        // failed to start, stopped) serves nothing, so the command would only face a dead port — skip it.
         BuildResult build;
         try { build = await server.WaitForBuildAsync(cfg.DefaultTimeoutMs, cfg.DefaultQuietMs); }
         catch { return; }
@@ -31,6 +32,12 @@ internal sealed class AfterStartLauncher : IDisposable
         lock (_sync) if (_disposed) return;
 
         var status = build.TimedOut ? "first build did not settle in time" : $"first build {build.Status}";
+        if (!server.Running)
+        {
+            var cause = build.SettledBy is { } s ? $"{status}: {s}" : status;
+            Console.Error.WriteLine($"{cfg.ToolName} · --after-start skipped, the dev server is not running ({cause}) — not launching: {string.Join(' ', command)}");
+            return;
+        }
 
         // When handing off to another ky-ai tool that shares this console, frame the launch as the top
         // of a box left open for the launched tool to continue (it draws the ├── … ┤ divider + bottom),

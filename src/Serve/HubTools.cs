@@ -46,7 +46,11 @@ internal static class HubTools
         "templates/styles) and a hot reload may have kept already-created objects on the old version — " +
         "`staleHint` explains it; reload the page (ky-ai-browser's reload_page) if runtime state looks " +
         "stale. Use this after editing files to verify deterministically instead of polling tail. Returns " +
-        "timedOut:true if it doesn't settle within the timeout. This verdict — not a build you run " +
+        "timedOut:true if it doesn't settle within the timeout. If the dev-server process dies, the " +
+        "verdict comes back right away as status failed with `exitCode` set and `settledBy` naming the " +
+        "exit; its last output lines (`summary`/`tail`) usually say why. A process that could not be " +
+        "started at all is failed too, with `settledBy` naming the start error. status `stopped` means " +
+        "the build in flight was cut short by `stop`/`restart` and has no verdict of its own. This verdict — not a build you run " +
         "yourself — is authoritative: the dev server already rebuilds on every save, so never invoke the " +
         "underlying build directly (`dotnet build`, `ng build`, `npm run build`) while it is running. On " +
         ".NET that build fails with MSB3021/MSB3027 (`being used by another process`) because the running " +
@@ -62,7 +66,9 @@ internal static class HubTools
 
     [McpServerTool(Name = "restart"), Description(
         "Restart a dev server and wait for the rebuild; returns the build verdict (status, error/warning " +
-        "counts, duration, diagnostics) plus a noise-free `summary` of the build's key lines. Only needed " +
+        "counts, duration, diagnostics) plus a noise-free `summary` of the build's key lines; a dev server " +
+        "that crashes on start returns at once as failed with `exitCode` set, one that cannot be started " +
+        "at all as failed with the start error in `settledBy`. Only needed " +
         "for changes the dev server does not hot-reload (config/build files, new dependencies), when the " +
         "dev server itself reports it cannot apply a change (e.g. `dotnet watch ⚠ Press \"Ctrl + R\" to " +
         "restart` after a new type or a rude edit), or when it is wedged. A build error you produced by " +

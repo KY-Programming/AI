@@ -294,4 +294,112 @@ public class BuildTrackerTests
         t.Observe("OK");
         Assert.Contains("src/app/next.ts", t.Snapshot().FilesInLastBuild);
     }
+
+    [Fact]
+    public async Task A_child_exiting_mid_build_settles_it_as_failed_so_the_wait_returns_at_once()
+    {
+        var t = new BuildTracker(new FakeMatcher());
+        t.Observe("START");
+        t.Observe("ERR exports is not defined in ES module scope");
+
+        var reason = t.MarkExited("ng serve", 1);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var r = await t.WaitForSettleAsync(timeoutMs: 10000, quietMs: 50);
+
+        Assert.True(sw.ElapsedMilliseconds < 2000, $"wait took {sw.ElapsedMilliseconds} ms");
+        Assert.False(r.TimedOut);
+        Assert.Equal("failed", r.Status);
+        Assert.False(r.Building);
+        Assert.False(r.Pending);
+        Assert.Equal(1, r.ExitCode);
+        Assert.Equal("ng serve exited with code 1", r.SettledBy);
+        Assert.Equal(reason, r.SettledBy);
+        Assert.NotNull(r.FinishedAt);
+        Assert.Contains("ERR exports is not defined in ES module scope", r.ErrorLines);   // the actual reason survives
+    }
+
+    [Fact]
+    public void An_exit_right_after_a_cold_start_is_called_out_as_a_startup_failure()
+    {
+        var now = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+        var t = new BuildTracker(new FakeMatcher(), clock: () => now);
+
+        t.MarkBuilding();
+        now = now.AddMilliseconds(800);
+
+        Assert.Equal("ng serve exited during startup with code 1", t.MarkExited("ng serve", 1));
+    }
+
+    [Fact]
+    public void An_exit_after_a_settled_build_keeps_its_verdict_but_reports_the_exit()
+    {
+        var t = new BuildTracker(new FakeMatcher());
+        t.Observe("START");
+        t.Observe("OK done");
+
+        t.MarkExited("ng serve", -1);
+        var r = t.Snapshot();
+
+        Assert.Equal("success", r.Status);
+        Assert.Equal("OK done", r.SettledBy);
+        Assert.Equal(-1, r.ExitCode);
+    }
+
+    [Fact]
+    public async Task A_stop_mid_build_settles_it_as_stopped_so_the_wait_returns_at_once()
+    {
+        var t = new BuildTracker(new FakeMatcher());
+        t.Observe("START");
+
+        t.MarkStopped();
+        var r = await t.WaitForSettleAsync(timeoutMs: 5000, quietMs: 50);
+
+        Assert.False(r.TimedOut);
+        Assert.Equal("stopped", r.Status);
+        Assert.False(r.Building);
+        Assert.Null(r.SettledBy);
+        Assert.Null(r.ExitCode);
+    }
+
+    [Fact]
+    public void A_stop_after_a_settled_build_keeps_its_verdict()
+    {
+        var t = new BuildTracker(new FakeMatcher());
+        t.Observe("START");
+        t.Observe("FAIL compile");
+
+        t.MarkStopped();
+
+        Assert.Equal("failed", t.Snapshot().Status);
+    }
+
+    [Fact]
+    public void A_start_failure_settles_the_announced_build_as_failed_with_the_cause()
+    {
+        var t = new BuildTracker(new FakeMatcher());
+        t.MarkBuilding();
+
+        var reason = t.MarkStartFailed("ng serve", "The system cannot find the file specified.");
+        var r = t.Snapshot();
+
+        Assert.Equal("failed", r.Status);
+        Assert.False(r.Pending);
+        Assert.Equal("ng serve failed to start: The system cannot find the file specified.", r.SettledBy);
+        Assert.Equal(reason, r.SettledBy);
+    }
+
+    [Fact]
+    public void A_new_build_clears_the_previous_exit()
+    {
+        var t = new BuildTracker(new FakeMatcher());
+        t.MarkBuilding();
+        t.MarkExited("ng serve", 1);
+
+        t.MarkBuilding();                         // restart
+
+        var r = t.Snapshot();
+        Assert.Equal("building", r.Status);
+        Assert.Null(r.ExitCode);
+        Assert.Null(r.SettledBy);
+    }
 }
