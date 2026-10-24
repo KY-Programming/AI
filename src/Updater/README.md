@@ -14,9 +14,24 @@ dotnet tool install --global KY.AI.Updater
 ky-ai-updater            # update ky-ai-updater itself, then every other installed ky-ai-* tool
 ky-ai-updater --all      # update only the OTHER installed ky-ai-* tools (skip self)
 ky-ai-updater list       # show which ky-ai-* tools are installed (and how)
+ky-ai-updater init       # wire every ky-ai-* tool on PATH into your agent, asking once
 ```
 
 Just run `ky-ai-updater` — that's the whole story.
+
+## Wiring all tools at once
+
+`ky-ai-updater init` finds every `ky-ai-*` command on your `PATH`, asks once, and then runs each
+tool's own `init --agent <agent> -y`. The wiring logic stays in the tools (the shared `InitCommand`),
+so this command only orchestrates. Options: `--agent <claude|cursor|vscode>`, `--no-plugin`,
+`--dir <path>`, `-y`.
+
+- Tools are found on `PATH`, not in the global-tool store like the update is, because `init` and the
+  Claude Code plugins run whatever `ky-ai-ng` resolves to, and that can be a local build.
+- A tool too old to know the plugin wiring is skipped with a hint to update first. The probe is
+  `<tool> init --print-agent`, which arrived with the plugin wiring and also yields the agent default.
+  `init --help` can't be used for this: the tools answer it with their general help. Running its old `init` would write the per-project wiring next to the other
+  tools' plugins.
 
 ## How it works
 

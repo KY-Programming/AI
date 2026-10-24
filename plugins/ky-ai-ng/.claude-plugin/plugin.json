@@ -1,0 +1,14 @@
+{
+  "name": "ky-ai-ng",
+  "description": "Angular dev servers (ng serve / ng build) - build state and logs over MCP. Needs ky-ai-ng on PATH.",
+  "author": {
+    "name": "KY-Programming"
+  },
+  "homepage": "https://github.com/KY-Programming/AI",
+  "repository": "https://github.com/KY-Programming/AI",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "ky-ai"
+  ]
+}

@@ -10,6 +10,7 @@ namespace KY.AI.Updater;
 //   ky-ai-updater            update ky-ai-updater itself first, then every other installed ky-ai-* tool
 //   ky-ai-updater --all      update only the OTHER installed ky-ai-* tools (skip self) — the 2nd phase
 //   ky-ai-updater list       show which ky-ai-* tools are installed (and how)
+//   ky-ai-updater init       run `<tool> init` for every ky-ai-* tool on PATH, asking once for all
 //
 // Why two phases?  A running process can't replace its own files on Windows (and shouldn't assume it
 // can elsewhere), so a tool can't cleanly self-update in place. ky-ai-updater sidesteps that the same
@@ -53,6 +54,7 @@ internal static class Program
         {
             "-h" or "--help" or "/?" => Help(),
             "list" or "--list" or "ls" => ListInstalled(),
+            "init" => InitAll(rest[1..]),
             "all" or "-all" or "--all" => UpdateOthers(),
             "" or "update" => skipSelf ? UpdateOthers() : UpdateSelfThenOthers(),
             _ => Unknown(rest[0]),
@@ -146,7 +148,7 @@ internal static class Program
             // different binary, so once those instances are gone we can replace the files in place.
             StopInstances(t.Command);
 
-            var code = RunPackageUpdate(t.UpdateExe, t.UpdateArgs);
+            var code = RunShellInherited(t.UpdateExe, t.UpdateArgs);
             if (code != 0)
             {
                 failed = true;
@@ -196,9 +198,10 @@ internal static class Program
         catch { return Array.Empty<Process>(); }
     }
 
-    // Run a package-manager update with inherited console so the user watches it happen. On Windows we
-    // go through `cmd /c` so the .cmd shim (npm) resolves the same way the .exe (dotnet) does.
-    private static int RunPackageUpdate(string exe, string[] args)
+    // Run a command (a package-manager update, a tool's `init`) with inherited console so the user
+    // watches it happen. On Windows we go through `cmd /c` so a .cmd shim (npm) resolves the same way
+    // an .exe (dotnet) does.
+    private static int RunShellInherited(string exe, string[] args)
     {
         try
         {
@@ -387,6 +390,132 @@ internal static class Program
     private static bool VersionsMatch(string current, string latest)
         => current.Equals(latest, StringComparison.OrdinalIgnoreCase);
 
+    // ── init: wire every ky-ai-* tool into the agent in one go ─────────────────────────────────────
+    // The wiring logic stays in each tool's own `init` (the shared InitCommand in Serve); this only
+    // finds the tools, asks the user ONCE (agent + go-ahead), then runs `<tool> init --agent <id> -y`
+    // for each. Tools are found on PATH rather than via Discover(): `init` (and the Claude plugin it
+    // installs) runs whatever `ky-ai-ng` resolves to, which may be a local build, not a global tool.
+    private static int InitAll(string[] args)
+    {
+        string? agent = null;
+        var passThrough = new List<string>();
+        var assumeYes = false;
+        for (var i = 0; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "-y" or "--yes": assumeYes = true; break;
+                case "--no-plugin": passThrough.Add(args[i]); break;
+                case "--agent" or "--dir":
+                    if (++i >= args.Length)
+                    {
+                        Console.Error.WriteLine($"{ToolCommand} init: {args[i - 1]} needs a value.");
+                        return 1;
+                    }
+                    if (args[i - 1] == "--agent") agent = args[i];
+                    else passThrough.AddRange(["--dir", Path.GetFullPath(args[i])]);
+                    break;
+                case "-h" or "--help": return Help();
+                default:
+                    Console.Error.WriteLine($"{ToolCommand} init: unknown option '{args[i]}'. Try `{ToolCommand} --help`.");
+                    return 1;
+            }
+        }
+
+        var tools = FindToolsOnPath();
+        if (tools.Count == 0)
+        {
+            Console.WriteLine($"{ToolCommand} init: no ky-ai-* tools found on PATH — install some first (see `{ToolCommand} --help`).");
+            return 0;
+        }
+
+        // A tool built before plugin support would quietly write the old per-project wiring, which
+        // then sits next to the plugins of the newer tools. Leave those out and say how to fix it.
+        // `init --print-agent` arrived together with the plugin wiring, so it doubles as the version
+        // probe: an old tool rejects the option, a new one prints the agent its auto-detection picks
+        // here (the same for every tool), which is the default when --agent isn't given.
+        var dirArgs = passThrough.Contains("--dir") ? passThrough.Skip(passThrough.IndexOf("--dir")).Take(2).ToArray() : [];
+        var ready = new List<string>();
+        var outdated = new List<string>();
+        string? detected = null;
+        foreach (var t in tools)
+        {
+            var (ok, output) = TryCapture(t, ["init", "--print-agent", .. dirArgs]);
+            var id = output.Trim();
+            if (ok && id is "claude" or "cursor" or "vscode")
+            {
+                ready.Add(t);
+                detected ??= id;
+            }
+            else
+            {
+                outdated.Add(t);
+            }
+        }
+        if (ready.Count == 0)
+        {
+            Console.Error.WriteLine($"{ToolCommand} init: {string.Join(", ", outdated)} predate(s) this command — run `{ToolCommand}` to update them first.");
+            return 1;
+        }
+        agent ??= detected!;
+
+        Console.WriteLine($"{ToolCommand} init: wiring {ready.Count} tool(s) into agent '{agent}'{(agent == "claude" && !passThrough.Contains("--no-plugin") ? " as Claude Code plugins" : "")}:");
+        foreach (var t in ready) Console.WriteLine($"    • {t}");
+        foreach (var t in outdated) Console.WriteLine($"    ✗ {t,-16} too old for this — run `{ToolCommand}` to update it, then re-run");
+        Console.WriteLine();
+
+        if (!assumeYes)
+        {
+            Console.Write("Continue? (use --agent <claude|cursor|vscode> for a different agent) [Y/n] ");
+            var line = Console.ReadLine();
+            if (!string.IsNullOrWhiteSpace(line) && !line.TrimStart().StartsWith("y", StringComparison.OrdinalIgnoreCase))
+                return 0;
+        }
+
+        var failed = new List<string>();
+        foreach (var t in ready)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"──── {t} ────────────────────────────────");
+            if (RunShellInherited(t, ["init", "--agent", agent, "-y", .. passThrough]) != 0)
+                failed.Add(t);
+        }
+
+        Console.WriteLine();
+        if (failed.Count > 0)
+            Console.WriteLine($"{ToolCommand} init: failed for {string.Join(", ", failed)} — see the output above.");
+        else
+            Console.WriteLine($"{ToolCommand} init: all {ready.Count} tool(s) wired.{(outdated.Count > 0 ? $" Skipped (too old): {string.Join(", ", outdated)}." : "")}");
+        return failed.Count > 0 || outdated.Count > 0 ? 1 : 0;
+    }
+
+    // Every ky-ai-* command name on PATH except the updater itself, de-duplicated and sorted; it is run
+    // by name, so the shell picks the same copy the user would get. On Windows only PATHEXT extensions
+    // count, so .dll/.pdb next to a local build's .exe are ignored.
+    private static List<string> FindToolsOnPath()
+    {
+        var exts = OperatingSystem.IsWindows()
+            ? (Environment.GetEnvironmentVariable("PATHEXT") ?? ".EXE;.CMD;.BAT")
+                .Split(';', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : null;
+        var found = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            string[] files;
+            try { files = Directory.GetFiles(dir.Trim('"'), "ky-ai-*"); }
+            catch { continue; }   // missing or unreadable PATH entry
+            foreach (var file in files)
+            {
+                var ext = Path.GetExtension(file);
+                if (exts is not null ? !exts.Contains(ext) : ext.Length > 0) continue;
+                var command = Path.GetFileNameWithoutExtension(file);
+                if (!command.Equals(ToolCommand, StringComparison.OrdinalIgnoreCase))
+                    found.Add(command);
+            }
+        }
+        return found.ToList();
+    }
+
     // ── windows self-update: a new window that runs after we (the file lock) are gone ─────────────
     // `Wait-Process -Id <pid>` returns the instant we exit (when the OS releases our file handles);
     // -Timeout + SilentlyContinue is a safety valve so it can't hang forever. Then: self-update, then
@@ -510,6 +639,13 @@ internal static class Program
                                   second phase the self-update chains into; run it directly to skip self.
           {{ToolCommand}} list         Show which ky-ai-* tools are installed (dotnet global tools + npm globals),
                                   with each tool's installed version and the latest published version.
+          {{ToolCommand}} init         Wire every ky-ai-* tool on PATH into your agent: runs each tool's own
+                                  `init` after asking once. For Claude Code that installs the tools'
+                                  plugins (user scope) and removes their old entries from this project.
+              --agent <name>      claude | cursor | vscode (default: auto-detected here)
+              --no-plugin         Claude only: wire this project via .mcp.json instead of plugins
+              --dir <path>        Project to clean up / wire (default: the current directory)
+              -y, --yes           Don't ask
 
         HOW IT WORKS
           A process can't replace its own files while running, so the self-update is handed to a

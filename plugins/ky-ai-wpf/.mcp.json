@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "ky-ai-wpf": {
+      "command": "ky-ai-wpf",
+      "args": [
+        "connect"
+      ]
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "ky-ai-terminal": {
+      "command": "ky-ai-terminal",
+      "args": [
+        "connect"
+      ]
+    }
+  }
+}

@@ -239,6 +239,100 @@ public class InitCommandTests
         Assert.False(second.ServerEnabledAdded);
     }
 
+    // ── plugin mode: user-settings reads and the project cleanup ──
+
+    [Fact]
+    public void Plugin_names_follow_claudes_plugin_tool_naming()
+    {
+        Assert.Equal("ky-ai-ng@ky-ai", InitCommand.PluginId("ky-ai-ng"));
+        Assert.Equal("mcp__plugin_ky-ai-ng_ky-ai-ng__*", InitCommand.PluginPermission("ky-ai-ng"));
+    }
+
+    [Fact]
+    public void IsPluginEnabled_needs_an_enabled_true_entry_for_this_tool()
+    {
+        const string settings = """
+        { "enabledPlugins": { "ky-ai-ng@ky-ai": true, "ky-ai-wpf@ky-ai": false, "other@x": true } }
+        """;
+
+        Assert.True(InitCommand.IsPluginEnabled(settings, "ky-ai-ng"));
+        Assert.False(InitCommand.IsPluginEnabled(settings, "ky-ai-wpf"));     // installed but disabled
+        Assert.False(InitCommand.IsPluginEnabled(settings, "ky-ai-dotnet"));  // not installed
+        Assert.False(InitCommand.IsPluginEnabled(null, "ky-ai-ng"));          // no settings file
+    }
+
+    [Fact]
+    public void IsMarketplaceKnown_reads_extraKnownMarketplaces()
+    {
+        Assert.True(InitCommand.IsMarketplaceKnown("""{ "extraKnownMarketplaces": { "ky-ai": { "source": {} } } }"""));
+        Assert.False(InitCommand.IsMarketplaceKnown("""{ "extraKnownMarketplaces": { "other": {} } }"""));
+        Assert.False(InitCommand.IsMarketplaceKnown(null));
+    }
+
+    [Fact]
+    public void MergeUserAllowJson_adds_the_wildcard_once_and_keeps_other_settings()
+    {
+        const string existing = """{ "permissions": { "allow": [ "Bash(git *)" ] }, "model": "opus" }""";
+
+        var first = InitCommand.MergeUserAllowJson(existing, "ky-ai-ng");
+        var second = InitCommand.MergeUserAllowJson(first.Json, "ky-ai-ng");
+
+        Assert.True(first.Changed);
+        Assert.False(second.Changed);
+        var root = JsonNode.Parse(second.Json)!;
+        var allow = root["permissions"]!["allow"]!.AsArray().Select(n => n!.GetValue<string>()).ToList();
+        Assert.Equal(new[] { "Bash(git *)", "mcp__plugin_ky-ai-ng_ky-ai-ng__*" }, allow);
+        Assert.Equal("opus", root["model"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void RemoveMcpServer_removes_only_this_tool()
+    {
+        const string existing = """
+        { "mcpServers": { "ky-ai-ng": { "command": "x" }, "ky-ai-dotnet": { "command": "y" }, "other": { "command": "z" } } }
+        """;
+
+        var res = InitCommand.RemoveMcpServer(existing, "ky-ai-ng");
+
+        Assert.True(res.Changed);
+        var servers = JsonNode.Parse(res.Json)!["mcpServers"]!.AsObject();
+        Assert.False(servers.ContainsKey("ky-ai-ng"));
+        Assert.True(servers.ContainsKey("ky-ai-dotnet"));
+        Assert.True(servers.ContainsKey("other"));
+
+        Assert.False(InitCommand.RemoveMcpServer(res.Json, "ky-ai-ng").Changed);   // nothing left to remove
+    }
+
+    [Fact]
+    public void RemoveProjectSettings_undoes_MergeSettingsJson_for_one_tool_only()
+    {
+        var wired = InitCommand.MergeSettingsJson("""{ "permissions": { "allow": [ "Bash(git *)" ] } }""",
+            "ky-ai-ng", new[] { "list", "status" });
+        wired = InitCommand.MergeSettingsJson(wired.Json, "ky-ai-dotnet", new[] { "list" });
+
+        var res = InitCommand.RemoveProjectSettings(wired.Json, "ky-ai-ng");
+
+        Assert.Equal(2, res.CommandsRemoved);
+        Assert.True(res.ServerEnabledRemoved);
+        var root = JsonNode.Parse(res.Json)!;
+        var allow = root["permissions"]!["allow"]!.AsArray().Select(n => n!.GetValue<string>()).ToList();
+        Assert.Equal(new[] { "Bash(git *)", "mcp__ky-ai-dotnet__list" }, allow);
+        var enabled = root["enabledMcpjsonServers"]!.AsArray().Select(n => n!.GetValue<string>());
+        Assert.Equal(new[] { "ky-ai-dotnet" }, enabled);
+    }
+
+    [Fact]
+    public void RemoveProjectSettings_does_not_touch_a_tool_sharing_the_prefix()
+    {
+        // "mcp__ky-ai-ng__" must not match "mcp__ky-ai-ngx__…" — the separator is part of the prefix.
+        const string existing = """{ "permissions": { "allow": [ "mcp__ky-ai-ngx__list" ] }, "enabledMcpjsonServers": [ "ky-ai-ngx" ] }""";
+
+        var res = InitCommand.RemoveProjectSettings(existing, "ky-ai-ng");
+
+        Assert.Equal(0, res.CommandsRemoved);
+        Assert.False(res.ServerEnabledRemoved);
+    }
+
     // ── Discover (walks up from a start directory) ──
 
     [Fact]

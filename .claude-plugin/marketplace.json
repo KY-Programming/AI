@@ -1,0 +1,34 @@
+{
+  "name": "ky-ai",
+  "description": "Optional Claude Code plugins that wire the KY.AI tools into every session, instead of a per-project .mcp.json.",
+  "owner": {
+    "name": "KY-Programming"
+  },
+  "plugins": [
+    {
+      "name": "ky-ai-ng",
+      "source": "./plugins/ky-ai-ng",
+      "description": "Angular dev servers (ng serve / ng build) — build state and logs over MCP."
+    },
+    {
+      "name": "ky-ai-dotnet",
+      "source": "./plugins/ky-ai-dotnet",
+      "description": ".NET backends (dotnet watch run / build) — build state and logs over MCP."
+    },
+    {
+      "name": "ky-ai-browser",
+      "source": "./plugins/ky-ai-browser",
+      "description": "Browser console capture and supervised interaction for apps served by ky-ai-ng."
+    },
+    {
+      "name": "ky-ai-terminal",
+      "source": "./plugins/ky-ai-terminal",
+      "description": "Shared interactive terminal — you drive, the agent rides along. Windows-only."
+    },
+    {
+      "name": "ky-ai-wpf",
+      "source": "./plugins/ky-ai-wpf",
+      "description": "Focus-free UI Automation for running WPF/WinForms/Win32 windows. Windows-only."
+    }
+  ]
+}

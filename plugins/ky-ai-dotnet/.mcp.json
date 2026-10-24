@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "ky-ai-dotnet": {
+      "command": "ky-ai-dotnet",
+      "args": [
+        "connect"
+      ]
+    }
+  }
+}

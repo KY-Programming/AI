@@ -1,0 +1,14 @@
+{
+  "name": "ky-ai-browser",
+  "description": "Browser console capture and supervised interaction for apps served by ky-ai-ng. Needs ky-ai-browser on PATH.",
+  "author": {
+    "name": "KY-Programming"
+  },
+  "homepage": "https://github.com/KY-Programming/AI",
+  "repository": "https://github.com/KY-Programming/AI",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "ky-ai"
+  ]
+}

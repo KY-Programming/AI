@@ -69,7 +69,9 @@ instance, Ctrl+C it in its own terminal.
 
 `ky-ai-browser init` wires it into your agent for you — it targets **Claude Code, Cursor, or VS
 Code** (`--agent <claude|cursor|vscode>`, default auto-detect with an interactive picker; re-run it
-after an update to pick up new tools). To wire it by hand, add the server to the agent's MCP config —
+after an update to pick up new tools). For Claude Code it installs the `ky-ai-browser` plugin for
+your user rather than writing project files (see [Claude Code plugins](../../README.md#claude-code-plugins));
+`--no-plugin` keeps the project wiring. To wire it by hand, add the server to the agent's MCP config —
 **Claude Code** `.mcp.json` / **Cursor** `.cursor/mcp.json` (both use `mcpServers`; drop `type` for
 Cursor) / **VS Code** `.vscode/mcp.json` (top-level `servers` key):
 

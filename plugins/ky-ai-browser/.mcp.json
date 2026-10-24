@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "ky-ai-browser": {
+      "command": "ky-ai-browser",
+      "args": [
+        "connect"
+      ]
+    }
+  }
+}

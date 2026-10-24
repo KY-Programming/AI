@@ -64,9 +64,11 @@ shows the mode below it, and agent suggestions pop out just above the input line
 
 ## Connect your agent
 
-**`ky-ai-terminal init`** does the MCP wiring for Claude Code automatically: it walks up to the
-nearest `.mcp.json` and `.claude/`, adds the server, and allows the `mcp__ky-ai-terminal__*`
-commands (idempotent; `-y` skips the prompts). To do it by hand, add the server and allow the tools:
+**`ky-ai-terminal init`** does the MCP wiring for Claude Code automatically: it installs the
+`ky-ai-terminal` plugin for your user and allows its tools (see
+[Claude Code plugins](../../README.md#claude-code-plugins); idempotent, `-y` skips the prompts). With
+`--no-plugin` it instead walks up to the nearest `.mcp.json` and `.claude/`, adds the server, and
+allows the `mcp__ky-ai-terminal__*` commands. To do it by hand, add the server and allow the tools:
 
 ```json
 { "mcpServers": { "ky-ai-terminal": { "type": "http", "url": "http://127.0.0.1:5103/mcp" } } }

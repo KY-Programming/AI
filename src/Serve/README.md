@@ -24,9 +24,11 @@ add-on). This package exists so a new framework seam can reuse the same hub/supe
   projects' serve builders (e.g. `@ky/mantic:serve`) regenerate `index.html` on every `ng serve`
   start, so a dev-server `restart` would otherwise silently disconnect the page for good.
 - **`InitCommand` / `ShutdownCommand` / `UpdateCommand`** — the shared CLI commands each exe
-  dispatches: `<tool> init` wires the tool into a Claude Code workspace (merges its MCP server into
-  the nearest `.mcp.json` and its command allow-list + `enabledMcpjsonServers` into
-  `.claude/settings.local.json`), `<tool> shutdown` tears down the hub and its supervisors, and
+  dispatches: `<tool> init` wires the tool into an agent (for Claude Code it installs the tool's
+  user-scope plugin and removes the old project entries — see the main README's "Claude Code plugins";
+  with `--no-plugin`, or for Cursor/VS Code, it merges the MCP server into the project's MCP config
+  and, for Claude, the command allow-list + `enabledMcpjsonServers` into `.claude/settings.local.json`),
+  `<tool> shutdown` tears down the hub and its supervisors, and
   `<tool> update` stops running instances and runs the right package-manager update.
 
 A framework tool supplies a `BuildMatcher` (mapping CLI output to build start/settle/error/warning,

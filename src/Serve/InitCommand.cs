@@ -22,8 +22,18 @@ namespace KY.AI.Serve;
 // into existing files without disturbing other content; the MCP command list is read by reflection
 // from the tool's own MCP tool type, so it never drifts.
 //
+// For Claude Code the default is different: instead of the project files above, `init` installs the
+// tool's Claude Code PLUGIN (user scope, from the `ky-ai` marketplace in this repo), allows its tools
+// with one wildcard rule in the user settings, and removes the tool's old project wiring from the
+// nearest `.mcp.json` / `.claude/settings.local.json`. Why: Claude Desktop was seen dropping project
+// `.mcp.json` servers at the end of a turn and never reconnecting them, while plugin servers stay up.
+// Plugin and project entry must never coexist (Claude would show every tool twice), so a plain `init`
+// in a project that still has the old entry migrates it, and `--no-plugin` (the old project wiring)
+// refuses while the plugin is enabled.
+//
 // The discovery and JSON-merge logic is split into pure, file-system-free statics (Discover,
-// MergeMcpJson, MergeSettingsJson, DiscoverToolNames) so they can be unit-tested directly.
+// MergeMcpJson, MergeSettingsJson, DiscoverToolNames, and the plugin-mode merges below) so they can be
+// unit-tested directly.
 public static class InitCommand
 {
     private static readonly JsonSerializerOptions WriteOpts = new()
@@ -55,6 +65,8 @@ public static class InitCommand
         Cli.TrySetUtf8Console();
 
         var assumeYes = false;
+        var noPlugin = false;
+        var printAgent = false;
         string? agentId = null;
         var startDir = Environment.CurrentDirectory;
         for (var i = 0; i < rest.Length; i++)
@@ -62,6 +74,8 @@ public static class InitCommand
             switch (rest[i])
             {
                 case "-y" or "--yes": assumeYes = true; break;
+                case "--no-plugin": noPlugin = true; break;
+                case "--print-agent": printAgent = true; break;
                 case "--dir": if (++i < rest.Length) startDir = Path.GetFullPath(rest[i]); break;
                 case "--agent":
                     if (++i >= rest.Length)
@@ -76,6 +90,14 @@ public static class InitCommand
                     Console.Error.WriteLine($"{toolName} init: unknown option '{rest[i]}'. Try `{toolName} init --help`.");
                     return 1;
             }
+        }
+
+        // `--print-agent`: just report which agent auto-detection picks here, so `ky-ai-updater init`
+        // can ask once for the whole suite instead of every tool showing its own picker.
+        if (printAgent)
+        {
+            Console.WriteLine((AgentTargets.Detect(startDir) ?? AgentTargets.Claude).Id);
+            return 0;
         }
 
         // ── pick the target agent: explicit --agent, else auto-detect (confirmed via a picker) ──
@@ -97,6 +119,20 @@ public static class InitCommand
         {
             var detected = AgentTargets.Detect(startDir) ?? AgentTargets.Claude;
             agent = (assumeYes || Console.IsInputRedirected) ? detected : SelectAgent(detected);
+        }
+
+        if (agent.HasPlugin)
+        {
+            if (!noPlugin)
+                return RunPlugin(toolName, startDir, assumeYes, runHint);
+
+            // The project entry would sit next to the enabled plugin and show every tool twice.
+            if (IsPluginEnabled(ReadIfExists(ClaudeUserSettingsPath()), toolName))
+            {
+                Console.Error.WriteLine($"{toolName} init: the {PluginId(toolName)} plugin is enabled, so a project entry would show every {toolName} tool twice.");
+                Console.Error.WriteLine($"  Run `{toolName} init` without --no-plugin, or disable the plugin first: claude plugin disable {PluginId(toolName)}");
+                return 1;
+            }
         }
 
         // The allow-list step needs the tool's MCP command names; only Claude uses it.
@@ -195,6 +231,299 @@ public static class InitCommand
         else
             Console.WriteLine($"Already configured — nothing to do.{runHintPart}");
         return rc;
+    }
+
+    // ── Claude Code plugin mode (the default for Claude) ──
+    // Three steps, each prompting only when it would change something:
+    //   1. install the tool's plugin via the `claude` CLI (adding the marketplace first if unknown)
+    //   2. allow all of its tools with one wildcard rule in the user settings
+    //   3. remove the tool's old project wiring (server entry, allow-list, enabled flag)
+    // Steps 2 and 3 only run once the plugin is actually enabled: removing the project entry without
+    // the plugin in place would leave the agent with no access at all.
+    private static int RunPlugin(string toolName, string startDir, bool assumeYes, string? runHint)
+    {
+        var userSettingsPath = ClaudeUserSettingsPath();
+        var paths = Discover(startDir, AgentTargets.Claude);
+        var pluginId = PluginId(toolName);
+
+        Console.WriteLine($"Agent:        {AgentTargets.Claude.DisplayName} (plugin {pluginId}, all projects)");
+        Console.WriteLine($"User config:  {userSettingsPath}");
+        if (paths.McpExists || paths.SettingsExists)
+            Console.WriteLine($"Project:      {paths.Root}  (checked for old {toolName} entries)");
+        Console.WriteLine();
+
+        var rc = 0;
+        var anyChange = false;
+        var installed = false;
+
+        // ── step 1: the plugin itself ──
+        var pluginOn = IsPluginEnabled(ReadIfExists(userSettingsPath), toolName);
+        if (pluginOn)
+        {
+            Console.WriteLine($"{Check} plugin {pluginId} already installed — no change.");
+        }
+        else if (Confirm($"Install the {pluginId} Claude Code plugin for your user (all projects)?", assumeYes))
+        {
+            var claude = FindOnPath("claude");
+            if (claude is null)
+            {
+                Console.Error.WriteLine("! the `claude` CLI is not on PATH, so the plugin can't be installed.");
+                Console.Error.WriteLine($"  Install Claude Code (https://claude.com/claude-code), or wire this project the old way: {toolName} init --no-plugin");
+                return 1;
+            }
+
+            if (!IsMarketplaceKnown(ReadIfExists(userSettingsPath)) &&
+                RunClaude(claude, ["plugin", "marketplace", "add", MarketplaceSource, "--scope", "user"]) != 0)
+            {
+                Console.Error.WriteLine($"! could not add the {MarketplaceName} marketplace ({MarketplaceSource}) — see the output above.");
+                return 1;
+            }
+            if (RunClaude(claude, ["plugin", "install", pluginId, "--scope", "user"]) != 0)
+            {
+                Console.Error.WriteLine($"! could not install {pluginId} — see the output above.");
+                return 1;
+            }
+
+            pluginOn = IsPluginEnabled(ReadIfExists(userSettingsPath), toolName);
+            if (!pluginOn)
+            {
+                Console.Error.WriteLine($"! `claude plugin install` succeeded, but {pluginId} is not enabled in {userSettingsPath}.");
+                return 1;
+            }
+            anyChange = installed = true;
+            Console.WriteLine($"{Check} installed plugin {pluginId}.");
+        }
+        else
+        {
+            Console.WriteLine($"{Bullet} skipped plugin — nothing else to do without it.");
+            return 0;
+        }
+
+        // ── step 2: one wildcard allow rule for all of the plugin's tools ──
+        Console.WriteLine();
+        try
+        {
+            var res = MergeUserAllowJson(ReadIfExists(userSettingsPath), toolName);
+            if (!res.Changed)
+            {
+                Console.WriteLine($"{Check} {PluginPermission(toolName)} already allowed — no change.");
+            }
+            else if (Confirm($"Allow all of {toolName}'s tools for your user ({PluginPermission(toolName)})?", assumeYes))
+            {
+                WriteFile(userSettingsPath, res.Json);
+                anyChange = true;
+                Console.WriteLine($"{Check} allowed {PluginPermission(toolName)}.");
+            }
+            else
+            {
+                Console.WriteLine($"{Bullet} skipped allow rule.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"! could not update {userSettingsPath}: {ex.Message}");
+            rc = 1;
+        }
+
+        // ── step 3: remove the tool's old project wiring ──
+        if (paths.McpExists)
+        {
+            try
+            {
+                var res = RemoveMcpServer(File.ReadAllText(paths.McpPath), toolName);
+                if (res.Changed)
+                {
+                    Console.WriteLine();
+                    if (Confirm($"Remove the old {toolName} server from {paths.McpPath}? (the plugin replaces it)", assumeYes))
+                    {
+                        WriteFile(paths.McpPath, res.Json);
+                        anyChange = true;
+                        Console.WriteLine($"{Check} removed MCP server '{toolName}' from the project.");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"{Bullet} kept the project entry — Claude will show every {toolName} tool twice.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"! could not update {paths.McpPath}: {ex.Message}");
+                rc = 1;
+            }
+        }
+        if (paths.SettingsExists)
+        {
+            try
+            {
+                var res = RemoveProjectSettings(File.ReadAllText(paths.SettingsPath!), toolName);
+                if (res.CommandsRemoved > 0 || res.ServerEnabledRemoved)
+                {
+                    Console.WriteLine();
+                    if (Confirm($"Remove {toolName}'s old allow-list from {paths.SettingsPath}?", assumeYes))
+                    {
+                        WriteFile(paths.SettingsPath!, res.Json);
+                        anyChange = true;
+                        Console.WriteLine($"{Check} removed {res.CommandsRemoved} old allow entr{(res.CommandsRemoved == 1 ? "y" : "ies")}{(res.ServerEnabledRemoved ? " and the enabled-server flag" : "")}.");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"{Bullet} kept the old allow-list.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"! could not update {paths.SettingsPath}: {ex.Message}");
+                rc = 1;
+            }
+        }
+
+        Console.WriteLine();
+        var runHintPart = string.IsNullOrEmpty(runHint) ? "" : $" Run `{toolName} {runHint}` to start.";
+        if (rc != 0)
+            Console.WriteLine("Finished with errors — see the messages above.");
+        else if (anyChange)
+            Console.WriteLine($"Done.{(installed ? " Start a new Claude session to pick up the plugin." : "")}{runHintPart}");
+        else
+            Console.WriteLine($"Already configured — nothing to do.{runHintPart}");
+        return rc;
+    }
+
+    // The marketplace is this repository; each tool's plugin carries the tool's own name.
+    public const string MarketplaceName = "ky-ai";
+    public const string MarketplaceSource = "KY-Programming/AI";
+
+    public static string PluginId(string toolName) => $"{toolName}@{MarketplaceName}";
+
+    // Claude names a plugin server's tools mcp__plugin_<plugin>_<server>__<tool>; plugin and server
+    // are both the tool name here.
+    public static string PluginPermission(string toolName) => $"mcp__plugin_{toolName}_{toolName}__*";
+
+    // ~/.claude/settings.json, or under CLAUDE_CONFIG_DIR when Claude Code is pointed elsewhere.
+    public static string ClaudeUserSettingsPath()
+    {
+        var dir = Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR");
+        if (string.IsNullOrWhiteSpace(dir))
+            dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude");
+        return Path.Combine(dir, "settings.json");
+    }
+
+    public sealed record JsonEditResult(string Json, bool Changed);
+    public sealed record SettingsCleanupResult(string Json, int CommandsRemoved, bool ServerEnabledRemoved);
+
+    // `claude plugin install --scope user` records the plugin as enabledPlugins["<id>"] = true.
+    public static bool IsPluginEnabled(string? userSettings, string toolName) =>
+        ParseObjectOrNew(userSettings)["enabledPlugins"] is JsonObject plugins &&
+        plugins[PluginId(toolName)] is JsonValue v && v.TryGetValue<bool>(out var on) && on;
+
+    // `claude plugin marketplace add --scope user` records the marketplace under extraKnownMarketplaces.
+    public static bool IsMarketplaceKnown(string? userSettings) =>
+        ParseObjectOrNew(userSettings)["extraKnownMarketplaces"] is JsonObject known &&
+        known.ContainsKey(MarketplaceName);
+
+    public static JsonEditResult MergeUserAllowJson(string? existing, string toolName)
+    {
+        var root = ParseObjectOrNew(existing);
+        if (root["permissions"] is not JsonObject perms)
+        {
+            perms = new JsonObject();
+            root["permissions"] = perms;
+        }
+        if (perms["allow"] is not JsonArray allow)
+        {
+            allow = new JsonArray();
+            perms["allow"] = allow;
+        }
+
+        var rule = PluginPermission(toolName);
+        if (allow.Any(n => AsString(n) == rule))
+            return new JsonEditResult(root.ToJsonString(WriteOpts), false);
+        allow.Add(rule);
+        return new JsonEditResult(root.ToJsonString(WriteOpts), true);
+    }
+
+    // Removes only the tool's own server; every other server (and an emptied mcpServers) stays.
+    public static JsonEditResult RemoveMcpServer(string? existing, string toolName)
+    {
+        var root = ParseObjectOrNew(existing);
+        var removed = root[McpShape.Claude.ServersKey] is JsonObject servers && servers.Remove(toolName);
+        return new JsonEditResult(root.ToJsonString(WriteOpts), removed);
+    }
+
+    // Undoes MergeSettingsJson for one tool: its mcp__<tool>__* allow entries and its
+    // enabledMcpjsonServers flag. Rules for other tools and everything else are kept.
+    public static SettingsCleanupResult RemoveProjectSettings(string? existing, string toolName)
+    {
+        var root = ParseObjectOrNew(existing);
+        var prefix = $"mcp__{toolName}__";
+
+        var commandsRemoved = 0;
+        if (root["permissions"] is JsonObject perms && perms["allow"] is JsonArray allow)
+        {
+            foreach (var n in allow.Where(n => AsString(n)?.StartsWith(prefix, StringComparison.Ordinal) == true).ToList())
+            {
+                allow.Remove(n);
+                commandsRemoved++;
+            }
+        }
+
+        var enabledRemoved = false;
+        if (root["enabledMcpjsonServers"] is JsonArray enabled)
+        {
+            foreach (var n in enabled.Where(n => AsString(n) == toolName).ToList())
+            {
+                enabled.Remove(n);
+                enabledRemoved = true;
+            }
+        }
+
+        return new SettingsCleanupResult(root.ToJsonString(WriteOpts), commandsRemoved, enabledRemoved);
+    }
+
+    private static string? ReadIfExists(string path) => File.Exists(path) ? File.ReadAllText(path) : null;
+
+    // Resolve a command on PATH the way a shell would (PATHEXT on Windows), so a missing `claude` is
+    // reported up front instead of as a cryptic `cmd /c` exit code.
+    private static string? FindOnPath(string command)
+    {
+        var exts = OperatingSystem.IsWindows()
+            ? (Environment.GetEnvironmentVariable("PATHEXT") ?? ".EXE;.CMD;.BAT").Split(';', StringSplitOptions.RemoveEmptyEntries)
+            : [""];
+        foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            foreach (var ext in exts)
+            {
+                try
+                {
+                    var candidate = Path.Combine(dir.Trim('"'), command + ext);
+                    if (File.Exists(candidate)) return candidate;
+                }
+                catch (ArgumentException) { /* malformed PATH entry */ }
+            }
+        }
+        return null;
+    }
+
+    // Run the claude CLI with the console inherited so the user sees its output. An npm install is a
+    // .cmd shim, which only cmd.exe can start.
+    private static int RunClaude(string claudePath, string[] args)
+    {
+        var viaCmd = OperatingSystem.IsWindows() &&
+                     (claudePath.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase) ||
+                      claudePath.EndsWith(".bat", StringComparison.OrdinalIgnoreCase));
+        var psi = new System.Diagnostics.ProcessStartInfo(viaCmd ? "cmd.exe" : claudePath) { UseShellExecute = false };
+        if (viaCmd)
+        {
+            psi.ArgumentList.Add("/c");
+            psi.ArgumentList.Add(claudePath);
+        }
+        foreach (var a in args) psi.ArgumentList.Add(a);
+
+        using var p = System.Diagnostics.Process.Start(psi);
+        if (p is null) return -1;
+        p.WaitForExit();
+        return p.ExitCode;
     }
 
     private static string AgentNameList() => string.Join(" | ", AgentTargets.All.Select(a => a.Id));
@@ -495,24 +824,35 @@ public static class InitCommand
     private static void PrintHelp(string toolName, int hubPort)
     {
         Console.WriteLine($"""
-        {toolName} init — wire this tool into an AI agent's workspace (Claude Code, Cursor, or VS Code).
+        {toolName} init — wire this tool into an AI agent (Claude Code, Cursor, or VS Code).
 
-        Walks up from the current directory to find the agent's config folder, then adds the
-        {toolName} MCP server (127.0.0.1:{hubPort}) to that agent's project MCP config:
+        Claude Code (default): installs the {PluginId(toolName)} plugin for your user via the `claude`
+        CLI, so the tool is available in every project. It allows the plugin's tools in your user
+        settings ({PluginPermission(toolName)}) and removes this tool's old entries from the nearest
+        .mcp.json and .claude/settings.local.json, which would otherwise show every tool twice.
+        Run it in any project; once the plugin is installed it only tidies up.
+
+        Cursor / VS Code, or Claude with --no-plugin: walks up from the current directory to find the
+        agent's config folder, then adds the {toolName} MCP server (127.0.0.1:{hubPort}) to that
+        agent's project MCP config:
             claude   .mcp.json   (+ allows its commands in .claude/settings.local.json)
             cursor   .cursor/mcp.json
             vscode   .vscode/mcp.json
+
         Each step prompts only when it would change the file (an already-configured step just reports
         "no change"); writes merge into existing files and are safe to re-run.
 
           {toolName} init [options]
             --agent <name>   {AgentNameList()}. Default: auto-detect from the workspace and confirm
                              via an interactive picker (under -y / piped input the detected one is used)
+            --no-plugin      Claude only: wire this project via .mcp.json instead of the plugin
+                             (refused while the plugin is enabled)
             -y, --yes        Accept all prompts (non-interactive)
             --dir <path>     Start the search from <path> instead of the current directory
+            --print-agent    Print the agent auto-detection picks (for scripts) and exit
             -h, --help       Show this help
 
-        Run it once per tool in a full-stack repo; each merges into the same shared files.
+        `ky-ai-updater init` runs this for every installed ky-ai tool at once.
         """);
     }
 }
@@ -524,6 +864,7 @@ public static class InitCommand
 // MarkerDir is the agent's config folder, used both to detect the agent and to place its files.
 // McpInMarkerDir is true when the MCP config sits inside MarkerDir (Cursor/VS Code: `.cursor/mcp.json`);
 // it's false for Claude, whose `.mcp.json` lives at the project root beside `.claude/`.
+// HasPlugin marks an agent that `init` wires via a user-scope plugin by default (Claude Code only).
 public sealed record AgentTarget(
     string Id,
     string DisplayName,
@@ -531,7 +872,8 @@ public sealed record AgentTarget(
     bool McpInMarkerDir,
     string McpFileName,
     McpShape Shape,
-    bool HasAllowList);
+    bool HasAllowList,
+    bool HasPlugin = false);
 
 // The ways an MCP server entry is written across agents:
 //   • ServersKey  — the top-level object holding servers ("mcpServers", or "servers" for VS Code)
@@ -551,7 +893,7 @@ public sealed record McpShape(string ServersKey, bool IncludeType, string UrlKey
 public static class AgentTargets
 {
     public static readonly AgentTarget Claude = new(
-        "claude", "Claude Code", ".claude", McpInMarkerDir: false, ".mcp.json", McpShape.Claude, HasAllowList: true);
+        "claude", "Claude Code", ".claude", McpInMarkerDir: false, ".mcp.json", McpShape.Claude, HasAllowList: true, HasPlugin: true);
     public static readonly AgentTarget Cursor = new(
         "cursor", "Cursor", ".cursor", McpInMarkerDir: true, "mcp.json", McpShape.Cursor, HasAllowList: false);
     public static readonly AgentTarget VsCode = new(

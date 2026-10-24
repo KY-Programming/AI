@@ -119,7 +119,9 @@ One config per frontend either way; the MCP hub auto-starts, so there's no separ
 
 **`ky-ai-ng init` wires it into your agent for you** — it targets **Claude Code, Cursor, or
 VS Code**. Choose with `--agent <claude|cursor|vscode>`, or omit it to auto-detect the agent your
-workspace already uses and confirm via an interactive picker.
+workspace already uses and confirm via an interactive picker. For Claude Code it installs the
+`ky-ai-ng` plugin for your user rather than writing project files (see
+[Claude Code plugins](../../README.md#claude-code-plugins)); `--no-plugin` keeps the project wiring below.
 
 To wire it by hand instead, the per-agent files are:
 

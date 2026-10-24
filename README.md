@@ -96,21 +96,46 @@ instances first.
 
 ### Wire your agent
 
-Run each tool's `init` command once, from anywhere in your workspace — it registers the tool's MCP
-server with your agent and allows its tools, detecting your agent and writing the right config for it
-(Claude Code, Cursor, or VS Code). It auto-detects from the workspace (override with
-`--agent <claude|cursor|vscode>`), merges into existing files, and is safe to re-run:
+Wire every installed tool at once with the updater (it asks once, then runs each tool's own `init`):
 
 ```powershell
-ky-ai-ng init
-ky-ai-dotnet init
-ky-ai-terminal init
-ky-ai-browser init
-ky-ai-wpf init
+ky-ai-updater init
 ```
+
+Or run a single tool's `init`, from anywhere in your workspace — `ky-ai-ng init`, `ky-ai-dotnet init`,
+and so on. It detects your agent (override with `--agent <claude|cursor|vscode>`), prompts only for
+what's missing, and is safe to re-run.
+
+- **Claude Code:** `init` installs the tool's **Claude Code plugin** for your user, so the tool is
+  available in every project with no per-project setup. It allows the plugin's tools in your user
+  settings and removes the tool's old entries from the current project. Running a plain `init` in
+  another project later just does that cleanup. It needs the `claude` CLI on your `PATH`.
+- **Cursor / VS Code:** `init` adds the tool's MCP server to the project's MCP config.
 
 To wire an agent by hand instead, each tool's README has the exact MCP entry, the full tool
 allow-list, and the Rider run-configuration setup.
+
+#### Claude Code plugins
+
+This repository is a plugin marketplace (`ky-ai`) with one plugin per tool. Each plugin starts
+`<tool> connect` from your `PATH`. Things to know:
+
+- **Why plugins.** Claude Desktop was seen dropping project `.mcp.json` servers at the end of a
+  turn and never reconnecting them, though the hubs were fine; the agent then reported the tools
+  as unavailable until everything was restarted. Plugin servers don't have that problem.
+- **Plugin or project entry, never both.** Both would be loaded and every tool would show up
+  twice. That's why `init` removes the project entry and `init --no-plugin` (the old per-project
+  wiring) refuses while the plugin is enabled. Use `--no-plugin` for a project that pins its own
+  tool version, since the plugin always runs the one on `PATH`.
+- **Tool names differ.** Plugin tools are called `mcp__plugin_<plugin>_<server>__<tool>`, for
+  example `mcp__plugin_ky-ai-ng_ky-ai-ng__list`. `init` allows them with one wildcard rule,
+  `mcp__plugin_ky-ai-ng_ky-ai-ng__*`, which also covers tools added in later versions.
+- **No version on purpose.** Claude Code tracks the plugins by git commit, and they only point at
+  the tools, so they don't need a release of their own. The `version` warning from
+  `claude plugin validate` is expected.
+- **Testing a local checkout:** `claude plugin marketplace add ./KY.AI` before running `init`. Claude
+  reads that marketplace straight from the folder, and `init` won't replace a marketplace that is
+  already known.
 
 ### Run your project
 
@@ -177,6 +202,7 @@ A `dotnet tool install --tool-path <dir>` install (or the copy in the NuGet glob
 ```
 src/        tool projects: Serve (shared engine) · Ng · Net · Browser · Terminal · Wpf · Updater (+ *.Tests)
 scripts/    pack / publish / dist / version automation (dependency-free C# scripts)
+plugins/    optional Claude Code plugins, one per tool (marketplace: .claude-plugin/marketplace.json)
 artifacts/  packed NuGet + npm packages — scripts\pack.cmd output (git-ignored)
 dist/       runnable local build for testing — scripts\dist.cmd output (git-ignored; put on PATH)
 ```
