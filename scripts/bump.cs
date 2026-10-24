@@ -48,7 +48,7 @@ static int Bump(string[] args)
     if (reqs is null)
     {
         Console.WriteLine("Cancelled — nothing written.");
-        return 0;
+        return 1;
     }
     if (reqs.Count == 0)
         return 0;   // interactive "keep" / nothing to bump — already reported
@@ -231,7 +231,7 @@ static string Next(string[] args, ref int i, string flag)
 
 // Default path when bump runs with no arguments (e.g. a bare scripts\bump.cmd):
 // select one or more projects (arrows + space), choose one bump part for all (arrows + enter), apply.
-// With nothing selected, Enter bumps the focused project. Returns null if cancelled, an empty list
+// With nothing selected, Enter bumps the focused project. Returns null if cancelled or refused, an empty list
 // when there's nothing to bump (e.g. "keep" chosen, so a re-run of _all.cmd continues at the
 // current versions).
 static List<BumpRequest>? Interactive(string root)

@@ -60,3 +60,6 @@ nunit-*.xml
 
 # Aggregated publish output (all KY.AI tool exes, shared on PATH)
 dist/
+project.md
+*.todo.md
+*.idea.md
