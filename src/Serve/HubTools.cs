@@ -50,7 +50,10 @@ internal static class HubTools
         "verdict comes back right away as status failed with `exitCode` set and `settledBy` naming the " +
         "exit; its last output lines (`summary`/`tail`) usually say why. A process that could not be " +
         "started at all is failed too, with `settledBy` naming the start error. status `stopped` means " +
-        "the build in flight was cut short by `stop`/`restart` and has no verdict of its own. This verdict — not a build you run " +
+        "the build in flight was cut short by `stop`/`restart` and has no verdict of its own. status " +
+        "`restart_required` means the dev server cannot apply a change and waits for a restart (a rude " +
+        "edit or a changed package reference; `settledBy` and `diagnostics` name it) — call `restart`, " +
+        "waiting again will not change it. This verdict — not a build you run " +
         "yourself — is authoritative: the dev server already rebuilds on every save, so never invoke the " +
         "underlying build directly (`dotnet build`, `ng build`, `npm run build`) while it is running. On " +
         ".NET that build fails with MSB3021/MSB3027 (`being used by another process`) because the running " +
@@ -70,8 +73,8 @@ internal static class HubTools
         "that crashes on start returns at once as failed with `exitCode` set, one that cannot be started " +
         "at all as failed with the start error in `settledBy`. Only needed " +
         "for changes the dev server does not hot-reload (config/build files, new dependencies), when the " +
-        "dev server itself reports it cannot apply a change (e.g. `dotnet watch ⚠ Press \"Ctrl + R\" to " +
-        "restart` after a new type or a rude edit), or when it is wedged. A build error you produced by " +
+        "build status is `restart_required` (the dev server itself reports it cannot apply a change, e.g. " +
+        "a rude edit or a changed package reference), or when it is wedged. A build error you produced by " +
         "running a build yourself is never the reason — read `status`/`tail` for what the dev server " +
         "already reported and act on that. Use this instead of killing and relaunching the process " +
         "yourself. Omit project when only one is registered.")]

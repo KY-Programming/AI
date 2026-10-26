@@ -388,6 +388,55 @@ public class BuildTrackerTests
         Assert.Equal(reason, r.SettledBy);
     }
 
+    // A rude edit: dotnet watch reports it, then waits for a restart that only a human/agent triggers.
+    [Fact]
+    public async Task A_change_that_needs_a_restart_settles_as_restart_required_so_the_wait_returns_at_once()
+    {
+        var t = new BuildTracker(new DotnetBuildMatcher());
+        t.Observe("dotnet watch ⌚ File changed: ./Models/StoryFile.cs");
+        t.Observe(@"dotnet watch ❌ C:\proj\StoryFile.cs(17,1): error ENC0033: Deleting const field 'placePrefix' requires restarting the application.");
+        t.Observe("dotnet watch ❌ error ENC1099: Changing project or package reference requires restarting the application.");
+        t.Observe("dotnet watch ⚠ Press \"Ctrl + R\" to restart.");
+
+        var r = await t.WaitForSettleAsync(timeoutMs: 5000, quietMs: 50);
+
+        Assert.False(r.TimedOut);
+        Assert.Equal("restart_required", r.Status);
+        Assert.False(r.Building);
+        Assert.Contains("ENC0033", r.SettledBy);          // the first reason wins
+        Assert.Equal(2, r.Errors);                         // the prompt line is no diagnostic
+        Assert.Equal(@"C:\proj\StoryFile.cs", r.Diagnostics[0].File);
+        Assert.Null(r.Diagnostics[1].File);
+    }
+
+    [Fact]
+    public void A_restart_after_restart_required_starts_a_fresh_build()
+    {
+        var t = new BuildTracker(new DotnetBuildMatcher());
+        t.Observe("dotnet watch ❌ error ENC1099: Changing project or package reference requires restarting the application.");
+
+        t.MarkStopped();                          // restart: the old process goes away …
+        t.MarkBuilding();                         // … and the new one starts building
+
+        var r = t.Snapshot();
+        Assert.Equal("building", r.Status);
+        Assert.Equal(0, r.Errors);
+        Assert.Null(r.SettledBy);
+    }
+
+    [Fact]
+    public void A_failed_build_waiting_for_a_change_settles_as_failed()
+    {
+        var t = new BuildTracker(new DotnetBuildMatcher());
+        t.Observe("dotnet watch ⌚ File changed: ./Program.cs");
+        t.Observe(@"C:\proj\Program.cs(3,1): error CS0103: The name 'foo' does not exist");
+        t.Observe("dotnet watch ❌ Waiting for a file to change before restarting dotnet...");
+
+        var r = t.Snapshot();
+        Assert.Equal("failed", r.Status);
+        Assert.Equal(1, r.Errors);
+    }
+
     [Fact]
     public void A_new_build_clears_the_previous_exit()
     {

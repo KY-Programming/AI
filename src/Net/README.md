@@ -218,9 +218,11 @@ holds its own `.exe`/`.dll` locked. That lock error says nothing about your code
 the verdict.
 
 **When to `restart`:** `dotnet watch` hot-reloads code, so restart only for changes it can't apply
-(new files, `.csproj` / config changes, rude edits) or a wedged process. The signal is `dotnet watch`
-itself saying so — `⚠ Press "Ctrl + R" to restart`, visible via `status`/`tail` — not a locked-output
-error from a build you ran on the side.
+(new files, `.csproj` / config changes, rude edits) or a wedged process. The signal is the build
+status **`restart_required`** — `dotnet watch` itself saying a change "requires restarting the
+application" (e.g. `ENC0033`, or `ENC1099` after a package update) or `⚠ Press "Ctrl + R" to restart`
+— not a locked-output error from a build you ran on the side. `wait_for_build` returns that status at
+once; waiting again won't change it, only a `restart` does.
 
 ## Build verdict
 
@@ -228,6 +230,11 @@ Detection keys off `dotnet watch` / ASP.NET host phrasing:
 
 - **success** — `Application started` / `Now listening on` / `Hot reload of changes succeeded`
 - **failed** — `Build FAILED` / `Waiting for a file to change before restarting`
+- **restart_required** — `requires restarting the application` / `Press "Ctrl + R" to restart`;
+  the `ENC…` line is also counted as an error diagnostic (without a location for `ENC1099`)
+
+The failed and restart phrases both contain "restarting", so they are matched before the build-start
+phrase `Restarting` — otherwise they read as a new build that never settles (`building` forever).
 - **errors** — lines containing `: error ` (counted only during a build, so runtime log lines that
   mention "error" don't inflate the count)
 - **warnings** — lines containing `: warning ` (same build-only guard), surfaced as

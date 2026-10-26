@@ -133,6 +133,10 @@ public class BuildMatcherTests
     [InlineData("dotnet watch ⌚ File changed: ./Program.cs", LineKind.BuildStart)]
     [InlineData("Now listening on: http://localhost:5000", LineKind.SettledSuccess)]
     [InlineData("Build FAILED.", LineKind.SettledFailed)]
+    [InlineData("dotnet watch ❌ Waiting for a file to change before restarting dotnet...", LineKind.SettledFailed)]
+    [InlineData(@"dotnet watch ❌ C:\proj\StoryFile.cs(17,1): error ENC0033: Deleting const field 'placePrefix' requires restarting the application.", LineKind.RestartRequired)]
+    [InlineData("dotnet watch ❌ error ENC1099: Changing project or package reference caused the identity of referenced assembly to change from 'A, Version=1.0.0.0' to 'A, Version=1.0.1.0', which requires restarting the application.", LineKind.RestartRequired)]
+    [InlineData("dotnet watch ⚠ Press \"Ctrl + R\" to restart.", LineKind.RestartRequired)]
     public void Dotnet_classify_unconditional(string line, LineKind expected)
         => Assert.Equal(expected, new DotnetBuildMatcher().Classify(line, building: true));
 
@@ -170,4 +174,31 @@ public class BuildMatcherTests
             @"C:\proj\File.cs(9,1): warning CS0168: 'x' is declared but never used");
         Assert.Equal("warning", d!.Severity);
     }
+
+    [Fact]
+    public void Dotnet_strips_the_dotnet_watch_prefix_from_the_file()
+    {
+        var d = new DotnetBuildMatcher().TryParseDiagnostic(
+            @"dotnet watch ⚠ C:\proj\File.cs(9,1): warning CS0168: 'x' is declared but never used [C:\proj\proj.csproj]");
+
+        Assert.Equal(@"C:\proj\File.cs", d!.File);
+        Assert.Equal(9, d.Line);
+    }
+
+    [Fact]
+    public void Dotnet_parses_a_diagnostic_without_location()
+    {
+        var d = new DotnetBuildMatcher().TryParseDiagnostic(
+            "dotnet watch ❌ error ENC1099: Changing project or package reference requires restarting the application.");
+
+        Assert.NotNull(d);
+        Assert.Equal("error", d!.Severity);
+        Assert.Null(d.File);
+        Assert.Null(d.Line);
+        Assert.Equal("Changing project or package reference requires restarting the application.", d.Message);
+    }
+
+    [Fact]
+    public void Dotnet_restart_prompt_is_not_a_diagnostic()
+        => Assert.Null(new DotnetBuildMatcher().TryParseDiagnostic("dotnet watch ⚠ Press \"Ctrl + R\" to restart."));
 }

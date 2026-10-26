@@ -46,6 +46,10 @@ Loopback-only — nothing is exposed off the machine. See the
   crash (`Exited`) → `failed` with `exitCode`; a failed `Process.Start()` → `failed` with the start
   error in `settledBy`, and the supervisor stays up instead of throwing; our own stop mid-build →
   `stopped`. A new path that ends the child needs the same.
+- **A dev server that waits for a restart must settle too.** When the CLI says it can't apply a
+  change until restarted (dotnet watch rude edits), no line will ever settle the cycle, so the
+  matcher reports `RestartRequired` and the tracker settles `restart_required` — a verdict that
+  tells the agent to call `restart` instead of a `timedOut` that reads like a hung hub.
 - **"We stopped it" vs. "it died" is told apart by identity alone.** Every intentional stop (`stop`,
   the old process of a `restart`) goes through `StopChildNoGateAsync`, which nulls `_child` *before*
   killing. The `Exited` handler ignores any process that is no longer `_child`. Keep that order, and

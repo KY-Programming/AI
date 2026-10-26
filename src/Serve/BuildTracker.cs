@@ -2,11 +2,12 @@ using System.Diagnostics;
 
 namespace KY.AI.Serve;
 
-internal enum BuildStatus { Unknown, Building, Success, Failed, Stopped }
+internal enum BuildStatus { Unknown, Building, Success, Failed, Stopped, RestartRequired }
 
 // The settled (or in-progress) result of a dev-server build, as observed from the output stream.
 //   status            — unknown | building | success | failed | stopped (a build in flight was cut
-//                       short by stop/restart, so it has no verdict of its own)
+//                       short by stop/restart, so it has no verdict of its own) | restart_required
+//                       (the dev server can't apply a change and waits for a restart; settledBy names why)
 //   building         — a (re)build is currently running
 //   pending           — a source file changed that the latest build hasn't incorporated yet
 //   seq               — increments per build, so callers can tell builds apart
@@ -203,6 +204,9 @@ internal sealed class BuildTracker
                 case LineKind.SettledFailed:
                     Settle(BuildStatus.Failed, line);
                     break;
+                case LineKind.RestartRequired:
+                    RequireRestart(line);
+                    break;
                 default:
                     // A non-diagnostic line may still be the standalone location for the open
                     // diagnostic (esbuild prints "src/x.ts:12:34:" on the line after the message).
@@ -270,6 +274,18 @@ internal sealed class BuildTracker
         FinishNoLock(status, line.Trim());
     }
 
+    // The dev server gave up on applying a change and waits for a restart. No later line settles the
+    // cycle on its own, so this is a verdict — a wait returns instead of sitting out its timeout. The
+    // first such line stays settledBy; each one carrying a diagnostic (one per rude edit) is counted.
+    private void RequireRestart(string line)
+    {
+        if (_status != BuildStatus.RestartRequired) FinishNoLock(BuildStatus.RestartRequired, line.Trim());
+        if (_matcher.TryParseDiagnostic(line) is null) return;
+        _errors++;
+        if (_errorLines.Count < LineCap) _errorLines.Add(line.Trim());
+        RecordDiagnostic(line, "error");
+    }
+
     private void FinishNoLock(BuildStatus status, string? settledBy)
     {
         _sw.Stop();
@@ -295,7 +311,7 @@ internal sealed class BuildTracker
             lock (_sync)
             {
                 snap = SnapshotNoLock();
-                ready = _status is BuildStatus.Success or BuildStatus.Failed or BuildStatus.Stopped && !PendingNoLock();
+                ready = _status is BuildStatus.Success or BuildStatus.Failed or BuildStatus.Stopped or BuildStatus.RestartRequired && !PendingNoLock();
                 seq = _seq;
             }
 
@@ -338,7 +354,7 @@ internal sealed class BuildTracker
         var files = _attributed.Count > LineCap ? _attributed.Take(LineCap).ToList() : _attributed.ToList();
         var (stale, hint) = StaleNoLock(files);
         return new(
-            _status.ToString().ToLowerInvariant(),
+            _status == BuildStatus.RestartRequired ? "restart_required" : _status.ToString().ToLowerInvariant(),
             _status == BuildStatus.Building,
             PendingNoLock(),
             _errors,

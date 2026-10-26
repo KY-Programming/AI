@@ -9,6 +9,8 @@ public enum LineKind
     Warning,         // a non-fatal diagnostic worth surfacing (deprecations, etc.)
     SettledSuccess,  // the build finished successfully
     SettledFailed,   // the build finished with a failure
+    RestartRequired, // the dev server can't apply a change and waits for a restart (rude edit, changed
+                     // package reference); nothing settles until someone restarts it
 }
 
 // A structured compiler diagnostic parsed from build output. Location fields are null when the
